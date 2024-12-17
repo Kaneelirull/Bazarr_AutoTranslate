@@ -1,15 +1,8 @@
 import requests
 from urllib.parse import quote  # Import for URL encoding
 
-# ANSI Escape Color Codes
-GREEN = "\033[92m"   # Bright Green for [INFO]
-YELLOW = "\033[93m"  # Bright Yellow for [DEBUG]
-RED = "\033[91m"     # Bright Red for [WARNING]
-BOLD_RED = "\033[1;91m"  # Bold Bright Red for [ERROR]
-RESET = "\033[0m"    # Reset to default terminal color
-
 # Bazarr Configuration
-BAZARR_HOSTNAME = "localhost:1337"  # Update your hostname here
+BAZARR_HOSTNAME = "Localhost:1337"  # Update your hostname here
 BAZARR_APIKEY = "BAZARR_APIKEY"
 
 # Language preferences
@@ -27,20 +20,20 @@ def get_api_url(endpoint):
 def fetch_items(item_type, wanted_endpoint):
     """Fetch the list of wanted episodes or movies."""
     url = get_api_url(wanted_endpoint)
-    print(f"{YELLOW}[DEBUG] Fetching items from URL: {url}{RESET}")
+    print(f"[DEBUG] Fetching items from URL: {url}")
     try:
         response = requests.get(url, headers=HEADERS)
-        print(f"{YELLOW}[DEBUG] Response status code: {response.status_code}{RESET}")
+        print(f"[DEBUG] Response status code: {response.status_code}")
         if response.status_code == 200:
             items = response.json().get("data", [])
-            print(f"{GREEN}[INFO] Fetched {len(items)} {item_type}(s).{RESET}")
+            print(f"[INFO] Fetched {len(items)} {item_type}(s).")
             return items
         else:
-            print(f"{RED}[WARNING] Failed to fetch {item_type}: {response.status_code}{RESET}")
-            print(f"{YELLOW}[DEBUG] Response text: {response.text}{RESET}")
+            print(f"[WARNING] Failed to fetch {item_type}: {response.status_code}")
+            print(f"[DEBUG] Response text: {response.text}")
             return []
     except requests.RequestException as e:
-        print(f"{BOLD_RED}[ERROR] Exception occurred while fetching {item_type}: {e}{RESET}")
+        print(f"[ERROR] Exception occurred while fetching {item_type}: {e}")
         return []
 
 
@@ -59,19 +52,19 @@ def download_subtitles(item_type, item_id, params_field, language="en", series_i
     
     constructed_url = f"{url}?{query_params}"
 
-    print(f"{YELLOW}[DEBUG] Attempting to download {language} subtitles from URL: {constructed_url}{RESET}")
+    print(f"[DEBUG] Attempting to download {language} subtitles from URL: {constructed_url}")
     try:
         response = requests.patch(constructed_url, headers=HEADERS)
-        print(f"{YELLOW}[DEBUG] Response status code: {response.status_code}{RESET}")
+        print(f"[DEBUG] Response status code: {response.status_code}")
         if response.status_code == 204:
-            print(f"{GREEN}[INFO] Subtitles in language '{language}' successfully downloaded for {item_type} (ID: {item_id}).{RESET}")
+            print(f"[INFO] Subtitles in language '{language}' successfully downloaded for {item_type} (ID: {item_id}).")
             return True
         else:
-            print(f"{RED}[WARNING] Failed to download subtitles in language '{language}'. Response Code: {response.status_code}{RESET}")
-            print(f"{YELLOW}[DEBUG] Response text: {response.text}{RESET}")
+            print(f"[WARNING] Failed to download subtitles in language '{language}'. Response Code: {response.status_code}")
+            print(f"[DEBUG] Response text: {response.text}")
             return False
     except requests.RequestException as e:
-        print(f"{BOLD_RED}[ERROR] Exception occurred while trying to download subtitles in language '{language}': {e}{RESET}")
+        print(f"[ERROR] Exception occurred while trying to download subtitles in language '{language}': {e}")
         return False
 
 
@@ -79,10 +72,10 @@ def fetch_subtitle_path(item_type, item_id, params_field):
     """Retrieve the path of English subtitles for a given item and URL encode it."""
     url = get_api_url(item_type)
     constructed_url = f"{url}?{params_field}%5B%5D={item_id}"
-    print(f"{YELLOW}[DEBUG] Fetching subtitle path from URL: {constructed_url}{RESET}")
+    print(f"[DEBUG] Fetching subtitle path from URL: {constructed_url}")
     try:
         response = requests.get(constructed_url, headers=HEADERS)
-        print(f"{YELLOW}[DEBUG] Response status code: {response.status_code}{RESET}")
+        print(f"[DEBUG] Response status code: {response.status_code}")
         if response.status_code == 200:
             history = response.json()
             for item in history["data"]:
@@ -91,20 +84,20 @@ def fetch_subtitle_path(item_type, item_id, params_field):
                         if subtitle.get("code2") == "en":  # Look for English subtitles
                             raw_path = subtitle["path"]
                             encoded_path = quote(raw_path, safe="")  # URL encode the path
-                            print(f"{GREEN}[INFO] Found and URL-encoded subtitle path:\n - Raw: {raw_path}\n - Encoded: {encoded_path}{RESET}")
+                            print(f"[INFO] Found and URL-encoded subtitle path:\n - Raw: {raw_path}\n - Encoded: {encoded_path}")
                             return encoded_path
         else:
-            print(f"{RED}[WARNING] Failed to fetch subtitle path. Response Code: {response.status_code}{RESET}")
-            print(f"{YELLOW}[DEBUG] Response text: {response.text}{RESET}")
+            print(f"[WARNING] Failed to fetch subtitle path. Response Code: {response.status_code}")
+            print(f"[DEBUG] Response text: {response.text}")
     except requests.RequestException as e:
-        print(f"{BOLD_RED}[ERROR] Exception occurred while fetching subtitle path: {e}{RESET}")
+        print(f"[ERROR] Exception occurred while fetching subtitle path: {e}")
     return None
 
 
 def translate_subtitle(item_type, item_id, subs_path, target_lang):
     """Translate subtitles to the specified target language."""
     if not target_lang:
-        print(f"{YELLOW}[DEBUG] Target language not specified. Skipping translation for item_type: {item_type}, item_id: {item_id}.{RESET}")
+        print(f"[DEBUG] Target language not specified. Skipping translation for item_type: {item_type}, item_id: {item_id}.")
         return False
 
     # Convert item_type to singular form for the API call
@@ -115,24 +108,40 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang):
         f"{url}?action=translate&language={target_lang}&path={subs_path}&type={singular_item_type}&id={item_id}&forced=false&hi=false"
     )
 
-    print(f"{YELLOW}[DEBUG] Attempting to translate subtitles for item ID: {item_id} to {target_lang}.{RESET}")
+    # Additional debug information about the parameters being passed
+    print(f"[DEBUG] translate_subtitle called with:")
+    print(f"    - item_type: {item_type}")
+    print(f"    - singular_item_type: {singular_item_type}")
+    print(f"    - item_id: {item_id}")
+    print(f"    - subs_path (URL-encoded): {subs_path}")
+    print(f"    - target_lang: {target_lang}")
+    print(f"    - Constructed URL: {constructed_url}")
+
     try:
         response = requests.patch(constructed_url, headers=HEADERS)
-        print(f"{YELLOW}[DEBUG] Response status code: {response.status_code}{RESET}")
+        print(f"[DEBUG] Response status code: {response.status_code}")
         if response.status_code == 204:
-            print(f"{GREEN}[INFO] Subtitles translated successfully to {target_lang} for {singular_item_type} (ID: {item_id}).{RESET}")
+            print(f"[INFO] Subtitles translated successfully to {target_lang} for {singular_item_type} (ID: {item_id}).")
             return True
         else:
-            print(f"{RED}[WARNING] Failed to translate subtitles. Response Code: {response.status_code}{RESET}")
-            print(f"{YELLOW}[DEBUG] Response text: {response.text}{RESET}")
+            print(f"[WARNING] Failed to translate subtitles. Response Code: {response.status_code}")
+            print(f"[DEBUG] Response text: {response.text}")
             return False
     except requests.RequestException as e:
-        print(f"{BOLD_RED}[ERROR] Exception occurred while translating subtitles for {singular_item_type} (ID: {item_id}): {e}{RESET}")
+        print(f"[ERROR] Exception occurred while translating subtitles for {singular_item_type} (ID: {item_id}): {e}")
         return False
 
 
 def process_item(item, item_type, id_field, params_field):
     """Process a single item: Determine missing subtitles, download, and translate."""
+
+    # ANSI Escape Color Codes
+    GREEN = "\033[92m"   # Bright Green for [INFO]
+    YELLOW = "\033[93m"  # Bright Yellow for [DEBUG]
+    RED = "\033[91m"     # Bright Red for [WARNING]
+    BOLD_RED = "\033[1;91m"  # Bold Bright Red for [ERROR]
+    RESET = "\033[0m"    # Reset to default terminal color
+
     item_id = item[id_field]
     item_name = item.get("seriesTitle", item.get("title", "Unknown Item"))
     series_id = item.get("sonarrSeriesId") if item_type == "episodes" else None  # Extract 'seriesid' for episodes
@@ -179,12 +188,11 @@ def process_item(item, item_type, id_field, params_field):
     elif SECOND_LANG:
         print(f"{GREEN}[INFO] Subtitles in {SECOND_LANG} already exist for {item_name}.{RESET}")
 
-
 def process_items(item_type, wanted_endpoint, id_field, params_field):
     """Process all wanted items of a specified type (episodes or movies)."""
     items = fetch_items(item_type, wanted_endpoint)
     if not items:
-        print(f"{GREEN}[INFO] No {item_type} items found to process.{RESET}")
+        print(f"[INFO] No {item_type} items found to process.")
         return
 
     for item in items:
@@ -212,10 +220,10 @@ def translate_movie_subs():
 
 
 def main():
-    print(f"{GREEN}[INFO] Starting subtitle processing...{RESET}")
+    print("[INFO] Starting subtitle processing...")
     translate_movie_subs()
     translate_episode_subs()
-    print(f"{GREEN}[INFO] Subtitle processing completed.{RESET}")
+    print("[INFO] Subtitle processing completed.")
 
 
 if __name__ == "__main__":
