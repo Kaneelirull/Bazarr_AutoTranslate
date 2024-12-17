@@ -1,6 +1,10 @@
 import requests
 import time  # Import the time module
 from urllib.parse import quote  # Import for URL encoding
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Set how many translations to run in parallel
+MAX_PARALLEL_TRANSLATIONS = 3
 
 # Bazarr Configuration
 BAZARR_HOSTNAME = "Localhost:1337"  # Update your hostname here
@@ -245,14 +249,29 @@ def process_item(item, item_type, id_field, params_field):
 
 
 def process_items(item_type, wanted_endpoint, id_field, params_field):
-    """Process all wanted items of a specified type (episodes or movies)."""
+    """Process all wanted items of a specified type (episodes or movies) with parallel processing."""
     items = fetch_items(item_type, wanted_endpoint)
     if not items:
         print(f"[INFO] No {item_type} items found to process.")
         return
 
-    for item in items:
-        process_item(item, item_type, id_field, params_field)
+    # Use ThreadPoolExecutor for parallel processing
+    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_TRANSLATIONS) as executor:
+        # Submit tasks to ThreadPoolExecutor
+        future_to_item = {
+            executor.submit(process_item, item, item_type, id_field, params_field): item for item in items
+        }
+
+        # As each task completes, log the results or handle exceptions
+        for future in as_completed(future_to_item):
+            item = future_to_item[future]
+            item_name = item.get("seriesTitle", item.get("title", "Unknown Item"))
+            try:
+                # This will raise an exception if the task threw one
+                future.result()
+                print(f"[INFO] Successfully finished processing item: {item_name}")
+            except Exception as e:
+                print(f"[ERROR] Failed to process item: {item_name}. Exception: {e}")
 
 
 def translate_episode_subs():
