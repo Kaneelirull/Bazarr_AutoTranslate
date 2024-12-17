@@ -50,7 +50,6 @@ Note: Code assumses that you have 3 languages set in profile, english being one 
 - [Functions](#functions)
   - [Main Workflow](#main-workflow)
   - [Helper Functions](#helper-functions)
-- [Color-coded Logs](#color-coded-logs)
 - [License](#license)
 
 ---
