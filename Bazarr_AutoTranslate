@@ -1,0 +1,222 @@
+import requests
+from urllib.parse import quote  # Import for URL encoding
+
+# ANSI Escape Color Codes
+GREEN = "\033[92m"   # Bright Green for [INFO]
+YELLOW = "\033[93m"  # Bright Yellow for [DEBUG]
+RED = "\033[91m"     # Bright Red for [WARNING]
+BOLD_RED = "\033[1;91m"  # Bold Bright Red for [ERROR]
+RESET = "\033[0m"    # Reset to default terminal color
+
+# Bazarr Configuration
+BAZARR_HOSTNAME = "localhost:1337"  # Update your hostname here
+BAZARR_APIKEY = "BAZARR_APIKEY"
+
+# Language preferences
+FIRST_LANG = "et"  # Primary target language
+SECOND_LANG = "sv"  # Secondary target language (optional)
+
+HEADERS = {"Accept": "application/json", "X-API-KEY": BAZARR_APIKEY}
+
+
+def get_api_url(endpoint):
+    """Construct the full API URL for a given endpoint."""
+    return f"http://{BAZARR_HOSTNAME}/api/{endpoint}"
+
+
+def fetch_items(item_type, wanted_endpoint):
+    """Fetch the list of wanted episodes or movies."""
+    url = get_api_url(wanted_endpoint)
+    print(f"{YELLOW}[DEBUG] Fetching items from URL: {url}{RESET}")
+    try:
+        response = requests.get(url, headers=HEADERS)
+        print(f"{YELLOW}[DEBUG] Response status code: {response.status_code}{RESET}")
+        if response.status_code == 200:
+            items = response.json().get("data", [])
+            print(f"{GREEN}[INFO] Fetched {len(items)} {item_type}(s).{RESET}")
+            return items
+        else:
+            print(f"{RED}[WARNING] Failed to fetch {item_type}: {response.status_code}{RESET}")
+            print(f"{YELLOW}[DEBUG] Response text: {response.text}{RESET}")
+            return []
+    except requests.RequestException as e:
+        print(f"{BOLD_RED}[ERROR] Exception occurred while fetching {item_type}: {e}{RESET}")
+        return []
+
+
+def download_subtitles(item_type, item_id, params_field, language="en", series_id=None):
+    """
+    Download subtitles for a given item (episode or movie) in the specified language.
+    Adds seriesid for episodes if required.
+    """
+    url = get_api_url(f"{item_type}/subtitles")
+    
+    # Construct the query parameters dynamically
+    if item_type == "episodes" and series_id:  # Episodes require 'seriesid' and 'episodeid'
+        query_params = f"seriesid={series_id}&{params_field}={item_id}&language={language}&forced=false&hi=false"
+    else:  # Movies only require 'radarrid'
+        query_params = f"{params_field}={item_id}&language={language}&forced=false&hi=false"
+    
+    constructed_url = f"{url}?{query_params}"
+
+    print(f"{YELLOW}[DEBUG] Attempting to download {language} subtitles from URL: {constructed_url}{RESET}")
+    try:
+        response = requests.patch(constructed_url, headers=HEADERS)
+        print(f"{YELLOW}[DEBUG] Response status code: {response.status_code}{RESET}")
+        if response.status_code == 204:
+            print(f"{GREEN}[INFO] Subtitles in language '{language}' successfully downloaded for {item_type} (ID: {item_id}).{RESET}")
+            return True
+        else:
+            print(f"{RED}[WARNING] Failed to download subtitles in language '{language}'. Response Code: {response.status_code}{RESET}")
+            print(f"{YELLOW}[DEBUG] Response text: {response.text}{RESET}")
+            return False
+    except requests.RequestException as e:
+        print(f"{BOLD_RED}[ERROR] Exception occurred while trying to download subtitles in language '{language}': {e}{RESET}")
+        return False
+
+
+def fetch_subtitle_path(item_type, item_id, params_field):
+    """Retrieve the path of English subtitles for a given item and URL encode it."""
+    url = get_api_url(item_type)
+    constructed_url = f"{url}?{params_field}%5B%5D={item_id}"
+    print(f"{YELLOW}[DEBUG] Fetching subtitle path from URL: {constructed_url}{RESET}")
+    try:
+        response = requests.get(constructed_url, headers=HEADERS)
+        print(f"{YELLOW}[DEBUG] Response status code: {response.status_code}{RESET}")
+        if response.status_code == 200:
+            history = response.json()
+            for item in history["data"]:
+                if "subtitles" in item:
+                    for subtitle in item["subtitles"]:
+                        if subtitle.get("code2") == "en":  # Look for English subtitles
+                            raw_path = subtitle["path"]
+                            encoded_path = quote(raw_path, safe="")  # URL encode the path
+                            print(f"{GREEN}[INFO] Found and URL-encoded subtitle path:\n - Raw: {raw_path}\n - Encoded: {encoded_path}{RESET}")
+                            return encoded_path
+        else:
+            print(f"{RED}[WARNING] Failed to fetch subtitle path. Response Code: {response.status_code}{RESET}")
+            print(f"{YELLOW}[DEBUG] Response text: {response.text}{RESET}")
+    except requests.RequestException as e:
+        print(f"{BOLD_RED}[ERROR] Exception occurred while fetching subtitle path: {e}{RESET}")
+    return None
+
+
+def translate_subtitle(item_type, item_id, subs_path, target_lang):
+    """Translate subtitles to the specified target language."""
+    if not target_lang:
+        print(f"{YELLOW}[DEBUG] Target language not specified. Skipping translation for item_type: {item_type}, item_id: {item_id}.{RESET}")
+        return False
+
+    # Convert item_type to singular form for the API call
+    singular_item_type = "movie" if item_type == "movies" else "episode" if item_type == "episodes" else item_type
+
+    url = get_api_url("subtitles")
+    constructed_url = (
+        f"{url}?action=translate&language={target_lang}&path={subs_path}&type={singular_item_type}&id={item_id}&forced=false&hi=false"
+    )
+
+    print(f"{YELLOW}[DEBUG] Attempting to translate subtitles for item ID: {item_id} to {target_lang}.{RESET}")
+    try:
+        response = requests.patch(constructed_url, headers=HEADERS)
+        print(f"{YELLOW}[DEBUG] Response status code: {response.status_code}{RESET}")
+        if response.status_code == 204:
+            print(f"{GREEN}[INFO] Subtitles translated successfully to {target_lang} for {singular_item_type} (ID: {item_id}).{RESET}")
+            return True
+        else:
+            print(f"{RED}[WARNING] Failed to translate subtitles. Response Code: {response.status_code}{RESET}")
+            print(f"{YELLOW}[DEBUG] Response text: {response.text}{RESET}")
+            return False
+    except requests.RequestException as e:
+        print(f"{BOLD_RED}[ERROR] Exception occurred while translating subtitles for {singular_item_type} (ID: {item_id}): {e}{RESET}")
+        return False
+
+
+def process_item(item, item_type, id_field, params_field):
+    """Process a single item: Determine missing subtitles, download, and translate."""
+    item_id = item[id_field]
+    item_name = item.get("seriesTitle", item.get("title", "Unknown Item"))
+    series_id = item.get("sonarrSeriesId") if item_type == "episodes" else None  # Extract 'seriesid' for episodes
+
+    # [INFO] Start processing
+    print(f"{GREEN}[INFO] Processing: {item_name} (ID: {item_id}){RESET}")
+
+    # Check which languages are missing
+    missing_subtitles = item.get("missing_subtitles", [])
+    missing_languages = [lang["code2"] for lang in missing_subtitles]  # Extract 'code2' for missing languages
+    print(f"{YELLOW}[DEBUG] Missing languages for {item_name}: {', '.join(missing_languages)}{RESET}")
+
+    # Step 1: Download English subtitles (required for translating)
+    if "en" in missing_languages:
+        if download_subtitles(item_type, item_id, params_field, language="en", series_id=series_id):
+            print(f"{GREEN}[INFO] English subtitles downloaded for {item_name}.{RESET}")
+        else:
+            print(f"{RED}[WARNING] Failed to download English subtitles for {item_name}. Skipping...{RESET}")
+            return
+    else:
+        print(f"{GREEN}[INFO] English subtitles already available for {item_name}.{RESET}")
+
+    # Step 2: Retrieve the path of the downloaded English subtitles
+    subs_path = fetch_subtitle_path(item_type, item_id, params_field)
+    if not subs_path:
+        print(f"{RED}[WARNING] Failed to retrieve English subtitles path for {item_name}. Skipping...{RESET}")
+        return
+
+    # Step 3: Translate to the first preferred language if it's missing
+    if FIRST_LANG in missing_languages:
+        if translate_subtitle(item_type, item_id, subs_path, FIRST_LANG):
+            print(f"{GREEN}[INFO] Translated {item_name} subtitles to {FIRST_LANG}.{RESET}")
+        else:
+            print(f"{RED}[WARNING] Failed to translate {item_name} subtitles to {FIRST_LANG}.{RESET}")
+    else:
+        print(f"{GREEN}[INFO] Subtitles in {FIRST_LANG} already exist for {item_name}.{RESET}")
+
+    # Step 4: Translate to the second preferred language if it's missing
+    if SECOND_LANG and SECOND_LANG in missing_languages:
+        if translate_subtitle(item_type, item_id, subs_path, SECOND_LANG):
+            print(f"{GREEN}[INFO] Translated {item_name} subtitles to {SECOND_LANG}.{RESET}")
+        else:
+            print(f"{RED}[WARNING] Failed to translate {item_name} subtitles to {SECOND_LANG}.{RESET}")
+    elif SECOND_LANG:
+        print(f"{GREEN}[INFO] Subtitles in {SECOND_LANG} already exist for {item_name}.{RESET}")
+
+
+def process_items(item_type, wanted_endpoint, id_field, params_field):
+    """Process all wanted items of a specified type (episodes or movies)."""
+    items = fetch_items(item_type, wanted_endpoint)
+    if not items:
+        print(f"{GREEN}[INFO] No {item_type} items found to process.{RESET}")
+        return
+
+    for item in items:
+        process_item(item, item_type, id_field, params_field)
+
+
+def translate_episode_subs():
+    """Translate subtitles for all wanted episodes."""
+    process_items(
+        item_type="episodes",
+        wanted_endpoint="episodes/wanted?start=0&length=-1",
+        id_field="sonarrEpisodeId",
+        params_field="episodeid",
+    )
+
+
+def translate_movie_subs():
+    """Translate subtitles for all wanted movies."""
+    process_items(
+        item_type="movies",
+        wanted_endpoint="movies/wanted?start=0&length=-1",
+        id_field="radarrId",
+        params_field="radarrid",
+    )
+
+
+def main():
+    print(f"{GREEN}[INFO] Starting subtitle processing...{RESET}")
+    translate_movie_subs()
+    translate_episode_subs()
+    print(f"{GREEN}[INFO] Subtitle processing completed.{RESET}")
+
+
+if __name__ == "__main__":
+    main()
