@@ -99,14 +99,14 @@ def download_subtitles(item_type, item_id, params_field, language="en", series_i
         return False
 
 
-def fetch_subtitle_path(item_type, item_id, params_field):
-    """Retrieve the path of English subtitles for a given item and URL encode it."""
+def fetch_subtitle_path(item_type, item_id, params_field, language="en"):
+    """Retrieve the path of subtitles for a given item in the specified language and URL encode it."""
     # Retrieve the current thread name
     thread_name = threading.current_thread().name
 
     url = get_api_url(item_type)
-    constructed_url = f"{url}?{params_field}%5B%5D={item_id}"
-    print(f"{YELLOW}[DEBUG] [{thread_name}] Fetching subtitle path for {item_type} (ID: {item_id}) from URL: {constructed_url}{RESET}")
+    constructed_url = f"{url}?{params_field}%5B%5D={item_id}&language={language}"
+    print(f"{YELLOW}[DEBUG] [{thread_name}] Fetching subtitle path for {item_type} (ID: {item_id}, Language: {language}) from URL: {constructed_url}{RESET}")
 
     try:
         response = requests.get(constructed_url, headers=HEADERS)
@@ -114,13 +114,13 @@ def fetch_subtitle_path(item_type, item_id, params_field):
         
         if response.status_code == 200:
             history = response.json()
-            for item in history["data"]:
+            for item in history.get("data", []):
                 if "subtitles" in item:
                     for subtitle in item["subtitles"]:
-                        if subtitle.get("code2") == "en":  # Look for English subtitles
+                        if subtitle.get("code2") == language:  # Look for specified language subtitles
                             raw_path = subtitle["path"]
                             encoded_path = quote(raw_path, safe="")  # URL encode the path
-                            print(f"{GREEN}[INFO] [{thread_name}] Found subtitle path for {item_type} (ID: {item_id}):{RESET}")
+                            print(f"{GREEN}[INFO] [{thread_name}] Found subtitle path for {item_type} (ID: {item_id}, Language: {language}):{RESET}")
                             print(f"{GREEN}[INFO] [{thread_name}]   - Raw: {raw_path}{RESET}")
                             print(f"{GREEN}[INFO] [{thread_name}]   - Encoded: {encoded_path}{RESET}")
                             return encoded_path
@@ -270,13 +270,18 @@ def process_item(item, item_type, id_field, params_field):
     subs_path = None
     
     if "en" in missing_languages:
-        if not download_subtitles(item_type, item_id, params_field, language="en", series_id=series_id) or not (subs_path := fetch_subtitle_path(item_type, item_id, params_field)):
+        if not download_subtitles(item_type, item_id, params_field, language="en", series_id=series_id) or not (subs_path := fetch_subtitle_path(item_type, item_id, params_field, language="en")):
             print(f"{RED}[WARNING] [{thread_name}] English subtitles unavailable or failed to retrieve. Trying another language.{RESET}")
             preferred_languages = [SECOND_LANG, FIRST_LANG]
             for lang in preferred_languages:
                 if lang in available_languages:
-                    subs_path = fetch_subtitle_path(item_type, item_id, params_field)
+                    subs_path = fetch_subtitle_path(item_type, item_id, params_field, language=lang)
                     print(f"{GREEN}[INFO] [{thread_name}] Using {lang} subtitles for translation.{RESET}")
+                    
+                    if "en" in missing_languages:  # Fixed indentation
+                        if translate_subtitle(item_type, item_id, subs_path, "en", params_field, series_id=series_id):
+                            print(f"{GREEN}[INFO] [{thread_name}] Translated {item_name} subtitles to en.{RESET}")
+                            
                     break
             else:
                 print(f"{RED}[WARNING] [{thread_name}] No usable subtitles found for translation. Skipping...{RESET}")
@@ -287,7 +292,7 @@ def process_item(item, item_type, id_field, params_field):
     if not subs_path:
         print(f"{RED}[WARNING] [{thread_name}] Failed to retrieve subtitle path for {item_name}. Skipping...{RESET}")
         return
-
+    
     if FIRST_LANG in missing_languages:
         if translate_subtitle(item_type, item_id, subs_path, FIRST_LANG, params_field, series_id=series_id):
             print(f"{GREEN}[INFO] [{thread_name}] Translated {item_name} subtitles to {FIRST_LANG}.{RESET}")
