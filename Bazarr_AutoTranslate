@@ -270,18 +270,14 @@ def process_item(item, item_type, id_field, params_field):
     subs_path = None
     
     if "en" in missing_languages:
-        if download_subtitles(item_type, item_id, params_field, language="en", series_id=series_id):
-            subs_path = fetch_subtitle_path(item_type, item_id, params_field)
-        else:
-            print(f"{RED}[WARNING] [{thread_name}] English subtitles unavailable for {item_name}.{RESET}")
-            
-            # Try using FIRST_LANG or SECOND_LANG if available
-            if FIRST_LANG in available_languages:
-                subs_path = fetch_subtitle_path(item_type, item_id, params_field)
-                print(f"{GREEN}[INFO] [{thread_name}] Using {FIRST_LANG} subtitles for translation.{RESET}")
-            elif SECOND_LANG in available_languages:
-                subs_path = fetch_subtitle_path(item_type, item_id, params_field)
-                print(f"{GREEN}[INFO] [{thread_name}] Using {SECOND_LANG} subtitles for translation.{RESET}")
+        if not download_subtitles(item_type, item_id, params_field, language="en", series_id=series_id) or not (subs_path := fetch_subtitle_path(item_type, item_id, params_field)):
+            print(f"{RED}[WARNING] [{thread_name}] English subtitles unavailable or failed to retrieve. Trying another language.{RESET}")
+            preferred_languages = [SECOND_LANG, FIRST_LANG]
+            for lang in preferred_languages:
+                if lang in available_languages:
+                    subs_path = fetch_subtitle_path(item_type, item_id, params_field)
+                    print(f"{GREEN}[INFO] [{thread_name}] Using {lang} subtitles for translation.{RESET}")
+                    break
             else:
                 print(f"{RED}[WARNING] [{thread_name}] No usable subtitles found for translation. Skipping...{RESET}")
                 return
@@ -292,15 +288,11 @@ def process_item(item, item_type, id_field, params_field):
         print(f"{RED}[WARNING] [{thread_name}] Failed to retrieve subtitle path for {item_name}. Skipping...{RESET}")
         return
 
-    if "en" in missing_languages and subs_path:
-        if translate_subtitle(item_type, item_id, subs_path, "en", params_field, series_id=series_id):
-            print(f"{GREEN}[INFO] [{thread_name}] Translated {item_name} subtitles to English.{RESET}")
-
-    if FIRST_LANG in missing_languages and subs_path:
+    if FIRST_LANG in missing_languages:
         if translate_subtitle(item_type, item_id, subs_path, FIRST_LANG, params_field, series_id=series_id):
             print(f"{GREEN}[INFO] [{thread_name}] Translated {item_name} subtitles to {FIRST_LANG}.{RESET}")
 
-    if SECOND_LANG and SECOND_LANG in missing_languages and subs_path:
+    if SECOND_LANG and SECOND_LANG in missing_languages:
         if translate_subtitle(item_type, item_id, subs_path, SECOND_LANG, params_field, series_id=series_id):
             print(f"{GREEN}[INFO] [{thread_name}] Translated {item_name} subtitles to {SECOND_LANG}.{RESET}")
 
