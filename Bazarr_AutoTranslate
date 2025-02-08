@@ -221,6 +221,29 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
         return False
 
 
+def fetch_subtitle_data(item_type, item_id, params_field):
+    """Fetch available subtitles for a specific episode or movie."""
+    thread_name = threading.current_thread().name
+    url = get_api_url(f"{item_type}?length=-1&{params_field}%5B%5D={item_id}")
+    print(f"{YELLOW}[DEBUG] [{thread_name}] Fetching subtitles from URL: {url}{RESET}")
+    try:
+        response = requests.get(url, headers=HEADERS)
+        print(f"{YELLOW}[DEBUG] [{thread_name}] Subtitle response status code: {response.status_code}{RESET}")
+        if response.status_code == 200:
+            subtitle_response = response.json()
+            #print(f"{YELLOW}[DEBUG] [{thread_name}] Subtitle API response: {subtitle_response}{RESET}")
+            for item in subtitle_response.get("data", []):
+                if "subtitles" in item:
+                    return item["subtitles"]
+            return []
+        else:
+            print(f"{RED}[WARNING] [{thread_name}] Failed to fetch subtitles: {response.status_code}{RESET}")
+            return []
+    except requests.RequestException as e:
+        print(f"{BOLD_RED}[ERROR] [{thread_name}] Exception while fetching subtitles: {e}{RESET}")
+        return []
+
+
 def process_item(item, item_type, id_field, params_field):
     """Process a single item: Determine missing subtitles, download, and translate."""
     thread_name = threading.current_thread().name
@@ -237,8 +260,11 @@ def process_item(item, item_type, id_field, params_field):
 
     missing_subtitles = item.get("missing_subtitles", [])
     missing_languages = [lang["code2"] for lang in missing_subtitles]
-    available_languages = [lang["code2"] for lang in item.get("subtitles", [])]
-    
+
+    # Fetch available subtitles dynamically
+    subtitles_data = fetch_subtitle_data(item_type, item_id, params_field)
+    available_languages = [lang.get("code2", "Unknown") for lang in subtitles_data] if isinstance(subtitles_data, list) else []
+
     print(f"{YELLOW}[DEBUG] [{thread_name}] Missing languages: {missing_languages}, Available languages: {available_languages}{RESET}")
 
     subs_path = None
