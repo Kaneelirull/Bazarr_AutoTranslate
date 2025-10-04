@@ -43,9 +43,7 @@ def get_api_url(endpoint):
 
 def fetch_items(item_type, wanted_endpoint):
     """Fetch the list of wanted episodes or movies."""
-    # Get the current thread name
     thread_name = threading.current_thread().name
-
     url = get_api_url(wanted_endpoint)
     print(f"{YELLOW}[DEBUG] [{thread_name}] Fetching {item_type} from URL: {url}{RESET}")
 
@@ -55,8 +53,7 @@ def fetch_items(item_type, wanted_endpoint):
         if response.status_code == 200:
             items = response.json().get("data", [])
             for item in items:
-                item_id = item.get(id_field, item.get("sonarrEpisodeId", item.get("radarrId", "Unknown ID")))
-                print(f"{YELLOW}[DEBUG] [{thread_name}] Item fetched: {item.get('seriesTitle', item.get('title', 'Unknown'))} (ID: {item_id}){RESET}")
+                print(f"{YELLOW}[DEBUG] [{thread_name}] Item fetched: {item.get('seriesTitle', item.get('title', 'Unknown'))}{RESET}")
             print(f"{GREEN}[INFO] [{thread_name}] Fetched {len(items)} {item_type}(s).{RESET}")
             return items
         else:
@@ -66,7 +63,6 @@ def fetch_items(item_type, wanted_endpoint):
     except requests.RequestException as e:
         print(f"{BOLD_RED}[ERROR] [{thread_name}] Exception occurred while fetching {item_type}: {e}{RESET}")
         return []
-
 
 def download_subtitles(item_type, item_id, params_field, language="en", series_id=None):
     """
@@ -391,4 +387,3 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"[ERROR] Unexpected error: {e}")
-
