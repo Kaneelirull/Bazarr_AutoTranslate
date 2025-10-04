@@ -55,7 +55,7 @@ def fetch_items(item_type, wanted_endpoint):
         if response.status_code == 200:
             items = response.json().get("data", [])
             for item in items:
-                item_id = item.get("id", "Unknown ID")
+                item_id = item.get(id_field, item.get("sonarrEpisodeId", item.get("radarrId", "Unknown ID")))
                 print(f"{YELLOW}[DEBUG] [{thread_name}] Item fetched: {item.get('seriesTitle', item.get('title', 'Unknown'))} (ID: {item_id}){RESET}")
             print(f"{GREEN}[INFO] [{thread_name}] Fetched {len(items)} {item_type}(s).{RESET}")
             return items
@@ -391,3 +391,4 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"[ERROR] Unexpected error: {e}")
+
