@@ -50,7 +50,8 @@ HEADERS = {"Accept": "application/json", "X-API-KEY": BAZARR_APIKEY}
 script_start_time = time.time()  # Record when the script starts
 
 # Maximum allowed runtime for the script (in seconds)
-MAX_RUNTIME = 3000  # 50 Mins
+MAX_RUNTIME = 3000        # 50 minutes
+HARD_SHUTDOWN_GRACE = 600  # 10 minutes
 
 def signal_handler(signum, frame):
     """Handle termination signals gracefully."""
@@ -61,14 +62,30 @@ def signal_handler(signum, frame):
 
 # Register signal handlers for graceful shutdown
 signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
+# Do not override SIGINT: let Ctrl+C raise KeyboardInterrupt normally
+# signal.signal(signal.SIGINT, signal_handler)
+
 
 def get_api_url(endpoint):
     """Construct the full API URL for a given endpoint."""
     return f"http://{BAZARR_HOSTNAME}/api/{endpoint}"
 
+def check_hard_timeout():
+    runtime = time.time() - script_start_time
+    if runtime > MAX_RUNTIME + HARD_SHUTDOWN_GRACE:
+        print(
+            f"{BOLD_RED}[ERROR] Hard timeout reached "
+            f"({MAX_RUNTIME + HARD_SHUTDOWN_GRACE}s). "
+            f"Unclean exit enforced.{RESET}"
+        )
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(124)  # immediate, unclean exit
+        
 def fetch_items(item_type, wanted_endpoint):
     """Fetch the list of wanted episodes or movies."""
+    check_hard_timeout()
+
     thread_name = threading.current_thread().name
     url = get_api_url(wanted_endpoint)
     print(f"{YELLOW}[DEBUG] [{thread_name}] Fetching {item_type} from URL: {url}{RESET}")
@@ -101,8 +118,10 @@ def download_subtitles(item_type, item_id, params_field, language="en", series_i
     Download subtitles for a given item (episode or movie) in the specified language.
     Adds seriesid for episodes if required.
     """
+    check_hard_timeout()
+
     url = get_api_url(f"{item_type}/subtitles")
-    
+        
     # Construct the query parameters dynamically
     if item_type == "episodes" and series_id:  # Episodes require 'seriesid' and 'episodeid'
         query_params = f"seriesid={series_id}&{params_field}={item_id}&language={language}&forced=false&hi=false"
@@ -135,6 +154,8 @@ def download_subtitles(item_type, item_id, params_field, language="en", series_i
 def fetch_subtitle_path(item_type, item_id, params_field, language="en"):
     """Retrieve the path of subtitles for a given item in the specified language and URL encode it."""
     # Retrieve the current thread name
+    check_hard_timeout()
+
     thread_name = threading.current_thread().name
 
     url = get_api_url(item_type)
@@ -172,6 +193,8 @@ def fetch_subtitle_path(item_type, item_id, params_field, language="en"):
 
 def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field, series_id=None):
     """Translate subtitles to the specified target language with retry mechanism for status code 500."""
+    check_hard_timeout()
+
     thread_name = threading.current_thread().name
 
     print(f"{YELLOW}[DEBUG] [{thread_name}] Translating subtitles for {item_type} (ID: {item_id}) to language: {target_lang}{RESET}")
@@ -279,6 +302,8 @@ def fetch_subtitle_data(item_type, item_id, params_field):
 
 def process_item(item, item_type, id_field, params_field):
     """Process a single item: Determine missing subtitles, download, and translate."""
+    check_hard_timeout()
+
     thread_name = threading.current_thread().name
 
     if shutdown_requested:
@@ -340,7 +365,6 @@ def process_item(item, item_type, id_field, params_field):
         if translate_subtitle(item_type, item_id, subs_path, SECOND_LANG, params_field, series_id=series_id):
             print(f"{GREEN}[INFO] [{thread_name}] Translated {item_name} subtitles to {SECOND_LANG}.{RESET}")
 
-
 def process_items(item_type, wanted_endpoint, id_field, params_field):
     """Process all wanted items of a specified type (episodes or movies) with parallel processing."""
     # Check if shutdown was requested
@@ -371,6 +395,7 @@ def process_items(item_type, wanted_endpoint, id_field, params_field):
 
         # As each task completes, log the results or handle exceptions
         for future in as_completed(future_to_item):
+            check_hard_timeout()
             # Check if shutdown was requested
             if shutdown_requested:
                 print(f"{RED}[WARNING] Shutdown requested. Cancelling remaining tasks.{RESET}")
