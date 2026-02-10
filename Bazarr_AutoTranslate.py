@@ -313,7 +313,7 @@ def process_item(item, item_type, id_field, params_field):
 
     subs_path = None
     
-    if "en" in missing_languages:
+    if "en" in missing_languages and "en" not in available_languages:
         if not download_subtitles(item_type, item_id, params_field, language="en", series_id=series_id) or not (subs_path := fetch_subtitle_path(item_type, item_id, params_field, language="en")):
             print(f"{RED}[WARNING] [{thread_name}] English subtitles unavailable or failed to retrieve. Trying another language.{RESET}")
             preferred_languages = [SECOND_LANG, FIRST_LANG]
