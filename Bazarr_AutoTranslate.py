@@ -24,6 +24,9 @@ RESET = "\033[0m" if USE_COLORS else ""    # Reset to default terminal color
 # Set how many translations to run in parallel
 MAX_PARALLEL_TRANSLATIONS = 2
 
+# Delay between translation calls to avoid hammering the provider (seconds)
+TRANSLATE_DELAY = 0.3
+
 # Bazarr Configuration
 BAZARR_HOSTNAME = "Localhost:1337"  # Update your hostname here
 BAZARR_APIKEY = "BAZARR_APIKEY"
@@ -169,40 +172,32 @@ def fetch_subtitle_path(item_type, item_id, params_field, language="en"):
 
 def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field, series_id=None):
     """Translate subtitles to the specified target language with retry mechanism for status code 500."""
-    # Retrieve the current thread name
     thread_name = threading.current_thread().name
 
-    # Early debug message with context
     print(f"{YELLOW}[DEBUG] [{thread_name}] Translating subtitles for {item_type} (ID: {item_id}) to language: {target_lang}{RESET}")
 
     if not target_lang:
         print(f"{YELLOW}[DEBUG] [{thread_name}] Target language not specified. Skipping translation for {item_type} (ID: {item_id}).{RESET}")
         return False
 
-    # Convert item_type to singular form for the API call
     singular_item_type = "movie" if item_type == "movies" else "episode" if item_type == "episodes" else item_type
 
-    # Construct the translation URL
     url = get_api_url("subtitles")
     constructed_url = (
         f"{url}?action=translate&language={target_lang}&path={subs_path}&type={singular_item_type}&id={item_id}&forced=false&hi=false"
     )
 
-    # Log the constructed URL and context
     print(f"{YELLOW}[DEBUG] [{thread_name}] Translation Details for {item_type} (ID: {item_id}):{RESET}")
     print(f"{YELLOW}  - Target Language: {target_lang}{RESET}")
     print(f"{YELLOW}  - Subtitle Path (Encoded): {subs_path}{RESET}")
     print(f"{YELLOW}  - Constructed URL: {constructed_url}{RESET}")
 
     try:
-        # Start timing
         start_time = time.time()
         print(f"{YELLOW}[DEBUG] [{thread_name}] Sending PATCH request to translate subtitles for {item_type} (ID: {item_id}).{RESET}")
 
-        # Send the API PATCH request with the global timeout variable
         response = requests.patch(constructed_url, headers=HEADERS, timeout=(CONNECT_TIMEOUT, API_TIMEOUT))
 
-        # End timing
         elapsed_time = time.time() - start_time
         print(f"{YELLOW}[DEBUG] [{thread_name}] PATCH response for {item_type} (ID: {item_id}) received: {response.status_code}{RESET}")
         print(f"{GREEN}[INFO] [{thread_name}] Time taken for API request: {elapsed_time:.2f} seconds for {item_type} (ID: {item_id}){RESET}")
@@ -213,7 +208,6 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
         elif response.status_code == 500:
             print(f"{RED}[WARNING] [{thread_name}] Received status code 500 for {item_type} (ID: {item_id}). Retrying subtitle translation...{RESET}")
 
-            # Retry mechanism for status code 500
             print(f"{YELLOW}[DEBUG] [{thread_name}] Re-downloading English subtitles to retry translation for {item_type} (ID: {item_id}).{RESET}")
             if download_subtitles(item_type, item_id, params_field, language="en", series_id=series_id):
                 print(f"{GREEN}[INFO] [{thread_name}] Successfully re-downloaded English subtitles for {item_type} (ID: {item_id}).{RESET}")
@@ -224,7 +218,6 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
                     )
                     print(f"{YELLOW}[DEBUG] [{thread_name}] Retrying translation using new subtitle path for {item_type} (ID: {item_id}): {retry_url}{RESET}")
 
-                    # Retry the translation with the global timeout variable
                     retry_start_time = time.time()
                     retry_response = requests.patch(retry_url, headers=HEADERS, timeout=(CONNECT_TIMEOUT, API_TIMEOUT))
                     retry_elapsed_time = time.time() - retry_start_time
@@ -243,7 +236,6 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
             else:
                 print(f"{BOLD_RED}[ERROR] [{thread_name}] Could not re-download English subtitles for {item_type} (ID: {item_id}).{RESET}")
 
-        # Handle other failure responses
         print(f"{RED}[WARNING] [{thread_name}] Failed to translate subtitles for {item_type} (ID: {item_id}). Response Code: {response.status_code}{RESET}")
         print(f"{YELLOW}[DEBUG] [{thread_name}] Response text: {response.text}{RESET}")
         return False
@@ -253,6 +245,9 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
     except requests.RequestException as e:
         print(f"{BOLD_RED}[ERROR] [{thread_name}] Exception occurred while translating subtitles for {item_type} (ID: {item_id}): {e}{RESET}")
         return False
+    finally:
+        # Small delay after each translation attempt to reduce rate of calls
+        time.sleep(TRANSLATE_DELAY)
 
 def fetch_subtitle_data(item_type, item_id, params_field):
     """Fetch available subtitles for a specific episode or movie."""
