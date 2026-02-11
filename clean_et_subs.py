@@ -40,13 +40,16 @@ TAG_RE = re.compile(r"<[^>]+>")
 BRACKET_RE = re.compile(r"[\[\]\(\)\{\}]")
 
 # HTTP error patterns to detect in subtitle files
-HTTP_ERROR_RE = re.compile(
-    r"\b(?:Error\s)?"
-    r"(400|429|500|503)\b"
-    r"(?:[^a-zA-Z0-9]{0,10})?"
-    r"(Bad\sRequest|Too\sMany\sRequests|Server\sError|Internal\sServer\sError|Service\sUnavailable)?",
-    re.IGNORECASE,
-)
+HTTP_ERROR_PATTERNS = [
+    r"500\s+Server\s+Error",
+    r"500\s+Internal\s+Server\s+Error",
+    r"Error\s*500",
+    r"503\s+Service\s+Unavailable",
+    r"400\s+Bad\s+Request",
+    r"429\s+Too\s+Many\s+Requests",
+]
+
+HTTP_ERROR_RE = re.compile("|".join(HTTP_ERROR_PATTERNS), re.IGNORECASE)
 
 def iter_srt_files(roots: Iterable[Path], suffix: str) -> Iterable[Path]:
     for root in roots:
