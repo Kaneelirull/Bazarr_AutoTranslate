@@ -1,57 +1,45 @@
 import requests
-import time  # Required for tracking elapsed time and enforcing runtime limit
-from urllib.parse import quote  # Import for URL encoding
+import time
+import os
+import sys
+import signal
+from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
-import signal
-import sys
-import os
 
-# Force unbuffered output for CRON compatibility
+# Force unbuffered output
 sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
 sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
 
-# Disable ANSI colors if not in a TTY (CRON environment)
+# Disable ANSI colors if not in a TTY
 USE_COLORS = sys.stdout.isatty()
 
 # ANSI Escape Color Codes
-GREEN = "\033[92m" if USE_COLORS else ""   # Bright Green for [INFO]
-YELLOW = "\033[93m" if USE_COLORS else ""  # Bright Yellow for [DEBUG]
-RED = "\033[91m" if USE_COLORS else ""     # Bright Red for [WARNING]
-BOLD_RED = "\033[1;91m" if USE_COLORS else ""  # Bold Bright Red for [ERROR]
-RESET = "\033[0m" if USE_COLORS else ""    # Reset to default terminal color
+GREEN = "\033[92m" if USE_COLORS else ""
+YELLOW = "\033[93m" if USE_COLORS else ""
+RED = "\033[91m" if USE_COLORS else ""
+BOLD_RED = "\033[1;91m" if USE_COLORS else ""
+RESET = "\033[0m" if USE_COLORS else ""
 
-# Set how many translations to run in parallel
-MAX_PARALLEL_TRANSLATIONS = 2
+# Configuration from environment variables
+MAX_PARALLEL_TRANSLATIONS = int(os.getenv("MAX_PARALLEL_TRANSLATIONS", "2"))
+TRANSLATE_DELAY = float(os.getenv("TRANSLATE_DELAY", "0.3"))
+BAZARR_HOSTNAME = os.getenv("BAZARR_HOSTNAME", "localhost:6767")
+BAZARR_APIKEY = os.getenv("BAZARR_APIKEY", "")
+API_TIMEOUT = int(os.getenv("API_TIMEOUT", "2400"))
+CONNECT_TIMEOUT = int(os.getenv("CONNECT_TIMEOUT", "10"))
+FIRST_LANG = os.getenv("FIRST_LANG", "et")
+SECOND_LANG = os.getenv("SECOND_LANG", "sv")
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))  # 5 minutes default
 
-# Delay between translation calls to avoid hammering the provider (seconds)
-TRANSLATE_DELAY = 0.3
-
-# Bazarr Configuration
-BAZARR_HOSTNAME = "Localhost:1337"  # Update your hostname here
-BAZARR_APIKEY = "BAZARR_APIKEY"
-
-# API call timeout (in seconds)
-API_TIMEOUT = 2400
-
-# Connection timeout for requests (prevents hanging on network issues)
-CONNECT_TIMEOUT = 10
-
-# Global flag for graceful shutdown
-shutdown_requested = False
-
-# Language preferences
-FIRST_LANG = "et"  # Primary target language
-SECOND_LANG = "sv"  # Secondary target language (optional)
+if not BAZARR_APIKEY:
+    print(f"{BOLD_RED}[ERROR] BAZARR_APIKEY environment variable is required{RESET}")
+    sys.exit(1)
 
 HEADERS = {"Accept": "application/json", "X-API-KEY": BAZARR_APIKEY}
 
-# Global variable to store the start time
-script_start_time = time.time()  # Record when the script starts
-
-# Maximum allowed runtime for the script (in seconds)
-MAX_RUNTIME = 3000        # 50 minutes
-HARD_SHUTDOWN_GRACE = 600  # 10 minutes
+# Global flag for graceful shutdown
+shutdown_requested = False
 
 def signal_handler(signum, frame):
     """Handle termination signals gracefully."""
@@ -60,11 +48,8 @@ def signal_handler(signum, frame):
     print(f"{RED}[WARNING] Received signal {signum}. Initiating graceful shutdown...{RESET}")
     sys.stdout.flush()
 
-# Register signal handlers for graceful shutdown
 signal.signal(signal.SIGTERM, signal_handler)
-# Do not override SIGINT: let Ctrl+C raise KeyboardInterrupt normally
-# signal.signal(signal.SIGINT, signal_handler)
-
+signal.signal(signal.SIGINT, signal_handler)
 
 def get_api_url(endpoint):
     """Construct the full API URL for a given endpoint."""
@@ -75,22 +60,8 @@ def get_api_url(endpoint):
         base_url = f"http://{BAZARR_HOSTNAME}"
     return f"{base_url}/api/{endpoint}"
 
-def check_hard_timeout():
-    runtime = time.time() - script_start_time
-    if runtime > MAX_RUNTIME + HARD_SHUTDOWN_GRACE:
-        print(
-            f"{BOLD_RED}[ERROR] Hard timeout reached "
-            f"({MAX_RUNTIME + HARD_SHUTDOWN_GRACE}s). "
-            f"Unclean exit enforced.{RESET}"
-        )
-        sys.stdout.flush()
-        sys.stderr.flush()
-        os._exit(124)  # immediate, unclean exit
-        
 def fetch_items(item_type, wanted_endpoint):
     """Fetch the list of wanted episodes or movies."""
-    check_hard_timeout()
-
     thread_name = threading.current_thread().name
     url = get_api_url(wanted_endpoint)
     print(f"{YELLOW}[DEBUG] [{thread_name}] Fetching {item_type} from URL: {url}{RESET}")
@@ -101,13 +72,10 @@ def fetch_items(item_type, wanted_endpoint):
         sys.stdout.flush()
         if response.status_code == 200:
             items = response.json().get("data", [])
-            for item in items:
-                print(f"{YELLOW}[DEBUG] [{thread_name}] Item fetched: {item.get('seriesTitle', item.get('title', 'Unknown'))}{RESET}")
             print(f"{GREEN}[INFO] [{thread_name}] Fetched {len(items)} {item_type}(s).{RESET}")
             return items
         else:
             print(f"{RED}[WARNING] [{thread_name}] Failed to fetch {item_type}: {response.status_code}{RESET}")
-            print(f"{YELLOW}[DEBUG] [{thread_name}] Response text: {response.text}{RESET}")
             return []
     except requests.Timeout:
         print(f"{BOLD_RED}[ERROR] [{thread_name}] Timeout while fetching {item_type}{RESET}")
@@ -119,18 +87,12 @@ def fetch_items(item_type, wanted_endpoint):
         return []
 
 def download_subtitles(item_type, item_id, params_field, language="en", series_id=None):
-    """
-    Download subtitles for a given item (episode or movie) in the specified language.
-    Adds seriesid for episodes if required.
-    """
-    check_hard_timeout()
-
+    """Download subtitles for a given item."""
     url = get_api_url(f"{item_type}/subtitles")
-        
-    # Construct the query parameters dynamically
-    if item_type == "episodes" and series_id:  # Episodes require 'seriesid' and 'episodeid'
+    
+    if item_type == "episodes" and series_id:
         query_params = f"seriesid={series_id}&{params_field}={item_id}&language={language}&forced=false&hi=false"
-    else:  # Movies only require 'radarrid'
+    else:
         query_params = f"{params_field}={item_id}&language={language}&forced=false&hi=false"
     
     constructed_url = f"{url}?{query_params}"
@@ -145,7 +107,6 @@ def download_subtitles(item_type, item_id, params_field, language="en", series_i
             return True
         else:
             print(f"{RED}[WARNING] Failed to download subtitles in language '{language}'. Response Code: {response.status_code}{RESET}")
-            print(f"{YELLOW}[DEBUG] Response text: {response.text}{RESET}")
             return False
     except requests.Timeout:
         print(f"{BOLD_RED}[ERROR] Timeout while downloading subtitles in language '{language}'{RESET}")
@@ -157,10 +118,7 @@ def download_subtitles(item_type, item_id, params_field, language="en", series_i
         return False
 
 def fetch_subtitle_path(item_type, item_id, params_field, language="en"):
-    """Retrieve the path of subtitles for a given item in the specified language and URL encode it."""
-    # Retrieve the current thread name
-    check_hard_timeout()
-
+    """Retrieve the path of subtitles for a given item."""
     thread_name = threading.current_thread().name
 
     url = get_api_url(item_type)
@@ -177,16 +135,13 @@ def fetch_subtitle_path(item_type, item_id, params_field, language="en"):
             for item in history.get("data", []):
                 if "subtitles" in item:
                     for subtitle in item["subtitles"]:
-                        if subtitle.get("code2") == language:  # Look for specified language subtitles
+                        if subtitle.get("code2") == language:
                             raw_path = subtitle["path"]
-                            encoded_path = quote(raw_path, safe="")  # URL encode the path
-                            print(f"{GREEN}[INFO] [{thread_name}] Found subtitle path for {item_type} (ID: {item_id}, Language: {language}):{RESET}")
-                            print(f"{GREEN}[INFO] [{thread_name}]   - Raw: {raw_path}{RESET}")
-                            print(f"{GREEN}[INFO] [{thread_name}]   - Encoded: {encoded_path}{RESET}")
+                            encoded_path = quote(raw_path, safe="")
+                            print(f"{GREEN}[INFO] [{thread_name}] Found subtitle path for {item_type} (ID: {item_id}, Language: {language}): {encoded_path}{RESET}")
                             return encoded_path
         else:
             print(f"{RED}[WARNING] [{thread_name}] Failed to fetch subtitle path for {item_type} (ID: {item_id}). Response Code: {response.status_code}{RESET}")
-            print(f"{YELLOW}[DEBUG] [{thread_name}] Response text: {response.text}{RESET}")
     except requests.Timeout:
         print(f"{BOLD_RED}[ERROR] [{thread_name}] Timeout while fetching subtitle path for {item_type} (ID: {item_id}){RESET}")
         sys.stdout.flush()
@@ -197,9 +152,7 @@ def fetch_subtitle_path(item_type, item_id, params_field, language="en"):
     return None
 
 def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field, series_id=None):
-    """Translate subtitles to the specified target language with retry mechanism for status code 500."""
-    check_hard_timeout()
-
+    """Translate subtitles to the specified target language."""
     thread_name = threading.current_thread().name
 
     print(f"{YELLOW}[DEBUG] [{thread_name}] Translating subtitles for {item_type} (ID: {item_id}) to language: {target_lang}{RESET}")
@@ -215,57 +168,35 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
         f"{url}?action=translate&language={target_lang}&path={subs_path}&type={singular_item_type}&id={item_id}&forced=false&hi=false"
     )
 
-    print(f"{YELLOW}[DEBUG] [{thread_name}] Translation Details for {item_type} (ID: {item_id}):{RESET}")
-    print(f"{YELLOW}  - Target Language: {target_lang}{RESET}")
-    print(f"{YELLOW}  - Subtitle Path (Encoded): {subs_path}{RESET}")
-    print(f"{YELLOW}  - Constructed URL: {constructed_url}{RESET}")
+    print(f"{YELLOW}[DEBUG] [{thread_name}] Constructed URL: {constructed_url}{RESET}")
 
     try:
         start_time = time.time()
-        print(f"{YELLOW}[DEBUG] [{thread_name}] Sending PATCH request to translate subtitles for {item_type} (ID: {item_id}).{RESET}")
-
         response = requests.patch(constructed_url, headers=HEADERS, timeout=(CONNECT_TIMEOUT, API_TIMEOUT))
-
         elapsed_time = time.time() - start_time
-        print(f"{YELLOW}[DEBUG] [{thread_name}] PATCH response for {item_type} (ID: {item_id}) received: {response.status_code}{RESET}")
         print(f"{GREEN}[INFO] [{thread_name}] Time taken for API request: {elapsed_time:.2f} seconds for {item_type} (ID: {item_id}){RESET}")
 
         if response.status_code == 204:
             print(f"{GREEN}[INFO] [{thread_name}] Subtitles translated successfully to {target_lang} for {item_type} (ID: {item_id}).{RESET}")
             return True
         elif response.status_code == 500:
-            print(f"{RED}[WARNING] [{thread_name}] Received status code 500 for {item_type} (ID: {item_id}). Retrying subtitle translation...{RESET}")
+            print(f"{RED}[WARNING] [{thread_name}] Received status code 500 for {item_type} (ID: {item_id}). Retrying...{RESET}")
 
-            print(f"{YELLOW}[DEBUG] [{thread_name}] Re-downloading English subtitles to retry translation for {item_type} (ID: {item_id}).{RESET}")
             if download_subtitles(item_type, item_id, params_field, language="en", series_id=series_id):
-                print(f"{GREEN}[INFO] [{thread_name}] Successfully re-downloaded English subtitles for {item_type} (ID: {item_id}).{RESET}")
                 new_subs_path = fetch_subtitle_path(item_type, item_id, params_field)
                 if new_subs_path:
                     retry_url = (
                         f"{url}?action=translate&language={target_lang}&path={new_subs_path}&type={singular_item_type}&id={item_id}&forced=false&hi=false"
                     )
-                    print(f"{YELLOW}[DEBUG] [{thread_name}] Retrying translation using new subtitle path for {item_type} (ID: {item_id}): {retry_url}{RESET}")
-
-                    retry_start_time = time.time()
                     retry_response = requests.patch(retry_url, headers=HEADERS, timeout=(CONNECT_TIMEOUT, API_TIMEOUT))
-                    retry_elapsed_time = time.time() - retry_start_time
-
-                    print(f"{YELLOW}[DEBUG] [{thread_name}] Retry response status code for {item_type} (ID: {item_id}): {retry_response.status_code}{RESET}")
-                    print(f"{GREEN}[INFO] [{thread_name}] Time taken for retry API request: {retry_elapsed_time:.2f} seconds for {item_type} (ID: {item_id}){RESET}")
 
                     if retry_response.status_code == 204:
                         print(f"{GREEN}[INFO] [{thread_name}] Subtitles successfully translated to {target_lang} after retry for {item_type} (ID: {item_id}).{RESET}")
                         return True
                     else:
                         print(f"{RED}[WARNING] [{thread_name}] Retry translation failed for {item_type} (ID: {item_id}). Response Code: {retry_response.status_code}{RESET}")
-                        print(f"{YELLOW}[DEBUG] [{thread_name}] Retry response text: {retry_response.text}{RESET}")
-                else:
-                    print(f"{BOLD_RED}[ERROR] [{thread_name}] Failed to fetch new English subtitles path for retry for {item_type} (ID: {item_id}).{RESET}")
-            else:
-                print(f"{BOLD_RED}[ERROR] [{thread_name}] Could not re-download English subtitles for {item_type} (ID: {item_id}).{RESET}")
 
         print(f"{RED}[WARNING] [{thread_name}] Failed to translate subtitles for {item_type} (ID: {item_id}). Response Code: {response.status_code}{RESET}")
-        print(f"{YELLOW}[DEBUG] [{thread_name}] Response text: {response.text}{RESET}")
         return False
     except requests.Timeout:
         print(f"{BOLD_RED}[ERROR] [{thread_name}] Timeout occurred while translating subtitles for {item_type} (ID: {item_id}).{RESET}")
@@ -274,21 +205,17 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
         print(f"{BOLD_RED}[ERROR] [{thread_name}] Exception occurred while translating subtitles for {item_type} (ID: {item_id}): {e}{RESET}")
         return False
     finally:
-        # Small delay after each translation attempt to reduce rate of calls
         time.sleep(TRANSLATE_DELAY)
 
 def fetch_subtitle_data(item_type, item_id, params_field):
     """Fetch available subtitles for a specific episode or movie."""
     thread_name = threading.current_thread().name
     url = get_api_url(f"{item_type}?length=-1&{params_field}%5B%5D={item_id}")
-    print(f"{YELLOW}[DEBUG] [{thread_name}] Fetching subtitles from URL: {url}{RESET}")
     try:
         response = requests.get(url, headers=HEADERS, timeout=(CONNECT_TIMEOUT, API_TIMEOUT))
-        print(f"{YELLOW}[DEBUG] [{thread_name}] Subtitle response status code: {response.status_code}{RESET}")
         sys.stdout.flush()
         if response.status_code == 200:
             subtitle_response = response.json()
-            #print(f"{YELLOW}[DEBUG] [{thread_name}] Subtitle API response: {subtitle_response}{RESET}")
             for item in subtitle_response.get("data", []):
                 if "subtitles" in item:
                     return item["subtitles"]
@@ -307,17 +234,10 @@ def fetch_subtitle_data(item_type, item_id, params_field):
 
 def process_item(item, item_type, id_field, params_field):
     """Process a single item: Determine missing subtitles, download, and translate."""
-    check_hard_timeout()
-
     thread_name = threading.current_thread().name
 
     if shutdown_requested:
         print(f"{RED}[WARNING] [{thread_name}] Shutdown requested. Stopping processing.{RESET}")
-        sys.stdout.flush()
-        return
-
-    if time.time() - script_start_time > MAX_RUNTIME:
-        print(f"{RED}[WARNING] [{thread_name}] Maximum runtime exceeded. Stopping further processing.{RESET}")
         sys.stdout.flush()
         return
 
@@ -330,7 +250,6 @@ def process_item(item, item_type, id_field, params_field):
     missing_subtitles = item.get("missing_subtitles", [])
     missing_languages = [lang["code2"] for lang in missing_subtitles]
 
-    # Fetch available subtitles dynamically
     subtitles_data = fetch_subtitle_data(item_type, item_id, params_field)
     available_languages = [lang.get("code2", "Unknown") for lang in subtitles_data] if isinstance(subtitles_data, list) else []
 
@@ -340,17 +259,16 @@ def process_item(item, item_type, id_field, params_field):
     
     if "en" in missing_languages and "en" not in available_languages:
         if not download_subtitles(item_type, item_id, params_field, language="en", series_id=series_id) or not (subs_path := fetch_subtitle_path(item_type, item_id, params_field, language="en")):
-            print(f"{RED}[WARNING] [{thread_name}] English subtitles unavailable or failed to retrieve. Trying another language.{RESET}")
+            print(f"{RED}[WARNING] [{thread_name}] English subtitles unavailable. Trying another language.{RESET}")
             preferred_languages = [SECOND_LANG, FIRST_LANG]
             for lang in preferred_languages:
                 if lang in available_languages:
                     subs_path = fetch_subtitle_path(item_type, item_id, params_field, language=lang)
                     print(f"{GREEN}[INFO] [{thread_name}] Using {lang} subtitles for translation.{RESET}")
                     
-                    if "en" in missing_languages:  # Fixed indentation
+                    if "en" in missing_languages:
                         if translate_subtitle(item_type, item_id, subs_path, "en", params_field, series_id=series_id):
                             print(f"{GREEN}[INFO] [{thread_name}] Translated {item_name} subtitles to en.{RESET}")
-                            
                     break
             else:
                 print(f"{RED}[WARNING] [{thread_name}] No usable subtitles found for translation. Skipping...{RESET}")
@@ -371,16 +289,9 @@ def process_item(item, item_type, id_field, params_field):
             print(f"{GREEN}[INFO] [{thread_name}] Translated {item_name} subtitles to {SECOND_LANG}.{RESET}")
 
 def process_items(item_type, wanted_endpoint, id_field, params_field):
-    """Process all wanted items of a specified type (episodes or movies) with parallel processing."""
-    # Check if shutdown was requested
+    """Process all wanted items of a specified type with parallel processing."""
     if shutdown_requested:
         print(f"{RED}[WARNING] Shutdown requested. Stopping execution.{RESET}")
-        sys.stdout.flush()
-        return
-    
-    # Check if runtime has exceeded the allowed limit
-    if time.time() - script_start_time > MAX_RUNTIME:
-        print(f"{RED}[WARNING] Maximum runtime of {MAX_RUNTIME / 3600:.2f} hours exceeded. Stopping execution.{RESET}")
         sys.stdout.flush()
         return
 
@@ -391,35 +302,22 @@ def process_items(item_type, wanted_endpoint, id_field, params_field):
 
     print(f"{GREEN}[INFO] Beginning parallel processing for {len(items)} {item_type}(s).{RESET}")
     
-    # Use ThreadPoolExecutor for parallel processing
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL_TRANSLATIONS) as executor:
-        # Submit tasks to ThreadPoolExecutor
         future_to_item = {
             executor.submit(process_item, item, item_type, id_field, params_field): item for item in items
         }
 
-        # As each task completes, log the results or handle exceptions
         for future in as_completed(future_to_item):
-            check_hard_timeout()
-            # Check if shutdown was requested
             if shutdown_requested:
                 print(f"{RED}[WARNING] Shutdown requested. Cancelling remaining tasks.{RESET}")
-                sys.stdout.flush()
-                executor.shutdown(wait=False, cancel_futures=True)
-                return
-            
-            # Check if runtime has exceeded the allowed limit
-            if time.time() - script_start_time > MAX_RUNTIME:
-                print(f"{RED}[WARNING] Maximum runtime of {MAX_RUNTIME / 3600:.2f} hours exceeded. Stopping execution.{RESET}")
                 sys.stdout.flush()
                 executor.shutdown(wait=False, cancel_futures=True)
                 return
 
             item = future_to_item[future]
             item_name = item.get("seriesTitle", item.get("title", "Unknown Item"))
-            item_id = item.get(id_field, "Unknown ID")  # Include `id_field` as an identifier
+            item_id = item.get(id_field, "Unknown ID")
             try:
-                # Return result of the task
                 future.result()
                 print(f"{GREEN}[INFO] Successfully completed processing for item: {item_name} (ID: {item_id}){RESET}")
                 sys.stdout.flush()
@@ -445,49 +343,60 @@ def translate_movie_subs():
         params_field="radarrid",
     )
 
-def main():
-    print(f"{GREEN}[INFO] Starting subtitle processing...{RESET}")
+def run_translation_cycle():
+    """Run a single translation cycle for movies and episodes."""
+    print(f"{GREEN}[INFO] Starting translation cycle...{RESET}")
     sys.stdout.flush()
 
-    # Keep track of start time
-    global script_start_time
-    script_start_time = time.time()
-
     try:
-        # Check for shutdown signal
-        if shutdown_requested:
-            print(f"{RED}[WARNING] Shutdown requested before processing started.{RESET}")
-            sys.stdout.flush()
-            return 1
-        
-        # Translate movies
-        if time.time() - script_start_time > MAX_RUNTIME:
-            raise TimeoutError(f"Maximum runtime of {MAX_RUNTIME / 3600:.2f} hours exceeded.")
         if not shutdown_requested:
             translate_movie_subs()
-
-        # Translate episodes
-        if time.time() - script_start_time > MAX_RUNTIME:
-            raise TimeoutError(f"Maximum runtime of {MAX_RUNTIME / 3600:.2f} hours exceeded.")
+        
         if not shutdown_requested:
             translate_episode_subs()
 
-        if shutdown_requested:
-            print(f"{RED}[WARNING] Processing interrupted by shutdown signal.{RESET}")
-            sys.stdout.flush()
-            return 130  # Standard exit code for SIGINT
-        
-        print(f"{GREEN}[INFO] Subtitle processing completed successfully.{RESET}")
+        print(f"{GREEN}[INFO] Translation cycle completed.{RESET}")
         sys.stdout.flush()
-        return 0
-    except TimeoutError as e:
-        print(f"{RED}[WARNING] {e}{RESET}")
-        sys.stdout.flush()
-        return 124  # Standard exit code for timeout
+        return True
     except Exception as e:
-        print(f"{BOLD_RED}[ERROR] Unexpected error occurred: {e}{RESET}")
+        print(f"{BOLD_RED}[ERROR] Unexpected error during translation cycle: {e}{RESET}")
         sys.stdout.flush()
-        return 1
+        return False
+
+def main():
+    """Main loop - continuously check for missing subtitles and process them."""
+    print(f"{GREEN}[INFO] Bazarr AutoTranslate started in continuous mode{RESET}")
+    print(f"{GREEN}[INFO] Configuration:{RESET}")
+    print(f"{GREEN}  - Bazarr Host: {BAZARR_HOSTNAME}{RESET}")
+    print(f"{GREEN}  - Primary Language: {FIRST_LANG}{RESET}")
+    print(f"{GREEN}  - Secondary Language: {SECOND_LANG}{RESET}")
+    print(f"{GREEN}  - Check Interval: {CHECK_INTERVAL} seconds{RESET}")
+    print(f"{GREEN}  - Max Parallel: {MAX_PARALLEL_TRANSLATIONS}{RESET}")
+    sys.stdout.flush()
+
+    cycle_count = 0
+    
+    while not shutdown_requested:
+        cycle_count += 1
+        print(f"{GREEN}[INFO] ===== Cycle #{cycle_count} ====={RESET}")
+        
+        run_translation_cycle()
+        
+        if shutdown_requested:
+            break
+        
+        print(f"{GREEN}[INFO] Waiting {CHECK_INTERVAL} seconds before next check...{RESET}")
+        sys.stdout.flush()
+        
+        # Sleep in small intervals to allow quick shutdown
+        for _ in range(CHECK_INTERVAL):
+            if shutdown_requested:
+                break
+            time.sleep(1)
+    
+    print(f"{GREEN}[INFO] Bazarr AutoTranslate shutting down gracefully.{RESET}")
+    sys.stdout.flush()
+    return 0
 
 if __name__ == "__main__":
     exit_code = 1
