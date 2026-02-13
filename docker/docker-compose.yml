@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  bazarr-autotranslate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bazarr-autotranslate
+    restart: unless-stopped
+    environment:
+      # Bazarr Connection
+      - BAZARR_HOSTNAME=${BAZARR_HOSTNAME}
+      - BAZARR_APIKEY=${BAZARR_APIKEY}
+      
+      # Translation Settings
+      - FIRST_LANG=${FIRST_LANG:-et}
+      - SECOND_LANG=${SECOND_LANG:-sv}
+      - MAX_PARALLEL_TRANSLATIONS=${MAX_PARALLEL_TRANSLATIONS:-2}
+      - TRANSLATE_DELAY=${TRANSLATE_DELAY:-0.3}
+      - CHECK_INTERVAL=${CHECK_INTERVAL:-300}
+      
+      # API Timeouts
+      - API_TIMEOUT=${API_TIMEOUT:-2400}
+      - CONNECT_TIMEOUT=${CONNECT_TIMEOUT:-10}
+      
+      # Cleanup Settings
+      - CLEANUP_TIME=${CLEANUP_TIME:-04:00}
+      - CLEANUP_ROOT=${CLEANUP_ROOT:-/media}
+      - CLEANUP_MIN_CONFIDENCE=${CLEANUP_MIN_CONFIDENCE:-0.70}
+      - CLEANUP_MIN_CHARS=${CLEANUP_MIN_CHARS:-200}
+    
+    volumes:
+      # Mount your media folders (adjust paths as needed)
+      - ${MEDIA_PATH}:/media
+      # Mount logs (optional)
+      - ./logs:/var/log/bazarr-autotranslate
+    
+    # If Bazarr is in the same docker network
+    # networks:
+    #   - media-network
+
+# networks:
+#   media-network:
+#     external: true
