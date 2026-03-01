@@ -106,7 +106,7 @@ def download_subtitles(item_type, item_id, params_field, language="en", series_i
         print(f"{YELLOW}[DEBUG] Response status code: {response.status_code}{RESET}")
         if response.status_code == 204:
             print(f"{GREEN}[INFO] Subtitles in language '{language}' successfully downloaded for {item_type} (ID: {item_id}).{RESET}")
-            return True
+            return verify_translation_complete(item_type, item_id, params_field, language)
         else:
             print(f"{RED}[WARNING] Failed to download subtitles in language '{language}'. Response Code: {response.status_code}{RESET}")
             return False
@@ -166,9 +166,10 @@ def verify_translation_complete(item_type, item_id, params_field, target_lang, m
             print(f"{GREEN}[INFO] [{thread_name}] Verified: '{target_lang}' subtitle present for {item_type} (ID: {item_id}) after {elapsed}s.{RESET}")
             sys.stdout.flush()
             return True
+        print(f"{YELLOW}[DEBUG] [{thread_name}] '{target_lang}' not yet available for {item_type} (ID: {item_id}), retrying in {poll_interval}s... ({elapsed}s/{max_wait}s){RESET}")
+        sys.stdout.flush()
         time.sleep(poll_interval)
         elapsed += poll_interval
-        print(f"{YELLOW}[DEBUG] [{thread_name}] Waiting for '{target_lang}' translation to finish for {item_type} (ID: {item_id})... ({elapsed}s/{max_wait}s){RESET}")
         sys.stdout.flush()
     print(f"{RED}[WARNING] [{thread_name}] Timed out waiting for '{target_lang}' translation for {item_type} (ID: {item_id}).{RESET}")
     sys.stdout.flush()
