@@ -3,7 +3,6 @@ import time
 import os
 import sys
 import signal
-from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
@@ -138,9 +137,8 @@ def fetch_subtitle_path(item_type, item_id, params_field, language="en"):
                     for subtitle in item["subtitles"]:
                         if subtitle.get("code2") == language:
                             raw_path = subtitle["path"]
-                            encoded_path = quote(raw_path, safe="")
-                            print(f"{GREEN}[INFO] [{thread_name}] Found subtitle path for {item_type} (ID: {item_id}, Language: {language}): {encoded_path}{RESET}")
-                            return encoded_path
+                            print(f"{GREEN}[INFO] [{thread_name}] Found subtitle path for {item_type} (ID: {item_id}, Language: {language}): {raw_path}{RESET}")
+                            return raw_path
         else:
             print(f"{RED}[WARNING] [{thread_name}] Failed to fetch subtitle path for {item_type} (ID: {item_id}). Response Code: {response.status_code}{RESET}")
     except requests.Timeout:
@@ -187,15 +185,21 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
     singular_item_type = "movie" if item_type == "movies" else "episode" if item_type == "episodes" else item_type
 
     url = get_api_url("subtitles")
-    constructed_url = (
-        f"{url}?action=translate&language={target_lang}&path={subs_path}&type={singular_item_type}&id={item_id}&forced=False&hi=False"
-    )
+    params = {
+        "action": "translate",
+        "language": target_lang,
+        "path": subs_path,
+        "type": singular_item_type,
+        "id": item_id,
+        "forced": "False",
+        "hi": "False",
+    }
 
-    print(f"{YELLOW}[DEBUG] [{thread_name}] Constructed URL: {constructed_url}{RESET}")
+    print(f"{YELLOW}[DEBUG] [{thread_name}] Translating {item_type} (ID: {item_id}) to '{target_lang}' using path: {subs_path}{RESET}")
 
     try:
         start_time = time.time()
-        response = requests.patch(constructed_url, headers=HEADERS, timeout=CONNECT_TIMEOUT)
+        response = requests.patch(url, params=params, headers=HEADERS, timeout=CONNECT_TIMEOUT)
         elapsed_time = time.time() - start_time
         print(f"{GREEN}[INFO] [{thread_name}] Time taken for API request: {elapsed_time:.2f} seconds for {item_type} (ID: {item_id}){RESET}")
 
@@ -208,10 +212,16 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
             if download_subtitles(item_type, item_id, params_field, language="en", series_id=series_id):
                 new_subs_path = fetch_subtitle_path(item_type, item_id, params_field)
                 if new_subs_path:
-                    retry_url = (
-                        f"{url}?action=translate&language={target_lang}&path={new_subs_path}&type={singular_item_type}&id={item_id}&forced=False&hi=False"
-                    )
-                    retry_response = requests.patch(retry_url, headers=HEADERS, timeout=CONNECT_TIMEOUT)
+                    retry_params = {
+                        "action": "translate",
+                        "language": target_lang,
+                        "path": new_subs_path,
+                        "type": singular_item_type,
+                        "id": item_id,
+                        "forced": "False",
+                        "hi": "False",
+                    }
+                    retry_response = requests.patch(url, params=retry_params, headers=HEADERS, timeout=CONNECT_TIMEOUT)
 
                     if retry_response.status_code == 204:
                         print(f"{GREEN}[INFO] [{thread_name}] Subtitles successfully translated to {target_lang} after retry for {item_type} (ID: {item_id}).{RESET}")
