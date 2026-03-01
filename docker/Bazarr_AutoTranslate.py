@@ -26,7 +26,6 @@ MAX_PARALLEL_TRANSLATIONS = int(os.getenv("MAX_PARALLEL_TRANSLATIONS", "2"))
 TRANSLATE_DELAY = float(os.getenv("TRANSLATE_DELAY", "0.3"))
 BAZARR_HOSTNAME = os.getenv("BAZARR_HOSTNAME", "localhost:6767")
 BAZARR_APIKEY = os.getenv("BAZARR_APIKEY", "")
-API_TIMEOUT = int(os.getenv("API_TIMEOUT", "2400"))
 CONNECT_TIMEOUT = int(os.getenv("CONNECT_TIMEOUT", "10"))
 FIRST_LANG = os.getenv("FIRST_LANG", "et")
 SECOND_LANG = os.getenv("SECOND_LANG", "sv")
@@ -69,7 +68,7 @@ def fetch_items(item_type, wanted_endpoint):
     print(f"{YELLOW}[DEBUG] [{thread_name}] Fetching {item_type} from URL: {url}{RESET}")
 
     try:
-        response = requests.get(url, headers=HEADERS, timeout=(CONNECT_TIMEOUT, API_TIMEOUT))
+        response = requests.get(url, headers=HEADERS, timeout=CONNECT_TIMEOUT)
         print(f"{YELLOW}[DEBUG] [{thread_name}] Response status code: {response.status_code}{RESET}")
         sys.stdout.flush()
         if response.status_code == 200:
@@ -102,7 +101,7 @@ def download_subtitles(item_type, item_id, params_field, language="en", series_i
     print(f"{YELLOW}[DEBUG] Attempting to download {language} subtitles from URL: {constructed_url}{RESET}")
     sys.stdout.flush()
     try:
-        response = requests.patch(constructed_url, headers=HEADERS, timeout=(CONNECT_TIMEOUT, API_TIMEOUT))
+        response = requests.patch(constructed_url, headers=HEADERS, timeout=CONNECT_TIMEOUT)
         print(f"{YELLOW}[DEBUG] Response status code: {response.status_code}{RESET}")
         if response.status_code == 204:
             print(f"{GREEN}[INFO] Subtitles in language '{language}' successfully downloaded for {item_type} (ID: {item_id}).{RESET}")
@@ -128,7 +127,7 @@ def fetch_subtitle_path(item_type, item_id, params_field, language="en"):
     print(f"{YELLOW}[DEBUG] [{thread_name}] Fetching subtitle path for {item_type} (ID: {item_id}, Language: {language}) from URL: {constructed_url}{RESET}")
 
     try:
-        response = requests.get(constructed_url, headers=HEADERS, timeout=(CONNECT_TIMEOUT, API_TIMEOUT))
+        response = requests.get(constructed_url, headers=HEADERS, timeout=CONNECT_TIMEOUT)
         print(f"{YELLOW}[DEBUG] [{thread_name}] Response status code for {item_type} (ID: {item_id}): {response.status_code}{RESET}")
         sys.stdout.flush()
         
@@ -196,7 +195,7 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
 
     try:
         start_time = time.time()
-        response = requests.patch(constructed_url, headers=HEADERS, timeout=(CONNECT_TIMEOUT, API_TIMEOUT))
+        response = requests.patch(constructed_url, headers=HEADERS, timeout=CONNECT_TIMEOUT)
         elapsed_time = time.time() - start_time
         print(f"{GREEN}[INFO] [{thread_name}] Time taken for API request: {elapsed_time:.2f} seconds for {item_type} (ID: {item_id}){RESET}")
 
@@ -212,7 +211,7 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
                     retry_url = (
                         f"{url}?action=translate&language={target_lang}&path={new_subs_path}&type={singular_item_type}&id={item_id}&forced=False&hi=False"
                     )
-                    retry_response = requests.patch(retry_url, headers=HEADERS, timeout=(CONNECT_TIMEOUT, API_TIMEOUT))
+                    retry_response = requests.patch(retry_url, headers=HEADERS, timeout=CONNECT_TIMEOUT)
 
                     if retry_response.status_code == 204:
                         print(f"{GREEN}[INFO] [{thread_name}] Subtitles successfully translated to {target_lang} after retry for {item_type} (ID: {item_id}).{RESET}")
@@ -236,7 +235,7 @@ def fetch_subtitle_data(item_type, item_id, params_field):
     thread_name = threading.current_thread().name
     url = get_api_url(f"{item_type}?length=-1&{params_field}%5B%5D={item_id}")
     try:
-        response = requests.get(url, headers=HEADERS, timeout=(CONNECT_TIMEOUT, API_TIMEOUT))
+        response = requests.get(url, headers=HEADERS, timeout=CONNECT_TIMEOUT)
         sys.stdout.flush()
         if response.status_code == 200:
             subtitle_response = response.json()
