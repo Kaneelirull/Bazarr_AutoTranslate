@@ -93,9 +93,9 @@ def download_subtitles(item_type, item_id, params_field, language="en", series_i
     url = get_api_url(f"{item_type}/subtitles")
     
     if item_type == "episodes" and series_id:
-        query_params = f"seriesid={series_id}&{params_field}={item_id}&language={language}&forced=false&hi=false"
+        query_params = f"seriesid={series_id}&{params_field}={item_id}&language={language}&forced=False&hi=False"
     else:
-        query_params = f"{params_field}={item_id}&language={language}&forced=false&hi=false"
+        query_params = f"{params_field}={item_id}&language={language}&forced=False&hi=False"
     
     constructed_url = f"{url}?{query_params}"
 
@@ -124,7 +124,7 @@ def fetch_subtitle_path(item_type, item_id, params_field, language="en"):
     thread_name = threading.current_thread().name
 
     url = get_api_url(item_type)
-    constructed_url = f"{url}?{params_field}%5B%5D={item_id}&language={language}"
+    constructed_url = f"{url}?{params_field}%5B%5D={item_id}"
     print(f"{YELLOW}[DEBUG] [{thread_name}] Fetching subtitle path for {item_type} (ID: {item_id}, Language: {language}) from URL: {constructed_url}{RESET}")
 
     try:
@@ -189,7 +189,7 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
 
     url = get_api_url("subtitles")
     constructed_url = (
-        f"{url}?action=translate&language={target_lang}&path={subs_path}&type={singular_item_type}&id={item_id}&forced=false&hi=false"
+        f"{url}?action=translate&language={target_lang}&path={subs_path}&type={singular_item_type}&id={item_id}&forced=False&hi=False"
     )
 
     print(f"{YELLOW}[DEBUG] [{thread_name}] Constructed URL: {constructed_url}{RESET}")
@@ -210,13 +210,13 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
                 new_subs_path = fetch_subtitle_path(item_type, item_id, params_field)
                 if new_subs_path:
                     retry_url = (
-                        f"{url}?action=translate&language={target_lang}&path={new_subs_path}&type={singular_item_type}&id={item_id}&forced=false&hi=false"
+                        f"{url}?action=translate&language={target_lang}&path={new_subs_path}&type={singular_item_type}&id={item_id}&forced=False&hi=False"
                     )
                     retry_response = requests.patch(retry_url, headers=HEADERS, timeout=(CONNECT_TIMEOUT, API_TIMEOUT))
 
                     if retry_response.status_code == 204:
                         print(f"{GREEN}[INFO] [{thread_name}] Subtitles successfully translated to {target_lang} after retry for {item_type} (ID: {item_id}).{RESET}")
-                        return True
+                        return verify_translation_complete(item_type, item_id, params_field, target_lang)
                     else:
                         print(f"{RED}[WARNING] [{thread_name}] Retry translation failed for {item_type} (ID: {item_id}). Response Code: {retry_response.status_code}{RESET}")
 
@@ -293,6 +293,10 @@ def process_item(item, item_type, id_field, params_field):
                     if "en" in missing_languages:
                         if translate_subtitle(item_type, item_id, subs_path, "en", params_field, series_id=series_id):
                             print(f"{GREEN}[INFO] [{thread_name}] Translated {item_name} subtitles to en.{RESET}")
+                            en_path = fetch_subtitle_path(item_type, item_id, params_field, language="en")
+                            if en_path:
+                                subs_path = en_path
+                                print(f"{GREEN}[INFO] [{thread_name}] Switched source to newly translated EN subtitle.{RESET}")
                     break
             else:
                 print(f"{RED}[WARNING] [{thread_name}] No usable subtitles found for translation. Skipping...{RESET}")
