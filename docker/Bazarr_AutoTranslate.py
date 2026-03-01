@@ -31,6 +31,8 @@ CONNECT_TIMEOUT = int(os.getenv("CONNECT_TIMEOUT", "10"))
 FIRST_LANG = os.getenv("FIRST_LANG", "et")
 SECOND_LANG = os.getenv("SECOND_LANG", "sv")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))  # 5 minutes default
+TRANSLATION_VERIFY_TIMEOUT = int(os.getenv("TRANSLATION_VERIFY_TIMEOUT", "300"))  # max seconds to wait for async translation
+TRANSLATION_POLL_INTERVAL = int(os.getenv("TRANSLATION_POLL_INTERVAL", "10"))   # how often to poll
 
 if not BAZARR_APIKEY:
     print(f"{BOLD_RED}[ERROR] BAZARR_APIKEY environment variable is required{RESET}")
@@ -151,6 +153,27 @@ def fetch_subtitle_path(item_type, item_id, params_field, language="en"):
     
     return None
 
+def verify_translation_complete(item_type, item_id, params_field, target_lang, max_wait=None, poll_interval=None):
+    """Poll until the target language subtitle appears, confirming async translation finished."""
+    max_wait = max_wait if max_wait is not None else TRANSLATION_VERIFY_TIMEOUT
+    poll_interval = poll_interval if poll_interval is not None else TRANSLATION_POLL_INTERVAL
+    thread_name = threading.current_thread().name
+    elapsed = 0
+    while elapsed < max_wait:
+        subtitles = fetch_subtitle_data(item_type, item_id, params_field)
+        available = [s.get("code2") for s in subtitles if isinstance(subtitles, list)]
+        if target_lang in available:
+            print(f"{GREEN}[INFO] [{thread_name}] Verified: '{target_lang}' subtitle present for {item_type} (ID: {item_id}) after {elapsed}s.{RESET}")
+            sys.stdout.flush()
+            return True
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+        print(f"{YELLOW}[DEBUG] [{thread_name}] Waiting for '{target_lang}' translation to finish for {item_type} (ID: {item_id})... ({elapsed}s/{max_wait}s){RESET}")
+        sys.stdout.flush()
+    print(f"{RED}[WARNING] [{thread_name}] Timed out waiting for '{target_lang}' translation for {item_type} (ID: {item_id}).{RESET}")
+    sys.stdout.flush()
+    return False
+
 def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field, series_id=None):
     """Translate subtitles to the specified target language."""
     thread_name = threading.current_thread().name
@@ -178,7 +201,7 @@ def translate_subtitle(item_type, item_id, subs_path, target_lang, params_field,
 
         if response.status_code == 204:
             print(f"{GREEN}[INFO] [{thread_name}] Subtitles translated successfully to {target_lang} for {item_type} (ID: {item_id}).{RESET}")
-            return True
+            return verify_translation_complete(item_type, item_id, params_field, target_lang)
         elif response.status_code == 500:
             print(f"{RED}[WARNING] [{thread_name}] Received status code 500 for {item_type} (ID: {item_id}). Retrying...{RESET}")
 
