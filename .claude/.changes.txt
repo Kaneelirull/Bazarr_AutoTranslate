@@ -1,0 +1,8 @@
+# .changes.txt — project change log
+# Maintained by git-deploy agent. Newest entries at top.
+
+2026-04-02 | fix: skip translation for languages already present on disk
+  - added `not in available_languages` guard for FIRST_LANG and SECOND_LANG in process_item
+  - prevents unnecessary translation API calls when subtitle already exists on disk
+  - stops verify_translation_complete from returning True immediately on old file, eliminating rapid-fire API hammering
+

@@ -317,11 +317,11 @@ def process_item(item, item_type, id_field, params_field):
         print(f"{RED}[WARNING] [{thread_name}] Failed to retrieve subtitle path for {item_name}. Skipping...{RESET}")
         return
     
-    if FIRST_LANG in missing_languages:
+    if FIRST_LANG in missing_languages and FIRST_LANG not in available_languages:
         if translate_subtitle(item_type, item_id, subs_path, FIRST_LANG, params_field, series_id=series_id):
             print(f"{GREEN}[INFO] [{thread_name}] Translated {item_name} subtitles to {FIRST_LANG}.{RESET}")
 
-    if SECOND_LANG and SECOND_LANG in missing_languages:
+    if SECOND_LANG and SECOND_LANG in missing_languages and SECOND_LANG not in available_languages:
         if translate_subtitle(item_type, item_id, subs_path, SECOND_LANG, params_field, series_id=series_id):
             print(f"{GREEN}[INFO] [{thread_name}] Translated {item_name} subtitles to {SECOND_LANG}.{RESET}")
 
