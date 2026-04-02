@@ -162,6 +162,12 @@ def verify_translation_complete(item_type, item_id, params_field, target_lang, m
         if target_lang in available:
             print(f"{GREEN}[INFO] [{thread_name}] Verified: '{target_lang}' subtitle present for {item_type} (ID: {item_id}) after {elapsed}s.{RESET}")
             sys.stdout.flush()
+            if elapsed == 0:
+                # Translation completed near-instantly; wait one poll interval before
+                # the next submission so we don't hammer the translation service.
+                print(f"{YELLOW}[DEBUG] [{thread_name}] Fast translation detected, waiting {poll_interval}s before next job.{RESET}")
+                sys.stdout.flush()
+                time.sleep(poll_interval)
             return True
         print(f"{YELLOW}[DEBUG] [{thread_name}] '{target_lang}' not yet available for {item_type} (ID: {item_id}), retrying in {poll_interval}s... ({elapsed}s/{max_wait}s){RESET}")
         sys.stdout.flush()

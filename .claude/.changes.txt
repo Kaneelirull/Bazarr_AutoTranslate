@@ -1,8 +1,12 @@
 # .changes.txt — project change log
 # Maintained by git-deploy agent. Newest entries at top.
 
+2026-04-02 | fix: add minimum poll_interval wait after instant translations
+  - sleep one poll_interval before returning when verify_translation_complete finds subtitle at elapsed=0
+  - prevents episodes from firing back-to-back every ~1.5s when translation completes synchronously
+  - matches the natural throttle movies receive from longer async verification times
+
 2026-04-02 | fix: skip translation for languages already present on disk
   - added `not in available_languages` guard for FIRST_LANG and SECOND_LANG in process_item
   - prevents unnecessary translation API calls when subtitle already exists on disk
   - stops verify_translation_complete from returning True immediately on old file, eliminating rapid-fire API hammering
-
