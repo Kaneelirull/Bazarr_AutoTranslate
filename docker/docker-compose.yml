@@ -1,44 +1,67 @@
 version: '3.8'
 
 services:
+  lingarr:
+    image: lingarr/lingarr:latest
+    container_name: lingarr
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - lingarr_data:/app/config
+    environment:
+      - TZ=${TZ:-Europe/Tallinn}
+    # GPU passthrough (uncomment for NVIDIA):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
   bazarr-autotranslate:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: bazarr-autotranslate
     restart: unless-stopped
+    depends_on:
+      - lingarr
     environment:
       # Bazarr Connection
       - BAZARR_HOSTNAME=${BAZARR_HOSTNAME}
       - BAZARR_APIKEY=${BAZARR_APIKEY}
-      
-      # Translation Settings
+
+      # Lingarr Connection
+      - LINGARR_HOSTNAME=${LINGARR_HOSTNAME:-http://lingarr:8080}
+      - LINGARR_APIKEY=${LINGARR_APIKEY:-}
+      - LINGARR_HEALTH_CHECK=${LINGARR_HEALTH_CHECK:-true}
+
+      # Translation Settings (tuned for local AI — no external rate limits)
       - FIRST_LANG=${FIRST_LANG:-et}
       - SECOND_LANG=${SECOND_LANG:-sv}
-      - MAX_PARALLEL_TRANSLATIONS=${MAX_PARALLEL_TRANSLATIONS:-2}
-      - TRANSLATE_DELAY=${TRANSLATE_DELAY:-0.3}
+      - MAX_PARALLEL_TRANSLATIONS=${MAX_PARALLEL_TRANSLATIONS:-4}
+      - TRANSLATE_DELAY=${TRANSLATE_DELAY:-0.1}
       - CHECK_INTERVAL=${CHECK_INTERVAL:-300}
-      
+      - TRANSLATION_VERIFY_TIMEOUT=${TRANSLATION_VERIFY_TIMEOUT:-600}
+      - TRANSLATION_POLL_INTERVAL=${TRANSLATION_POLL_INTERVAL:-10}
+
       # API Timeouts
       - API_TIMEOUT=${API_TIMEOUT:-2400}
       - CONNECT_TIMEOUT=${CONNECT_TIMEOUT:-10}
-      
+
       # Cleanup Settings
       - CLEANUP_TIME=${CLEANUP_TIME:-04:00}
       - CLEANUP_ROOT=${CLEANUP_ROOT:-/media}
       - CLEANUP_MIN_CONFIDENCE=${CLEANUP_MIN_CONFIDENCE:-0.70}
       - CLEANUP_MIN_CHARS=${CLEANUP_MIN_CHARS:-200}
-    
-    volumes:
-      # Mount your media folders (adjust paths as needed)
-      - ${MEDIA_PATH}:/media
-      # Mount logs (optional)
-      - ./logs:/var/log/bazarr-autotranslate
-    
-    # If Bazarr is in the same docker network
-    # networks:
-    #   - media-network
 
-# networks:
-#   media-network:
-#     external: true
+      - TZ=${TZ:-Europe/Tallinn}
+
+    volumes:
+      - ${MEDIA_PATH}:/media
+      - ./logs:/var/log/bazarr-autotranslate
+
+volumes:
+  lingarr_data:

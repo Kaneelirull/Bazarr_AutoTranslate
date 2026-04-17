@@ -21,16 +21,19 @@ BOLD_RED = "\033[1;91m" if USE_COLORS else ""
 RESET = "\033[0m" if USE_COLORS else ""
 
 # Configuration from environment variables
-MAX_PARALLEL_TRANSLATIONS = int(os.getenv("MAX_PARALLEL_TRANSLATIONS", "2"))
-TRANSLATE_DELAY = float(os.getenv("TRANSLATE_DELAY", "0.3"))
+MAX_PARALLEL_TRANSLATIONS = int(os.getenv("MAX_PARALLEL_TRANSLATIONS", "4"))
+TRANSLATE_DELAY = float(os.getenv("TRANSLATE_DELAY", "0.1"))
 BAZARR_HOSTNAME = os.getenv("BAZARR_HOSTNAME", "localhost:6767")
 BAZARR_APIKEY = os.getenv("BAZARR_APIKEY", "")
 CONNECT_TIMEOUT = int(os.getenv("CONNECT_TIMEOUT", "10"))
 FIRST_LANG = os.getenv("FIRST_LANG", "et")
 SECOND_LANG = os.getenv("SECOND_LANG", "sv")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))  # 5 minutes default
-TRANSLATION_VERIFY_TIMEOUT = int(os.getenv("TRANSLATION_VERIFY_TIMEOUT", "300"))  # max seconds to wait for async translation
+TRANSLATION_VERIFY_TIMEOUT = int(os.getenv("TRANSLATION_VERIFY_TIMEOUT", "600"))  # max seconds to wait for async translation
 TRANSLATION_POLL_INTERVAL = int(os.getenv("TRANSLATION_POLL_INTERVAL", "10"))   # how often to poll
+LINGARR_HOSTNAME    = os.getenv("LINGARR_HOSTNAME", "")
+LINGARR_APIKEY      = os.getenv("LINGARR_APIKEY", "")
+LINGARR_HEALTH_CHECK = os.getenv("LINGARR_HEALTH_CHECK", "true").lower() == "true"
 
 if not BAZARR_APIKEY:
     print(f"{BOLD_RED}[ERROR] BAZARR_APIKEY environment variable is required{RESET}")
@@ -59,6 +62,31 @@ def get_api_url(endpoint):
     else:
         base_url = f"http://{BAZARR_HOSTNAME}"
     return f"{base_url}/api/{endpoint}"
+
+def get_lingarr_url(endpoint):
+    """Construct the full API URL for a given Lingarr endpoint."""
+    if not LINGARR_HOSTNAME:
+        return None
+    base = LINGARR_HOSTNAME if LINGARR_HOSTNAME.startswith(('http://', 'https://')) else f"http://{LINGARR_HOSTNAME}"
+    return f"{base}/api/{endpoint}"
+
+def check_lingarr_health():
+    """Probe Lingarr's health endpoint on startup. Non-blocking — warns but does not exit."""
+    if not LINGARR_HEALTH_CHECK or not LINGARR_HOSTNAME:
+        return
+    url = get_lingarr_url("health")
+    headers = {"Accept": "application/json"}
+    if LINGARR_APIKEY:
+        headers["X-Api-Key"] = LINGARR_APIKEY
+    try:
+        r = requests.get(url, headers=headers, timeout=CONNECT_TIMEOUT)
+        if r.status_code == 200:
+            print(f"{GREEN}[INFO] Lingarr health check passed ({url}).{RESET}")
+        else:
+            print(f"{YELLOW}[WARNING] Lingarr health check returned {r.status_code}. Translation may fail.{RESET}")
+    except requests.RequestException as e:
+        print(f"{YELLOW}[WARNING] Could not reach Lingarr at {url}: {e}{RESET}")
+    sys.stdout.flush()
 
 def fetch_items(item_type, wanted_endpoint):
     """Fetch the list of wanted episodes or movies."""
@@ -415,7 +443,11 @@ def main():
     print(f"{GREEN}  - Secondary Language: {SECOND_LANG}{RESET}")
     print(f"{GREEN}  - Check Interval: {CHECK_INTERVAL} seconds{RESET}")
     print(f"{GREEN}  - Max Parallel: {MAX_PARALLEL_TRANSLATIONS}{RESET}")
+    if LINGARR_HOSTNAME:
+        print(f"{GREEN}  - Lingarr Host: {LINGARR_HOSTNAME}{RESET}")
     sys.stdout.flush()
+
+    check_lingarr_health()
 
     cycle_count = 0
     
