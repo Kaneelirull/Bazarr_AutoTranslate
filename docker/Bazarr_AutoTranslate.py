@@ -74,7 +74,8 @@ def check_lingarr_health():
     """Probe Lingarr's health endpoint on startup. Non-blocking — warns but does not exit."""
     if not LINGARR_HEALTH_CHECK or not LINGARR_HOSTNAME:
         return
-    url = get_lingarr_url("health")
+    base = LINGARR_HOSTNAME if LINGARR_HOSTNAME.startswith(('http://', 'https://')) else f"http://{LINGARR_HOSTNAME}"
+    url = f"{base}/health"
     headers = {"Accept": "application/json"}
     if LINGARR_APIKEY:
         headers["X-Api-Key"] = LINGARR_APIKEY
