@@ -29,29 +29,25 @@ services:
     depends_on:
       - lingarr
     environment:
-      # Bazarr Connection
-      - BAZARR_HOSTNAME=${BAZARR_HOSTNAME}
-      - BAZARR_APIKEY=${BAZARR_APIKEY}
+      # Bazarr Connection (REQUIRED)
+      - BAZARR_URL=${BAZARR_URL}
+      - BAZARR_API_KEY=${BAZARR_API_KEY}
 
-      # Lingarr Connection
-      - LINGARR_HOSTNAME=${LINGARR_HOSTNAME:-http://lingarr:8080}
-      - LINGARR_APIKEY=${LINGARR_APIKEY:-}
-      - LINGARR_HEALTH_CHECK=${LINGARR_HEALTH_CHECK:-true}
+      # Languages to manage (comma-separated, order = source priority)
+      - LANGUAGES=${LANGUAGES:-en,et,sv}
 
-      # Translation Settings (tuned for local AI — no external rate limits)
-      - FIRST_LANG=${FIRST_LANG:-et}
-      - SECOND_LANG=${SECOND_LANG:-sv}
-      - MAX_PARALLEL_TRANSLATIONS=${MAX_PARALLEL_TRANSLATIONS:-4}
-      - TRANSLATE_DELAY=${TRANSLATE_DELAY:-0.1}
-      - CHECK_INTERVAL=${CHECK_INTERVAL:-300}
-      - TRANSLATION_VERIFY_TIMEOUT=${TRANSLATION_VERIFY_TIMEOUT:-600}
-      - TRANSLATION_POLL_INTERVAL=${TRANSLATION_POLL_INTERVAL:-10}
+      # Lingarr Connection (optional — enables queue tracking)
+      - LINGARR_URL=${LINGARR_URL:-http://lingarr:8080}
+      - LINGARR_API_KEY=${LINGARR_API_KEY:-}
 
-      # API Timeouts
-      - API_TIMEOUT=${API_TIMEOUT:-2400}
+      # Timing
+      - PARALLEL_TRANSLATES=${PARALLEL_TRANSLATES:-1}
+      - CHECK_INTERVAL=${CHECK_INTERVAL:-1200}
       - CONNECT_TIMEOUT=${CONNECT_TIMEOUT:-10}
+      - POLL_INTERVAL=${POLL_INTERVAL:-20}
+      - POLL_TIMEOUT=${POLL_TIMEOUT:-600}
 
-      # Cleanup Settings
+      # Cleanup (used by entrypoint.sh only)
       - CLEANUP_TIME=${CLEANUP_TIME:-04:00}
       - CLEANUP_ROOT=${CLEANUP_ROOT:-/media}
       - CLEANUP_MIN_CONFIDENCE=${CLEANUP_MIN_CONFIDENCE:-0.70}
