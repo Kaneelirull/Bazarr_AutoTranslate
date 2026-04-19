@@ -354,6 +354,15 @@ def process_item(item: dict, item_type: str, id_field: str,
                     stats["timed_out"] += 1
             continue
 
+        recheck = fetch_subtitles(item_type, item_id, id_field)
+        recheck_available = {s["code2"] for s in recheck if s.get("code2") and s.get("path")}
+        if target_lang in recheck_available:
+            print(f"[INFO] {title} '{target_lang}': already available in Bazarr, skipping submission")
+            with stats_lock:
+                stats["completed"] += 1
+                stats["translations"].append(f"{title}: {source_lang} -> {target_lang}")
+            continue
+
         print(f"[TRANSLATE] {title}: {source_lang} -> {target_lang}")
         ok = submit_translate(item_type, item_id, source_path, target_lang)
         if ok:
@@ -453,6 +462,22 @@ def main() -> int:
             if shutdown_requested:
                 break
             time.sleep(1)
+
+        if LINGARR_URL and not shutdown_requested:
+            drain_deadline = time.time() + 2 * CHECK_INTERVAL
+            while not shutdown_requested:
+                active = lingarr_active_count()
+                if active is None or active == 0:
+                    break
+                if time.time() >= drain_deadline:
+                    print(f"{YELLOW}[WARNING] Lingarr still has {active} active job(s) after "
+                          f"{2 * CHECK_INTERVAL}s — starting next cycle anyway{RESET}")
+                    break
+                print(f"[INFO] Lingarr has {active} active job(s) — waiting before next cycle...")
+                for _ in range(POLL_INTERVAL):
+                    if shutdown_requested:
+                        break
+                    time.sleep(1)
 
     print("[INFO] Bazarr AutoTranslate stopped cleanly.")
     return 0
