@@ -312,8 +312,12 @@ def wait_for_subtitle(item_type: str, item_id: int, id_field: str,
 def _item_title(item: dict, item_type: str) -> str:
     if item_type == "episodes":
         series = item.get("seriesTitle", item.get("series_title", "Unknown"))
-        ep = item.get("title", item.get("episode_title", ""))
-        return f"{series} - {ep}" if ep else series
+        season  = item.get("season",  item.get("seasonNumber"))
+        episode = item.get("episode", item.get("episodeNumber"))
+        se = f"S{season:02d}E{episode:02d}" if season is not None and episode is not None else ""
+        ep_title = item.get("title", item.get("episode_title", ""))
+        parts = [series, se, ep_title]
+        return " ".join(p for p in parts if p)
     return item.get("title", "Unknown")
 
 
