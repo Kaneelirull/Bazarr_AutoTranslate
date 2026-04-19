@@ -341,6 +341,19 @@ def process_item(item: dict, item_type: str, id_field: str,
 
         target_path = _derive_target_path(source_path, source_lang, target_lang)
 
+        if target_path and os.path.exists(target_path):
+            print(f"[DISK] {title} '{target_lang}': subtitle already on disk, waiting for Bazarr to import")
+            deadline = time.time() + item_timeout
+            found = wait_for_subtitle(item_type, item_id, id_field, target_lang,
+                                      deadline, target_path)
+            with stats_lock:
+                if found:
+                    stats["completed"] += 1
+                    stats["translations"].append(f"{title}: {source_lang} -> {target_lang}")
+                else:
+                    stats["timed_out"] += 1
+            continue
+
         print(f"[TRANSLATE] {title}: {source_lang} -> {target_lang}")
         ok = submit_translate(item_type, item_id, source_path, target_lang)
         if ok:
