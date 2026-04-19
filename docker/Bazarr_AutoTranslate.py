@@ -388,6 +388,17 @@ def process_item(item: dict, item_type: str, id_field: str,
                 stats["translations"].append(f"{title}: {source_lang} -> {target_lang}")
             continue
 
+        if LINGARR_URL and not shutdown_requested:
+            while not shutdown_requested:
+                active = lingarr_active_count()
+                if active is None or active < PARALLEL_TRANSLATES:
+                    break
+                print(f"[INFO] Lingarr queue full ({active}/{PARALLEL_TRANSLATES}) — waiting {POLL_INTERVAL}s before submitting {title}...")
+                for _ in range(POLL_INTERVAL):
+                    if shutdown_requested:
+                        break
+                    time.sleep(1)
+
         print(f"[TRANSLATE] {title}: {source_lang} -> {target_lang}")
         ok = submit_translate(item_type, item_id, source_path, target_lang)
         if ok:
