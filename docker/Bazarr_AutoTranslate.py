@@ -148,6 +148,30 @@ def fetch_subtitles(item_type: str, item_id: int, id_field: str) -> list:
     return []
 
 
+def fetch_sub_status(item_type: str, item_id: int, id_field: str) -> tuple[set, set]:
+    """Returns (available_code2s_with_path, missing_code2s) for one episode/movie."""
+    if item_type == "episodes":
+        url = bazarr_url("episodes")
+        params = {"episodeid[]": item_id}
+    else:
+        url = bazarr_url("movies")
+        params = {"radarrid[]": item_id}
+    try:
+        r = requests.get(url, headers=BAZARR_HEADERS, params=params, timeout=CONNECT_TIMEOUT)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        if data:
+            item = data[0]
+            available = {s["code2"] for s in item.get("subtitles", [])
+                         if s.get("code2") and s.get("path")}
+            missing   = {s["code2"] for s in item.get("missing_subtitles", [])
+                         if s.get("code2")}
+            return available, missing
+    except Exception as e:
+        print(f"{RED}[ERROR] fetch_sub_status({item_type}, {item_id}): {e}{RESET}")
+    return set(), set()
+
+
 def submit_translate(item_type: str, item_id: int, source_path: str, target_lang: str) -> bool:
     api_type = "episode" if item_type == "episodes" else "movie"
     encoded_path = quote(source_path, safe="")
@@ -244,10 +268,9 @@ def wait_for_subtitle(item_type: str, item_id: int, id_field: str,
     disk_found_at: float | None = None
 
     while not shutdown_requested:
-        # Check Bazarr first
-        subs = fetch_subtitles(item_type, item_id, id_field)
-        available = {s["code2"] for s in subs if s.get("path")}
-        if target_lang in available:
+        # Check Bazarr: subtitle has a path, OR no longer in missing_subtitles
+        available, missing = fetch_sub_status(item_type, item_id, id_field)
+        if target_lang in available or target_lang not in missing:
             elapsed = int(time.time() - start)
             print(f"{GREEN}[OK] [{item_type}:{item_id}] '{target_lang}' confirmed by Bazarr after {elapsed}s{RESET}")
             return True
