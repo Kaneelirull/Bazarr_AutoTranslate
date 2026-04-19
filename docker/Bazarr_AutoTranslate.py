@@ -311,13 +311,7 @@ def wait_for_subtitle(item_type: str, item_id: int, id_field: str,
 
 def _item_title(item: dict, item_type: str) -> str:
     if item_type == "episodes":
-        series = item.get("seriesTitle", item.get("series_title", "Unknown"))
-        season  = item.get("season",  item.get("seasonNumber"))
-        episode = item.get("episode", item.get("episodeNumber"))
-        se = f"S{season:02d}E{episode:02d}" if season is not None and episode is not None else ""
-        ep_title = item.get("title", item.get("episode_title", ""))
-        parts = [series, se, ep_title]
-        return " ".join(p for p in parts if p)
+        return item.get("seriesTitle", item.get("series_title", "Unknown"))
     return item.get("title", "Unknown")
 
 
@@ -351,6 +345,10 @@ def process_item(item: dict, item_type: str, id_field: str,
 
     source_lang = source_langs[0]
     source_path = available_map[source_lang]
+    if item_type == "episodes":
+        _se = _re.search(r'[Ss](\d{1,2})[Ee](\d{1,2})', os.path.basename(source_path))
+        if _se:
+            title = f"{title} S{int(_se.group(1)):02d}E{int(_se.group(2)):02d}"
     item_timeout = _estimate_timeout(source_path)
     print(f"[INFO] {title}: source={source_lang}, targets={target_langs}")
 
