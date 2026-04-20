@@ -50,7 +50,7 @@ PARALLEL_TRANSLATES = max(1, int(os.getenv("PARALLEL_TRANSLATES", "1")))
 CHECK_INTERVAL      = max(10, int(os.getenv("CHECK_INTERVAL", "1200")))
 CONNECT_TIMEOUT     = max(5, int(os.getenv("CONNECT_TIMEOUT", "10")))
 POLL_INTERVAL       = max(5, int(os.getenv("POLL_INTERVAL", "20")))
-POLL_TIMEOUT        = max(30, int(os.getenv("POLL_TIMEOUT", "600")))
+POLL_TIMEOUT        = max(30, int(os.getenv("POLL_TIMEOUT", "900")))
 RESUBMIT_COOLDOWN   = max(60, int(os.getenv("RESUBMIT_COOLDOWN", "3600")))
 DISK_IMPORT_WAIT    = 120  # seconds to wait for Bazarr to import after file appears on disk
 
@@ -232,9 +232,12 @@ def _estimate_timeout(source_path: str) -> int:
     n = _count_dialogue_lines(source_path)
     if n is None:
         return POLL_TIMEOUT
-    estimated = int(n * 1.1 * 1.2)
-    timeout = max(POLL_TIMEOUT, estimated)
-    print(f"[INFO] Source has {n} dialogue lines — estimated ~{int(n * 1.1)}s, timeout set to {timeout}s")
+    base = n * 1.8
+    estimated = int(base * 1.3)
+    hard_cap = max(POLL_TIMEOUT, CHECK_INTERVAL - 60)
+    timeout = min(max(POLL_TIMEOUT, estimated), hard_cap)
+    print(f"[INFO] Source has {n} dialogue lines — base ~{int(base)}s, "
+          f"timeout set to {timeout}s (floor {POLL_TIMEOUT}s, cap {hard_cap}s)")
     return timeout
 
 
@@ -290,8 +293,16 @@ def wait_for_subtitle(item_type: str, item_id: int, id_field: str,
 
         now = time.time()
         if now >= deadline:
+            if target_path and os.path.exists(target_path):
+                elapsed = int(now - start)
+                print(f"{GREEN}[OK] [{item_type}:{item_id}] '{target_lang}' on disk at hard cap "
+                      f"({elapsed}s) — Bazarr will import eventually, moving on{RESET}")
+                return True
+            active = lingarr_active_count()
             print(f"{YELLOW}[TIMEOUT] [{item_type}:{item_id}] '{target_lang}' "
                   f"not found after {int(now - start)}s{RESET}")
+            if active is not None:
+                print(f"{YELLOW}[TIMEOUT] Lingarr still has {active} active job(s){RESET}")
             return False
 
         remaining = int(deadline - now)
@@ -482,10 +493,17 @@ def main() -> int:
     print(f"  Languages         : {', '.join(LANGUAGES)}")
     print(f"  Parallel workers  : {PARALLEL_TRANSLATES}")
     print(f"  Check interval    : {CHECK_INTERVAL}s")
-    print(f"  Poll interval     : {POLL_INTERVAL}s  (max {POLL_TIMEOUT}s per translation)")
+    print(f"  Poll interval     : {POLL_INTERVAL}s  (floor {POLL_TIMEOUT}s, cap {max(POLL_TIMEOUT, CHECK_INTERVAL - 60)}s per translation)")
     print(f"  Resubmit cooldown : {RESUBMIT_COOLDOWN}s")
     print(f"  Disk import wait  : {DISK_IMPORT_WAIT}s")
     sys.stdout.flush()
+
+    print("[INFO] Waiting 30s for services to start...")
+    sys.stdout.flush()
+    for _ in range(30):
+        if shutdown_requested:
+            break
+        time.sleep(1)
 
     cycle = 1
     while not shutdown_requested:
