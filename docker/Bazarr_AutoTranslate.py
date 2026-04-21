@@ -214,6 +214,40 @@ def lingarr_active_count() -> int | None:
 
 _TIMESTAMP_RE = _re.compile(r"^\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}$")
 
+_LANG3 = {
+    'en': 'eng', 'et': 'est', 'sv': 'swe', 'de': 'ger', 'fr': 'fre',
+    'es': 'spa', 'nl': 'dut', 'no': 'nob', 'fi': 'fin', 'da': 'dan',
+    'pl': 'pol', 'pt': 'por', 'ru': 'rus',
+}
+
+
+def _sub_priority(path: str, lang_code2: str) -> int:
+    """Lower = more preferred source. plain=0, hi/sdh=1, .2=2, .3=3, .4=4."""
+    stem = os.path.basename(path).lower().removesuffix('.srt')
+    for code in filter(None, [lang_code2, _LANG3.get(lang_code2, '')]):
+        idx = stem.rfind(f'.{code}')
+        if idx == -1:
+            continue
+        suffix = stem[idx + len(code) + 1:]
+        if suffix == '':
+            return 0
+        if suffix in ('hi', 'sdh'):
+            return 1
+        if suffix.isdigit():
+            return 1 + int(suffix)
+        return 10
+    return 99
+
+
+def _find_existing_target(video_path: str, target_lang: str) -> str | None:
+    """Return the first existing target variant path, or None."""
+    base = os.path.splitext(video_path)[0]
+    for variant in ('', '.hi', '.2', '.3', '.4'):
+        p = f"{base}.{target_lang}{variant}.srt"
+        if os.path.exists(p):
+            return p
+    return None
+
 def _count_dialogue_lines(path: str) -> int | None:
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -346,7 +380,13 @@ def process_item(item: dict, item_type: str, id_field: str,
         return
 
     video_path, subs = fetch_subtitles(item_type, item_id, id_field)
-    available_map = {s["code2"]: s.get("path", "") for s in subs if s.get("code2") and s.get("path")}
+    available_map: dict[str, str] = {}
+    for s in subs:
+        code, path = s.get("code2"), s.get("path", "")
+        if not code or not path:
+            continue
+        if code not in available_map or _sub_priority(path, code) < _sub_priority(available_map[code], code):
+            available_map[code] = path
 
     target_langs = [l for l in LANGUAGES if l in missing and l not in available_map]
     source_langs = [l for l in LANGUAGES if l in available_map]
@@ -383,15 +423,15 @@ def process_item(item: dict, item_type: str, id_field: str,
         else:
             target_path = _derive_target_path(source_path, source_lang, target_lang)
 
-        print(f"[DEBUG] {title} '{target_lang}': video_path={video_path!r} "
-              f"target_path={target_path!r} "
-              f"exists={os.path.exists(target_path) if target_path else 'N/A'}")
-
-        if target_path and os.path.exists(target_path):
-            print(f"[DISK] {title} '{target_lang}': subtitle already on disk, waiting for Bazarr to import")
+        existing = _find_existing_target(video_path, target_lang) if video_path else (
+            target_path if (target_path and os.path.exists(target_path)) else None
+        )
+        if existing:
+            print(f"[DISK] {title} '{target_lang}': {os.path.basename(existing)} already on disk, "
+                  f"waiting for Bazarr to import")
             deadline = time.time() + item_timeout
             found = wait_for_subtitle(item_type, item_id, id_field, target_lang,
-                                      deadline, target_path, title=title)
+                                      deadline, existing, title=title)
             with stats_lock:
                 if found:
                     stats["completed"] += 1
@@ -420,8 +460,11 @@ def process_item(item: dict, item_type: str, id_field: str,
                         break
                     time.sleep(1)
 
-        if target_path and os.path.exists(target_path):
-            print(f"[DISK] {title} '{target_lang}': appeared on disk during queue wait — "
+        existing = _find_existing_target(video_path, target_lang) if video_path else (
+            target_path if (target_path and os.path.exists(target_path)) else None
+        )
+        if existing:
+            print(f"[DISK] {title} '{target_lang}': {os.path.basename(existing)} appeared during queue wait — "
                   f"skipping submission, Bazarr is importing")
             continue
 
