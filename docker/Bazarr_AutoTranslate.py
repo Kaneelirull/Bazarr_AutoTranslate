@@ -131,7 +131,7 @@ def fetch_wanted(item_type: str) -> list:
         return []
 
 
-def fetch_subtitles(item_type: str, item_id: int, id_field: str) -> list:
+def fetch_subtitles(item_type: str, item_id: int, id_field: str) -> tuple[str, list]:
     if item_type == "episodes":
         url = bazarr_url("episodes")
         params = {"episodeid[]": item_id}
@@ -143,10 +143,10 @@ def fetch_subtitles(item_type: str, item_id: int, id_field: str) -> list:
         r.raise_for_status()
         data = r.json().get("data", [])
         if data:
-            return data[0].get("subtitles", [])
+            return data[0].get("path", ""), data[0].get("subtitles", [])
     except Exception as e:
         print(f"{RED}[ERROR] fetch_subtitles({item_type}, {item_id}): {e}{RESET}")
-    return []
+    return "", []
 
 
 def fetch_sub_status(item_type: str, item_id: int, id_field: str) -> tuple[set, set]:
@@ -345,7 +345,7 @@ def process_item(item: dict, item_type: str, id_field: str,
     if not missing:
         return
 
-    subs = fetch_subtitles(item_type, item_id, id_field)
+    video_path, subs = fetch_subtitles(item_type, item_id, id_field)
     available_map = {s["code2"]: s.get("path", "") for s in subs if s.get("code2") and s.get("path")}
 
     target_langs = [l for l in LANGUAGES if l in missing and l not in available_map]
@@ -378,7 +378,10 @@ def process_item(item: dict, item_type: str, id_field: str,
                   f"cooldown {cooldown_remaining}s remaining — Bazarr may still be importing")
             continue
 
-        target_path = _derive_target_path(source_path, source_lang, target_lang)
+        if video_path:
+            target_path = os.path.splitext(video_path)[0] + f".{target_lang}.srt"
+        else:
+            target_path = _derive_target_path(source_path, source_lang, target_lang)
 
         if target_path and os.path.exists(target_path):
             print(f"[DISK] {title} '{target_lang}': subtitle already on disk, waiting for Bazarr to import")
@@ -393,7 +396,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                     stats["timed_out"] += 1
             continue
 
-        recheck = fetch_subtitles(item_type, item_id, id_field)
+        _, recheck = fetch_subtitles(item_type, item_id, id_field)
         recheck_available = {s["code2"] for s in recheck if s.get("code2") and s.get("path")}
         if target_lang in recheck_available:
             print(f"[INFO] {title} '{target_lang}': already available in Bazarr, skipping submission")
