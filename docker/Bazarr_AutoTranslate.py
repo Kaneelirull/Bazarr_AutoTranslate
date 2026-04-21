@@ -383,6 +383,10 @@ def process_item(item: dict, item_type: str, id_field: str,
         else:
             target_path = _derive_target_path(source_path, source_lang, target_lang)
 
+        print(f"[DEBUG] {title} '{target_lang}': video_path={video_path!r} "
+              f"target_path={target_path!r} "
+              f"exists={os.path.exists(target_path) if target_path else 'N/A'}")
+
         if target_path and os.path.exists(target_path):
             print(f"[DISK] {title} '{target_lang}': subtitle already on disk, waiting for Bazarr to import")
             deadline = time.time() + item_timeout
