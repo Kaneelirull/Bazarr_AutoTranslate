@@ -413,6 +413,11 @@ def process_item(item: dict, item_type: str, id_field: str,
                         break
                     time.sleep(1)
 
+        if target_path and os.path.exists(target_path):
+            print(f"[DISK] {title} '{target_lang}': appeared on disk during queue wait — "
+                  f"skipping submission, Bazarr is importing")
+            continue
+
         print(f"[TRANSLATE] {title}: {source_lang} -> {target_lang}")
         ok = submit_translate(item_type, item_id, source_path, target_lang)
         if ok:
