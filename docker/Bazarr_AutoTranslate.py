@@ -52,7 +52,8 @@ CONNECT_TIMEOUT     = max(5, int(os.getenv("CONNECT_TIMEOUT", "10")))
 POLL_INTERVAL       = max(5, int(os.getenv("POLL_INTERVAL", "20")))
 POLL_TIMEOUT        = max(30, int(os.getenv("POLL_TIMEOUT", "900")))
 RESUBMIT_COOLDOWN   = max(60, int(os.getenv("RESUBMIT_COOLDOWN", "3600")))
-DISK_IMPORT_WAIT    = 120  # seconds to wait for Bazarr to import after file appears on disk
+DISK_IMPORT_WAIT    = 20   # seconds before switching from waiting to cycling
+DISK_POLL_INTERVAL  = 30   # poll interval once file is on disk but Bazarr hasn't imported yet
 
 if not LANGUAGES:
     print(f"{RED}[ERROR] LANGUAGES must contain at least one language code{RESET}")
@@ -261,45 +262,45 @@ def _derive_target_path(source_path: str, source_lang: str, target_lang: str) ->
 
 def wait_for_subtitle(item_type: str, item_id: int, id_field: str,
                       target_lang: str, deadline: float,
-                      target_path: str | None = None) -> bool:
+                      target_path: str | None = None, title: str = "") -> bool:
     """
-    Polls every POLL_INTERVAL seconds for `target_lang` to appear in Bazarr.
-    Also checks if the file exists on disk. If it does, waits up to
-    DISK_IMPORT_WAIT (2 min) for Bazarr to import it, then moves on.
+    Polls for `target_lang` to appear in Bazarr.
+    If the file lands on disk first, waits DISK_IMPORT_WAIT seconds then keeps
+    cycling every DISK_POLL_INTERVAL seconds until Bazarr confirms the import.
     """
+    label = title or f"[{item_type}:{item_id}]"
     start = time.time()
     disk_found_at: float | None = None
+    disk_wait_logged = False
 
     while not shutdown_requested:
         # Check Bazarr: subtitle has a path, OR no longer in missing_subtitles
         available, missing = fetch_sub_status(item_type, item_id, id_field)
         if target_lang in available or target_lang not in missing:
             elapsed = int(time.time() - start)
-            print(f"{GREEN}[OK] [{item_type}:{item_id}] '{target_lang}' confirmed by Bazarr after {elapsed}s{RESET}")
+            print(f"{GREEN}[OK] {label} '{target_lang}' confirmed by Bazarr after {elapsed}s{RESET}")
             return True
 
         # Check disk
-        if target_path:
-            if os.path.exists(target_path):
-                if disk_found_at is None:
-                    disk_found_at = time.time()
-                    print(f"[DISK] [{item_type}:{item_id}] '{target_lang}' found on disk — "
-                          f"waiting up to {DISK_IMPORT_WAIT}s for Bazarr to import...")
-                elif time.time() - disk_found_at >= DISK_IMPORT_WAIT:
-                    elapsed = int(time.time() - start)
-                    print(f"{GREEN}[OK] [{item_type}:{item_id}] '{target_lang}' on disk, "
-                          f"Bazarr still importing after {elapsed}s — moving on{RESET}")
-                    return True
+        if target_path and os.path.exists(target_path):
+            if disk_found_at is None:
+                disk_found_at = time.time()
+                print(f"[DISK] {label} '{target_lang}' found on disk — "
+                      f"waiting {DISK_IMPORT_WAIT}s for Bazarr to import...")
+            elif not disk_wait_logged and time.time() - disk_found_at >= DISK_IMPORT_WAIT:
+                disk_wait_logged = True
+                print(f"[DISK] {label} '{target_lang}' still not imported after "
+                      f"{DISK_IMPORT_WAIT}s — continuing to poll every {DISK_POLL_INTERVAL}s")
 
         now = time.time()
         if now >= deadline:
             if target_path and os.path.exists(target_path):
                 elapsed = int(now - start)
-                print(f"{GREEN}[OK] [{item_type}:{item_id}] '{target_lang}' on disk at hard cap "
+                print(f"{GREEN}[OK] {label} '{target_lang}' on disk at hard cap "
                       f"({elapsed}s) — Bazarr will import eventually, moving on{RESET}")
                 return True
             active = lingarr_active_count()
-            print(f"{YELLOW}[TIMEOUT] [{item_type}:{item_id}] '{target_lang}' "
+            print(f"{YELLOW}[TIMEOUT] {label} '{target_lang}' "
                   f"not found after {int(now - start)}s{RESET}")
             if active is not None:
                 print(f"{YELLOW}[TIMEOUT] Lingarr still has {active} active job(s){RESET}")
@@ -307,10 +308,12 @@ def wait_for_subtitle(item_type: str, item_id: int, id_field: str,
 
         remaining = int(deadline - now)
         elapsed = int(now - start)
-        disk_note = " (file on disk)" if disk_found_at else ""
-        print(f"[POLL] [{item_type}:{item_id}] Waiting for '{target_lang}'{disk_note}... "
+        in_disk_cycle = disk_found_at is not None and time.time() - disk_found_at >= DISK_IMPORT_WAIT
+        disk_note = " (file on disk, cycling)" if in_disk_cycle else (" (file on disk)" if disk_found_at else "")
+        sleep_for = DISK_POLL_INTERVAL if in_disk_cycle else POLL_INTERVAL
+        print(f"[POLL] {label} Waiting for '{target_lang}'{disk_note}... "
               f"{elapsed}s elapsed, {remaining}s remaining")
-        for _ in range(POLL_INTERVAL):
+        for _ in range(sleep_for):
             if shutdown_requested:
                 return False
             time.sleep(1)
@@ -381,7 +384,7 @@ def process_item(item: dict, item_type: str, id_field: str,
             print(f"[DISK] {title} '{target_lang}': subtitle already on disk, waiting for Bazarr to import")
             deadline = time.time() + item_timeout
             found = wait_for_subtitle(item_type, item_id, id_field, target_lang,
-                                      deadline, target_path)
+                                      deadline, target_path, title=title)
             with stats_lock:
                 if found:
                     stats["completed"] += 1
@@ -418,7 +421,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                 stats["submitted"] += 1
             deadline = time.time() + item_timeout
             found = wait_for_subtitle(item_type, item_id, id_field, target_lang,
-                                      deadline, target_path)
+                                      deadline, target_path, title=title)
             with stats_lock:
                 if found:
                     stats["completed"] += 1
@@ -495,7 +498,7 @@ def main() -> int:
     print(f"  Check interval    : {CHECK_INTERVAL}s")
     print(f"  Poll interval     : {POLL_INTERVAL}s  (floor {POLL_TIMEOUT}s, cap {max(POLL_TIMEOUT, CHECK_INTERVAL - 60)}s per translation)")
     print(f"  Resubmit cooldown : {RESUBMIT_COOLDOWN}s")
-    print(f"  Disk import wait  : {DISK_IMPORT_WAIT}s")
+    print(f"  Disk import wait  : {DISK_IMPORT_WAIT}s initial, then poll every {DISK_POLL_INTERVAL}s")
     sys.stdout.flush()
 
     print("[INFO] Waiting 30s for services to start...")
