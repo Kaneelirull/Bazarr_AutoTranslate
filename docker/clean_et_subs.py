@@ -107,6 +107,12 @@ def count_http_errors(text: str) -> int:
     """Count occurrences of HTTP error messages in text."""
     return len(HTTP_ERROR_RE.findall(text))
 
+def unique_word_ratio(text: str) -> float:
+    words = text.lower().split()
+    if not words:
+        return 1.0
+    return len(set(words)) / len(words)
+
 def delete_or_quarantine(path: Path, quarantine_dir: Optional[Path], do_delete: bool) -> None:
     if shutdown_requested:
         raise InterruptedError("Shutdown requested")
@@ -161,6 +167,12 @@ def main() -> int:
         help="Move files here instead of deleting (safer). Example: --quarantine /tmp/bad_subs",
     )
     ap.add_argument(
+        "--max-unique-ratio",
+        type=float,
+        default=0.15,
+        help="Flag files where unique_words/total_words is below this — catches repetition hallucinations. Default: 0.15",
+    )
+    ap.add_argument(
         "--verbose",
         action="store_true",
         help="Print extra details for each file.",
@@ -195,6 +207,7 @@ def main() -> int:
     unknown = 0
     actions = 0
     http_errors = 0
+    repetitive = 0
 
     for path in iter_srt_files(roots, args.suffix):
         if shutdown_requested:
@@ -234,6 +247,29 @@ def main() -> int:
             continue
 
         cleaned = clean_srt_text(raw)
+
+        word_list = cleaned.split()
+        if len(word_list) >= args.min_chars // 5:
+            ratio = unique_word_ratio(cleaned)
+            if ratio < args.max_unique_ratio:
+                repetitive += 1
+                action_label = "DRYRUN"
+                if args.delete or quarantine_dir is not None:
+                    action_label = "DELETE" if quarantine_dir is None else "QUARANTINE"
+                print(f"{action_label} (REPETITIVE unique={ratio:.3f}, {len(word_list)} words): {path}")
+                if args.delete or quarantine_dir is not None:
+                    try:
+                        delete_or_quarantine(path, quarantine_dir, do_delete=args.delete and quarantine_dir is None)
+                        actions += 1
+                    except InterruptedError:
+                        print("[WARNING] Processing interrupted by shutdown signal.", file=sys.stderr)
+                        sys.stderr.flush()
+                        break
+                    except Exception as e:
+                        print(f"ERROR: could not apply action to {path}: {e}", file=sys.stderr)
+                        sys.stderr.flush()
+                continue
+
         if len(cleaned) < args.min_chars:
             skipped_short += 1
             if args.verbose:
@@ -282,6 +318,7 @@ def main() -> int:
     print(f"  skipped short: {skipped_short}")
     print(f"  unknown/unreadable: {unknown}")
     print(f"  HTTP errors (>= 2): {http_errors}")
+    print(f"  repetitive (hallucination): {repetitive}")
     print(f"  not Estonian: {not_estonian}")
     print(f"  actions taken: {actions} (dry run if 0 and no --delete/--quarantine)")
     sys.stdout.flush()
