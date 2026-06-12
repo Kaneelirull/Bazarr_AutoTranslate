@@ -50,6 +50,7 @@ HTTP_ERROR_PATTERNS = [
 ]
 
 HTTP_ERROR_RE = re.compile("|".join(HTTP_ERROR_PATTERNS), re.IGNORECASE)
+PUNCT_RE = re.compile(r'[^\w\s]')
 
 def iter_srt_files(roots: Iterable[Path], suffix: str) -> Iterable[Path]:
     for root in roots:
@@ -107,11 +108,33 @@ def count_http_errors(text: str) -> int:
     """Count occurrences of HTTP error messages in text."""
     return len(HTTP_ERROR_RE.findall(text))
 
-def unique_word_ratio(text: str) -> float:
-    words = text.lower().split()
-    if not words:
+def parse_srt_entries(raw: str) -> list:
+    entries, current, in_dialogue = [], [], False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            if current:
+                entries.append(" ".join(current))
+                current = []
+            in_dialogue = False
+            continue
+        if SRT_INDEX_RE.match(line):
+            in_dialogue = False
+            continue
+        if SRT_TIMESTAMP_RE.match(line):
+            in_dialogue = True
+            continue
+        if in_dialogue:
+            current.append(line)
+    if current:
+        entries.append(" ".join(current))
+    return entries
+
+def entry_unique_ratio(entries: list) -> float:
+    if not entries:
         return 1.0
-    return len(set(words)) / len(words)
+    normalised = [PUNCT_RE.sub('', e.lower()).strip() for e in entries]
+    return len(set(normalised)) / len(normalised)
 
 def delete_or_quarantine(path: Path, quarantine_dir: Optional[Path], do_delete: bool) -> None:
     if shutdown_requested:
@@ -246,17 +269,15 @@ def main() -> int:
                     sys.stderr.flush()
             continue
 
-        cleaned = clean_srt_text(raw)
-
-        word_list = cleaned.split()
-        if len(word_list) >= args.min_chars // 5:
-            ratio = unique_word_ratio(cleaned)
+        entries = parse_srt_entries(raw)
+        if len(entries) >= 5:
+            ratio = entry_unique_ratio(entries)
             if ratio < args.max_unique_ratio:
                 repetitive += 1
                 action_label = "DRYRUN"
                 if args.delete or quarantine_dir is not None:
                     action_label = "DELETE" if quarantine_dir is None else "QUARANTINE"
-                print(f"{action_label} (REPETITIVE unique={ratio:.3f}, {len(word_list)} words): {path}")
+                print(f"{action_label} (REPETITIVE unique={ratio:.3f}, {len(entries)} entries): {path}")
                 if args.delete or quarantine_dir is not None:
                     try:
                         delete_or_quarantine(path, quarantine_dir, do_delete=args.delete and quarantine_dir is None)
@@ -269,6 +290,8 @@ def main() -> int:
                         print(f"ERROR: could not apply action to {path}: {e}", file=sys.stderr)
                         sys.stderr.flush()
                 continue
+
+        cleaned = clean_srt_text(raw)
 
         if len(cleaned) < args.min_chars:
             skipped_short += 1
