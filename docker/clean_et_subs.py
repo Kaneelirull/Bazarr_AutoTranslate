@@ -1,20 +1,55 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
+import json
 import os
 import re
+import shutil
 import sys
 import signal
+import tempfile
+import threading
+from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 
 from lingua import Language, LanguageDetectorBuilder
 
-# Force unbuffered output for CRON compatibility
-sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
-sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
-
-# Global flag for graceful shutdown
+# Global flag for graceful shutdown (used by CLI only)
 shutdown_requested = False
+
+# code2 -> lingua Language for per-target validation
+TARGET_LANGUAGE_MAP: dict[str, Language] = {
+    "et": Language.ESTONIAN,
+    "en": Language.ENGLISH,
+    "sv": Language.SWEDISH,
+    "fi": Language.FINNISH,
+    "de": Language.GERMAN,
+    "fr": Language.FRENCH,
+    "es": Language.SPANISH,
+    "ru": Language.RUSSIAN,
+    "pl": Language.POLISH,
+    "lv": Language.LATVIAN,
+    "lt": Language.LITHUANIAN,
+    "uk": Language.UKRAINIAN,
+}
+
+DETECTOR_LANGUAGES = [
+    Language.ESTONIAN,
+    Language.ENGLISH,
+    Language.RUSSIAN,
+    Language.FINNISH,
+    Language.SWEDISH,
+    Language.LATVIAN,
+    Language.LITHUANIAN,
+    Language.GERMAN,
+    Language.FRENCH,
+    Language.SPANISH,
+    Language.POLISH,
+    Language.UKRAINIAN,
+]
 
 
 def signal_handler(signum, frame):
@@ -25,9 +60,10 @@ def signal_handler(signum, frame):
     sys.stderr.flush()
 
 
-# Register signal handlers for graceful shutdown
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
+# Register signal handlers only when run as CLI (not when imported)
+def _register_signal_handlers() -> None:
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
 
 # Basic SRT cleaning:
 # - remove indices, timestamps, and blank lines
@@ -39,18 +75,151 @@ SRT_INDEX_RE = re.compile(r"^\s*\d+\s*$")
 TAG_RE = re.compile(r"<[^>]+>")
 BRACKET_RE = re.compile(r"[\[\]\(\)\{\}]")
 
-# HTTP error patterns to detect in subtitle files
-HTTP_ERROR_PATTERNS = [
-    r"500\s+Server\s+Error",
-    r"500\s+Internal\s+Server\s+Error",
-    r"Error\s*500",
-    r"503\s+Service\s+Unavailable",
-    r"400\s+Bad\s+Request",
-    r"429\s+Too\s+Many\s+Requests",
+# Script profiles per target language (code2)
+SCRIPT_PROFILE: dict[str, str] = {
+    "et": "latin", "sv": "latin", "en": "latin", "de": "latin", "fr": "latin",
+    "es": "latin", "pl": "latin", "lv": "latin", "lt": "latin", "fi": "latin",
+    "ru": "cyrillic", "uk": "cyrillic",
+}
+
+CYRILLIC_RE = re.compile(r"[\u0400-\u04FF\u0500-\u052F]")
+CJK_RE = re.compile(r"[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]")
+ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
+HEBREW_RE = re.compile(r"[\u0590-\u05FF]")
+GREEK_RE = re.compile(r"[\u0370-\u03FF]")
+LATIN_RE = re.compile(r"[A-Za-z\u00C0-\u024F]")
+
+# HTTP / AI / API garbage patterns — single match triggers rejection
+GARBAGE_PATTERNS: list[tuple[str, str]] = [
+    (r"500\s+Server\s+Error", "HTTP 500"),
+    (r"500\s+Internal\s+Server\s+Error", "HTTP 500"),
+    (r"Error\s*500", "HTTP 500"),
+    (r"503\s+Service\s+Unavailable", "HTTP 503"),
+    (r"400\s+Bad\s+Request", "HTTP 400"),
+    (r"429\s+Too\s+Many\s+Requests", "HTTP 429"),
+    (r"as an ai\b", "AI refusal"),
+    (r"i cannot translate", "AI refusal"),
+    (r"i'm sorry", "AI refusal"),
+    (r"i am unable to", "AI refusal"),
+    (r'\{"error"', "JSON error"),
+    (r'"errorMessage"', "JSON error"),
+    (r'"stackTrace"', "JSON error"),
+    (r"<!DOCTYPE", "HTML error"),
+    (r"<html\b", "HTML error"),
+    (r"rate limit exceeded", "API error"),
+    (r"context length", "API error"),
+    (r"lorem ipsum", "placeholder"),
+    (r"\[TRANSLATION\]", "placeholder"),
+    (r"TODO:\s*translate", "placeholder"),
+    (r"\[/?(?:TARGET|CONTEXT|SOURCE|BEFORE|AFTER)\]", "prompt marker"),
+    (r">{3,}|<{3,}", "prompt marker"),
 ]
 
-HTTP_ERROR_RE = re.compile("|".join(HTTP_ERROR_PATTERNS), re.IGNORECASE)
 PUNCT_RE = re.compile(r'[^\w\s]')
+
+REPAIRABLE_CUE_RULES = {
+    "prompt_marker",
+    "garbage",
+    "empty_target",
+    "cue_too_long",
+    "abnormal_expansion",
+    "copied_source",
+    "unexpected_script",
+    "excessive_lines",
+}
+
+VALIDATOR_VERSION = "source-aware-v2-lines"
+
+
+@dataclass
+class SubtitleCue:
+    number: int
+    timestamp: str
+    lines: list[str]
+
+    @property
+    def text(self) -> str:
+        return " ".join(line.strip() for line in self.lines if line.strip()).strip()
+
+
+@dataclass(frozen=True)
+class ValidationIssue:
+    rule: str
+    detail: str
+    cue_index: Optional[int] = None
+    cue_number: Optional[int] = None
+
+
+@dataclass
+class ValidationReport:
+    issues: list[ValidationIssue] = field(default_factory=list)
+
+    @property
+    def valid(self) -> bool:
+        return not self.issues
+
+    @property
+    def repairable_cue_indexes(self) -> list[int]:
+        if any(issue.cue_index is None or issue.rule not in REPAIRABLE_CUE_RULES for issue in self.issues):
+            return []
+        return sorted({issue.cue_index for issue in self.issues if issue.cue_index is not None})
+
+    def summary(self, limit: int = 5) -> str:
+        if self.valid:
+            return "OK"
+        labels = []
+        for issue in self.issues[:limit]:
+            prefix = f"cue {issue.cue_number}: " if issue.cue_number is not None else ""
+            labels.append(f"{prefix}{issue.detail}")
+        remaining = len(self.issues) - len(labels)
+        if remaining:
+            labels.append(f"and {remaining} more issue(s)")
+        return "; ".join(labels)
+
+    def to_dict(self) -> dict:
+        return {
+            "valid": self.valid,
+            "summary": self.summary(),
+            "issues": [
+                {
+                    "rule": issue.rule,
+                    "detail": issue.detail,
+                    "cueIndex": issue.cue_index,
+                    "cueNumber": issue.cue_number,
+                }
+                for issue in self.issues
+            ],
+        }
+
+
+@dataclass
+class RepairResult:
+    success: bool
+    repaired_cues: list[int]
+    report: ValidationReport
+    reason: str
+    attempts: int = 0
+
+
+@dataclass(frozen=True)
+class DiscoveredSubtitle:
+    path: Path
+    target_lang: str
+    variant: str
+
+
+def build_detector():
+    """Build a reusable lingua language detector."""
+    return LanguageDetectorBuilder.from_languages(*DETECTOR_LANGUAGES).build()
+
+
+def target_language_for_code(code2: str) -> Optional[Language]:
+    return TARGET_LANGUAGE_MAP.get(code2.lower())
+
+
+def script_profile_for_code(code2: str) -> str:
+    return SCRIPT_PROFILE.get(code2.lower(), "latin")
+
 
 def iter_srt_files(roots: Iterable[Path], suffix: str) -> Iterable[Path]:
     for root in roots:
@@ -59,6 +228,7 @@ def iter_srt_files(roots: Iterable[Path], suffix: str) -> Iterable[Path]:
         for p in root.rglob(f"*{suffix}"):
             if p.is_file():
                 yield p
+
 
 def read_text_best_effort(path: Path) -> Optional[str]:
     # Try utf-8 first, then fall back to latin-1 (common for subtitle files)
@@ -74,6 +244,7 @@ def read_text_best_effort(path: Path) -> Optional[str]:
         return path.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return None
+
 
 def clean_srt_text(raw: str) -> str:
     lines = []
@@ -92,9 +263,8 @@ def clean_srt_text(raw: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
+
 def detect_language(detector, text: str) -> Tuple[Optional[Language], float]:
-    # Returns (language, confidence)
-    # Lingua provides confidence values.
     try:
         lang = detector.detect_language_of(text)
         if lang is None:
@@ -104,31 +274,202 @@ def detect_language(detector, text: str) -> Tuple[Optional[Language], float]:
     except Exception:
         return None, 0.0
 
-def count_http_errors(text: str) -> int:
-    """Count occurrences of HTTP error messages in text."""
-    return len(HTTP_ERROR_RE.findall(text))
 
-def parse_srt_entries(raw: str) -> list:
-    entries, current, in_dialogue = [], [], False
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            if current:
-                entries.append(" ".join(current))
-                current = []
-            in_dialogue = False
+def find_garbage_match(text: str) -> Optional[str]:
+    """Return a label for the first garbage pattern matched, or None."""
+    for pattern, label in GARBAGE_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return label
+    return None
+
+
+def _script_letter_counts(text: str) -> dict[str, int]:
+    cyrillic = len(CYRILLIC_RE.findall(text))
+    cjk = len(CJK_RE.findall(text))
+    arabic = len(ARABIC_RE.findall(text))
+    hebrew = len(HEBREW_RE.findall(text))
+    greek = len(GREEK_RE.findall(text))
+    latin = len(LATIN_RE.findall(text))
+    total = cyrillic + cjk + arabic + hebrew + greek + latin
+    return {
+        "cyrillic": cyrillic,
+        "cjk": cjk,
+        "arabic": arabic,
+        "hebrew": hebrew,
+        "greek": greek,
+        "latin": latin,
+        "total": total,
+        "non_latin": cyrillic + cjk + arabic + hebrew + greek,
+    }
+
+
+def check_script_profile(
+    entries: list[str],
+    profile: str,
+    *,
+    max_cyrillic_ratio: float = 0.05,
+    max_cjk_ratio: float = 0.05,
+    max_latin_ratio: float = 0.80,
+    min_letters_for_script: int = 20,
+) -> Tuple[bool, str]:
+    """
+    Validate dialogue text against expected script profile.
+    Returns (ok, reason). ok=True means script is acceptable.
+    """
+    if not entries:
+        return True, "no entries"
+
+    for entry in entries:
+        counts = _script_letter_counts(entry)
+        if counts["total"] < 10:
             continue
-        if SRT_INDEX_RE.match(line):
-            in_dialogue = False
+        if profile == "latin" and counts["latin"] == 0 and counts["non_latin"] > 0:
+            return False, "entry is 100% non-Latin script"
+        if profile == "cyrillic" and counts["cyrillic"] == 0 and counts["latin"] > 0:
+            return False, "entry is 100% Latin script"
+
+    combined = " ".join(entries)
+    counts = _script_letter_counts(combined)
+    if counts["total"] < min_letters_for_script:
+        return True, f"too few letters for script check ({counts['total']})"
+
+    if profile == "latin":
+        cyr_ratio = counts["cyrillic"] / counts["total"]
+        cjk_ratio = counts["cjk"] / counts["total"]
+        if cyr_ratio > max_cyrillic_ratio:
+            return False, f"unexpected Cyrillic ({cyr_ratio:.1%})"
+        if cjk_ratio > max_cjk_ratio:
+            return False, f"unexpected CJK ({cjk_ratio:.1%})"
+        return True, "script OK"
+
+    if profile == "cyrillic":
+        latin_ratio = counts["latin"] / counts["total"]
+        if latin_ratio > max_latin_ratio:
+            return False, f"unexpected Latin ({latin_ratio:.1%})"
+        return True, "script OK"
+
+    return True, "script OK"
+
+
+def parse_srt_cues(raw: str) -> tuple[list[SubtitleCue], list[str]]:
+    """Parse standard SRT blocks while retaining cue identity and line structure."""
+    cues: list[SubtitleCue] = []
+    errors: list[str] = []
+    blocks = re.split(r"\r?\n\s*\r?\n", raw.strip()) if raw.strip() else []
+
+    for block_index, block in enumerate(blocks, start=1):
+        lines = block.splitlines()
+        if len(lines) < 2:
+            errors.append(f"block {block_index} has fewer than two lines")
             continue
-        if SRT_TIMESTAMP_RE.match(line):
-            in_dialogue = True
+        number_text = lines[0].strip().lstrip("\ufeff")
+        if not number_text.isdigit():
+            errors.append(f"block {block_index} has invalid cue number {number_text!r}")
             continue
-        if in_dialogue:
-            current.append(line)
-    if current:
-        entries.append(" ".join(current))
-    return entries
+        timestamp = lines[1].strip()
+        if not SRT_TIMESTAMP_RE.match(timestamp):
+            errors.append(f"cue {number_text} has invalid timestamp {timestamp!r}")
+            continue
+        cues.append(SubtitleCue(int(number_text), timestamp, lines[2:]))
+
+    return cues, errors
+
+
+def parse_srt_entries(raw: str) -> list[str]:
+    cues, _ = parse_srt_cues(raw)
+    return [cue.text for cue in cues]
+
+
+def render_srt_cues(cues: list[SubtitleCue], newline: str = "\n") -> str:
+    blocks = []
+    for cue in cues:
+        blocks.append(newline.join([str(cue.number), cue.timestamp, *cue.lines]))
+    return (newline * 2).join(blocks) + newline
+
+
+def _normalise_for_similarity(text: str) -> str:
+    text = TAG_RE.sub(" ", text).casefold()
+    text = PUNCT_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _looks_like_proper_noun_list(text: str) -> bool:
+    words = re.findall(r"[A-Za-z\u00C0-\u024F]+", TAG_RE.sub(" ", text))
+    return bool(words) and all(word.isupper() or word[0].isupper() for word in words)
+
+
+def validate_cue_pair(
+    source: SubtitleCue,
+    target: SubtitleCue,
+    *,
+    cue_index: int,
+    target_lang: str,
+    max_cue_lines: int = 4,
+    max_cue_chars: int = 500,
+    max_expansion_ratio: float = 4.0,
+    max_expansion_chars: int = 300,
+    max_source_similarity: float = 0.92,
+    max_cyrillic_ratio: float = 0.05,
+    max_cjk_ratio: float = 0.05,
+    max_latin_ratio: float = 0.80,
+) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    source_text = source.text
+    target_text = target.text
+
+    def add(rule: str, detail: str) -> None:
+        issues.append(ValidationIssue(rule, detail, cue_index, target.number))
+
+    if not target_text:
+        add("empty_target", "translation is empty")
+        return issues
+
+    source_line_count = len([line for line in source.lines if line.strip()])
+    target_line_count = len([line for line in target.lines if line.strip()])
+    line_limit = max(source_line_count + 1, max_cue_lines)
+    if target_line_count > line_limit:
+        add(
+            "excessive_lines",
+            f"translation has {target_line_count} lines (max {line_limit} for {source_line_count}-line source)",
+        )
+
+    garbage = find_garbage_match(target_text)
+    if garbage is not None:
+        rule = "prompt_marker" if garbage == "prompt marker" else "garbage"
+        add(rule, f"garbage pattern ({garbage})")
+
+    if len(target_text) > max_cue_chars:
+        add("cue_too_long", f"translation is {len(target_text)} characters (max {max_cue_chars})")
+
+    expansion_limit = max(max_expansion_chars, int(len(source_text) * max_expansion_ratio))
+    if source_text and len(target_text) > expansion_limit:
+        ratio = len(target_text) / max(1, len(source_text))
+        add("abnormal_expansion", f"translation expanded {ratio:.1f}x ({len(source_text)} -> {len(target_text)} chars)")
+
+    source_normalised = _normalise_for_similarity(source_text)
+    target_normalised = _normalise_for_similarity(target_text)
+    if (
+        len(source_normalised) >= 20
+        and len(target_normalised) >= 20
+        and not _looks_like_proper_noun_list(source_text)
+    ):
+        similarity = SequenceMatcher(None, source_normalised, target_normalised).ratio()
+        if similarity >= max_source_similarity:
+            add("copied_source", f"translation matches source ({similarity:.0%} similar)")
+
+    script_ok, script_reason = check_script_profile(
+        [target_text],
+        script_profile_for_code(target_lang),
+        max_cyrillic_ratio=max_cyrillic_ratio,
+        max_cjk_ratio=max_cjk_ratio,
+        max_latin_ratio=max_latin_ratio,
+        min_letters_for_script=10,
+    )
+    if not script_ok:
+        add("unexpected_script", script_reason)
+
+    return issues
+
 
 def entry_unique_ratio(entries: list) -> float:
     if not entries:
@@ -136,14 +477,645 @@ def entry_unique_ratio(entries: list) -> float:
     normalised = [PUNCT_RE.sub('', e.lower()).strip() for e in entries]
     return len(set(normalised)) / len(normalised)
 
+
+def validate_subtitle_file(
+    path: Path | str,
+    detector,
+    target_language: Language,
+    *,
+    target_lang: str = "",
+    min_chars: int = 200,
+    min_confidence: float = 0.70,
+    max_unique_ratio: float = 0.15,
+    max_cyrillic_ratio: float = 0.05,
+    max_cjk_ratio: float = 0.05,
+    max_latin_ratio: float = 0.80,
+    min_letters_for_script: int = 20,
+) -> Tuple[bool, str]:
+    """
+    Validate a single subtitle file against the expected target language.
+    Returns (is_valid, reason). Valid means keep the file; invalid means remove it.
+    """
+    p = Path(path)
+    raw = read_text_best_effort(p)
+    if raw is None:
+        return False, "unreadable"
+
+    garbage = find_garbage_match(raw)
+    if garbage is not None:
+        return False, f"garbage pattern ({garbage})"
+
+    entries = parse_srt_entries(raw)
+
+    code2 = target_lang.lower() if target_lang else None
+    if not code2:
+        for k, v in TARGET_LANGUAGE_MAP.items():
+            if v == target_language:
+                code2 = k
+                break
+    profile = script_profile_for_code(code2 or "et")
+    script_ok, script_reason = check_script_profile(
+        entries,
+        profile,
+        max_cyrillic_ratio=max_cyrillic_ratio,
+        max_cjk_ratio=max_cjk_ratio,
+        max_latin_ratio=max_latin_ratio,
+        min_letters_for_script=min_letters_for_script,
+    )
+    if not script_ok:
+        return False, script_reason
+
+    if len(entries) >= 5:
+        ratio = entry_unique_ratio(entries)
+        if ratio < max_unique_ratio:
+            return False, f"repetitive (unique={ratio:.3f}, {len(entries)} entries)"
+
+    cleaned = clean_srt_text(raw)
+    if len(cleaned) < min_chars:
+        return True, f"too short ({len(cleaned)} chars)"
+
+    lang, conf = detect_language(detector, cleaned)
+    if lang is None:
+        return True, "language unknown"
+
+    if lang == target_language and conf >= min_confidence:
+        return True, f"OK ({target_language.name} {conf:.2f})"
+
+    return False, f"detected {lang.name} {conf:.2f}"
+
+
+def validate_subtitle_pair(
+    source_path: Path | str,
+    target_path: Path | str,
+    detector,
+    target_language: Language,
+    *,
+    target_lang: str,
+    min_chars: int = 200,
+    min_confidence: float = 0.70,
+    max_unique_ratio: float = 0.15,
+    max_cyrillic_ratio: float = 0.05,
+    max_cjk_ratio: float = 0.05,
+    max_latin_ratio: float = 0.80,
+    min_letters_for_script: int = 20,
+    max_cue_lines: int = 4,
+    max_cue_chars: int = 500,
+    max_expansion_ratio: float = 4.0,
+    max_expansion_chars: int = 300,
+    max_source_similarity: float = 0.92,
+) -> ValidationReport:
+    """Validate a translated SRT against its source and return cue-level findings."""
+    report = ValidationReport()
+    source_raw = read_text_best_effort(Path(source_path))
+    target_raw = read_text_best_effort(Path(target_path))
+    if source_raw is None:
+        report.issues.append(ValidationIssue("source_unreadable", "source subtitle is unreadable"))
+        return report
+    if target_raw is None:
+        report.issues.append(ValidationIssue("target_unreadable", "target subtitle is unreadable"))
+        return report
+
+    source_cues, source_errors = parse_srt_cues(source_raw)
+    target_cues, target_errors = parse_srt_cues(target_raw)
+    for error in source_errors:
+        report.issues.append(ValidationIssue("source_structure", error))
+    for error in target_errors:
+        report.issues.append(ValidationIssue("target_structure", error))
+    if source_errors or target_errors:
+        return report
+
+    if len(source_cues) != len(target_cues):
+        report.issues.append(ValidationIssue(
+            "cue_count_mismatch",
+            f"cue count differs ({len(source_cues)} source, {len(target_cues)} target)",
+        ))
+        return report
+
+    for cue_index, (source, target) in enumerate(zip(source_cues, target_cues)):
+        if source.number != target.number:
+            report.issues.append(ValidationIssue(
+                "cue_number_mismatch",
+                f"source cue {source.number} aligns with target cue {target.number}",
+                cue_index,
+                target.number,
+            ))
+            continue
+        if source.timestamp != target.timestamp:
+            report.issues.append(ValidationIssue(
+                "timestamp_mismatch",
+                "timestamp differs from source",
+                cue_index,
+                target.number,
+            ))
+            continue
+        report.issues.extend(validate_cue_pair(
+            source,
+            target,
+            cue_index=cue_index,
+            target_lang=target_lang,
+            max_cue_lines=max_cue_lines,
+            max_cue_chars=max_cue_chars,
+            max_expansion_ratio=max_expansion_ratio,
+            max_expansion_chars=max_expansion_chars,
+            max_source_similarity=max_source_similarity,
+            max_cyrillic_ratio=max_cyrillic_ratio,
+            max_cjk_ratio=max_cjk_ratio,
+            max_latin_ratio=max_latin_ratio,
+        ))
+
+    target_valid, target_reason = validate_subtitle_file(
+        target_path,
+        detector,
+        target_language,
+        target_lang=target_lang,
+        min_chars=min_chars,
+        min_confidence=min_confidence,
+        max_unique_ratio=max_unique_ratio,
+        max_cyrillic_ratio=max_cyrillic_ratio,
+        max_cjk_ratio=max_cjk_ratio,
+        max_latin_ratio=max_latin_ratio,
+        min_letters_for_script=min_letters_for_script,
+    )
+    if not target_valid:
+        garbage_already_located = target_reason.startswith("garbage pattern") and any(
+            issue.rule in ("prompt_marker", "garbage") for issue in report.issues
+        )
+        script_already_located = any(issue.rule == "unexpected_script" for issue in report.issues)
+        if not garbage_already_located and not script_already_located:
+            report.issues.append(ValidationIssue("target_file_invalid", target_reason))
+
+    return report
+
+
+def repair_subtitle_file(
+    source_path: Path | str,
+    target_path: Path | str,
+    detector,
+    target_language: Language,
+    translator: Callable[[str, list[str], list[str]], Optional[str]],
+    *,
+    target_lang: str,
+    max_attempts: int = 2,
+    context_lines: int = 5,
+    **validation_kwargs,
+) -> RepairResult:
+    """Repair only invalid aligned cues, then atomically replace the target after full validation."""
+    initial_report = validate_subtitle_pair(
+        source_path,
+        target_path,
+        detector,
+        target_language,
+        target_lang=target_lang,
+        **validation_kwargs,
+    )
+    if initial_report.valid:
+        return RepairResult(True, [], initial_report, "already valid", 0)
+
+    cue_indexes = initial_report.repairable_cue_indexes
+    if not cue_indexes:
+        return RepairResult(False, [], initial_report, "validation failure is not safely repairable", 0)
+
+    source_raw = read_text_best_effort(Path(source_path))
+    target_raw = read_text_best_effort(Path(target_path))
+    if source_raw is None or target_raw is None:
+        return RepairResult(False, [], initial_report, "source or target became unreadable", 0)
+    source_cues, source_errors = parse_srt_cues(source_raw)
+    target_cues, target_errors = parse_srt_cues(target_raw)
+    if source_errors or target_errors:
+        return RepairResult(False, [], initial_report, "source or target structure changed", 0)
+
+    candidate_cues = [SubtitleCue(cue.number, cue.timestamp, list(cue.lines)) for cue in target_cues]
+    repaired_numbers: list[int] = []
+    attempt_count = 0
+
+    cue_validation_keys = {
+        "max_cue_lines",
+        "max_cue_chars",
+        "max_expansion_ratio",
+        "max_expansion_chars",
+        "max_source_similarity",
+        "max_cyrillic_ratio",
+        "max_cjk_ratio",
+        "max_latin_ratio",
+    }
+    cue_validation_kwargs = {
+        key: value for key, value in validation_kwargs.items() if key in cue_validation_keys
+    }
+
+    for cue_index in cue_indexes:
+        source_cue = source_cues[cue_index]
+        before = [cue.text for cue in source_cues[max(0, cue_index - context_lines):cue_index]]
+        after = [cue.text for cue in source_cues[cue_index + 1:cue_index + 1 + context_lines]]
+        accepted = False
+        last_reason = "translator returned no usable text"
+
+        for attempt in range(max(1, max_attempts)):
+            attempt_count += 1
+            attempt_before = before if attempt == 0 else []
+            attempt_after = after if attempt == 0 else []
+            try:
+                translated = translator(source_cue.text, attempt_before, attempt_after)
+            except Exception as exc:
+                last_reason = f"translator error: {exc}"
+                continue
+            if translated is None or not translated.strip():
+                continue
+
+            replacement = SubtitleCue(
+                candidate_cues[cue_index].number,
+                candidate_cues[cue_index].timestamp,
+                [line.strip() for line in translated.strip().splitlines() if line.strip()],
+            )
+            replacement_issues = validate_cue_pair(
+                source_cue,
+                replacement,
+                cue_index=cue_index,
+                target_lang=target_lang,
+                **cue_validation_kwargs,
+            )
+            if replacement_issues:
+                last_reason = ValidationReport(replacement_issues).summary()
+                continue
+
+            candidate_cues[cue_index] = replacement
+            repaired_numbers.append(replacement.number)
+            accepted = True
+            break
+
+        if not accepted:
+            return RepairResult(
+                False,
+                repaired_numbers,
+                initial_report,
+                f"cue {source_cue.number} could not be repaired: {last_reason}",
+                attempt_count,
+            )
+
+    newline = "\r\n" if "\r\n" in target_raw else "\n"
+    target = Path(target_path)
+    temp_name: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+            delete=False,
+        ) as temp_file:
+            temp_file.write(render_srt_cues(candidate_cues, newline=newline))
+            temp_name = temp_file.name
+
+        final_report = validate_subtitle_pair(
+            source_path,
+            temp_name,
+            detector,
+            target_language,
+            target_lang=target_lang,
+            **validation_kwargs,
+        )
+        if not final_report.valid:
+            return RepairResult(False, repaired_numbers, final_report, final_report.summary(), attempt_count)
+
+        os.replace(temp_name, target)
+        temp_name = None
+        return RepairResult(True, repaired_numbers, final_report, "repaired and validated", attempt_count)
+    except OSError as exc:
+        return RepairResult(
+            False,
+            repaired_numbers,
+            initial_report,
+            f"could not write repaired file: {exc}",
+            attempt_count,
+        )
+    finally:
+        if temp_name is not None:
+            try:
+                Path(temp_name).unlink()
+            except OSError:
+                pass
+
+
+def validate_subtitle_without_source(
+    target_path: Path | str,
+    detector,
+    target_language: Language,
+    *,
+    target_lang: str,
+    max_cue_lines: int = 4,
+    max_cue_chars: int = 500,
+    min_chars: int = 200,
+    min_confidence: float = 0.70,
+    max_unique_ratio: float = 0.15,
+    max_cyrillic_ratio: float = 0.05,
+    max_cjk_ratio: float = 0.05,
+    max_latin_ratio: float = 0.80,
+    min_letters_for_script: int = 20,
+    **_unused,
+) -> ValidationReport:
+    """Run strong target-only checks when no matching source subtitle exists."""
+    report = ValidationReport()
+    raw = read_text_best_effort(Path(target_path))
+    if raw is None:
+        report.issues.append(ValidationIssue("target_unreadable", "target subtitle is unreadable"))
+        return report
+
+    cues, errors = parse_srt_cues(raw)
+    for error in errors:
+        report.issues.append(ValidationIssue("target_structure", error))
+    if errors:
+        return report
+
+    profile = script_profile_for_code(target_lang)
+    for cue_index, cue in enumerate(cues):
+        line_count = len([line for line in cue.lines if line.strip()])
+        if line_count > max_cue_lines:
+            report.issues.append(ValidationIssue(
+                "excessive_lines",
+                f"translation has {line_count} lines (max {max_cue_lines} without source)",
+                cue_index,
+                cue.number,
+            ))
+        if len(cue.text) > max_cue_chars:
+            report.issues.append(ValidationIssue(
+                "cue_too_long",
+                f"translation is {len(cue.text)} characters (max {max_cue_chars})",
+                cue_index,
+                cue.number,
+            ))
+        garbage = find_garbage_match(cue.text)
+        if garbage is not None:
+            rule = "prompt_marker" if garbage == "prompt marker" else "garbage"
+            report.issues.append(ValidationIssue(
+                rule,
+                f"garbage pattern ({garbage})",
+                cue_index,
+                cue.number,
+            ))
+        script_ok, script_reason = check_script_profile(
+            [cue.text],
+            profile,
+            max_cyrillic_ratio=max_cyrillic_ratio,
+            max_cjk_ratio=max_cjk_ratio,
+            max_latin_ratio=max_latin_ratio,
+            min_letters_for_script=10,
+        )
+        if not script_ok:
+            report.issues.append(ValidationIssue(
+                "unexpected_script", script_reason, cue_index, cue.number
+            ))
+
+    target_valid, target_reason = validate_subtitle_file(
+        target_path,
+        detector,
+        target_language,
+        target_lang=target_lang,
+        min_chars=min_chars,
+        min_confidence=min_confidence,
+        max_unique_ratio=max_unique_ratio,
+        max_cyrillic_ratio=max_cyrillic_ratio,
+        max_cjk_ratio=max_cjk_ratio,
+        max_latin_ratio=max_latin_ratio,
+        min_letters_for_script=min_letters_for_script,
+    )
+    if not target_valid:
+        located = (
+            target_reason.startswith("garbage pattern")
+            and any(issue.rule in ("prompt_marker", "garbage") for issue in report.issues)
+        ) or any(issue.rule == "unexpected_script" for issue in report.issues)
+        if not located:
+            report.issues.append(ValidationIssue("target_file_invalid", target_reason))
+    return report
+
+
+def discover_target_subtitles(
+    roots: Iterable[Path],
+    target_languages: Iterable[str],
+) -> list[DiscoveredSubtitle]:
+    languages = sorted({lang.strip().lower() for lang in target_languages if lang.strip()}, key=len, reverse=True)
+    if not languages:
+        return []
+    language_pattern = "|".join(re.escape(lang) for lang in languages)
+    pattern = re.compile(
+        rf"\.(?P<lang>{language_pattern})(?P<variant>\.(?:hi|sdh|\d+))?\.srt$",
+        re.IGNORECASE,
+    )
+    discovered: list[DiscoveredSubtitle] = []
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.srt"):
+            if not path.is_file() or path in seen:
+                continue
+            match = pattern.search(path.name)
+            if match:
+                seen.add(path)
+                discovered.append(DiscoveredSubtitle(
+                    path=path,
+                    target_lang=match.group("lang").lower(),
+                    variant=(match.group("variant") or "").lower(),
+                ))
+    return sorted(discovered, key=lambda item: str(item.path).casefold())
+
+
+def find_preferred_source(
+    candidate: DiscoveredSubtitle,
+    source_codes: tuple[str, ...] = ("eng", "en"),
+) -> tuple[Optional[Path], Optional[str]]:
+    suffix = f".{candidate.target_lang}{candidate.variant}.srt"
+    if not candidate.path.name.lower().endswith(suffix):
+        return None, None
+    base_name = candidate.path.name[:-len(suffix)]
+    files_by_name = {
+        path.name.casefold(): path
+        for path in candidate.path.parent.iterdir()
+        if path.is_file()
+    }
+    for code in source_codes:
+        source = files_by_name.get(f"{base_name}.{code}.srt".casefold())
+        if source is not None:
+            return source, "en" if code in ("en", "eng") else code
+    return None, None
+
+
+def file_sha256(path: Path | str) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as file_handle:
+        for chunk in iter(lambda: file_handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+class ValidationStateStore:
+    def __init__(self, path: Path | str):
+        self.path = Path(path)
+        self._lock = threading.RLock()
+        self._data: dict = {"validatorVersion": VALIDATOR_VERSION, "files": {}}
+        self.load()
+
+    @staticmethod
+    def _key(path: Path | str) -> str:
+        return str(Path(path).resolve())
+
+    def load(self) -> None:
+        with self._lock:
+            try:
+                payload = json.loads(self.path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return
+            except (OSError, ValueError):
+                return
+            if isinstance(payload, dict) and isinstance(payload.get("files"), dict):
+                self._data = payload
+
+    def is_unchanged_valid(
+        self,
+        target_path: Path | str,
+        source_hash: Optional[str],
+        target_hash: str,
+    ) -> bool:
+        with self._lock:
+            entry = self._data.get("files", {}).get(self._key(target_path), {})
+            return (
+                entry.get("validatorVersion") == VALIDATOR_VERSION
+                and entry.get("result") == "valid"
+                and entry.get("sourceHash") == source_hash
+                and entry.get("targetHash") == target_hash
+            )
+
+    def record(
+        self,
+        target_path: Path | str,
+        *,
+        source_hash: Optional[str],
+        target_hash: Optional[str],
+        result: str,
+        details: Optional[dict] = None,
+    ) -> None:
+        entry = {
+            "validatorVersion": VALIDATOR_VERSION,
+            "sourceHash": source_hash,
+            "targetHash": target_hash,
+            "result": result,
+            "validatedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        if details:
+            entry["details"] = details
+        with self._lock:
+            self._data.setdefault("files", {})[self._key(target_path)] = entry
+            self._data["validatorVersion"] = VALIDATOR_VERSION
+            self._save_locked()
+
+    def prune_older_than(self, retention_days: int, now: Optional[datetime] = None) -> int:
+        cutoff = (now or datetime.now(timezone.utc)).timestamp() - retention_days * 86400
+        removed = 0
+        with self._lock:
+            files = self._data.setdefault("files", {})
+            for key, entry in list(files.items()):
+                try:
+                    validated_at = datetime.fromisoformat(entry["validatedAt"]).timestamp()
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if validated_at < cutoff:
+                    del files[key]
+                    removed += 1
+            if removed:
+                self._save_locked()
+        return removed
+
+    def _save_locked(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        temp_path.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp_path, self.path)
+
+
+def quarantine_subtitle(
+    path: Path | str,
+    roots: Iterable[Path],
+    quarantine_root: Path | str,
+) -> Path:
+    source = Path(path)
+    relative: Optional[Path] = None
+    resolved_source = source.resolve()
+    for root in roots:
+        try:
+            relative = resolved_source.relative_to(root.resolve())
+            break
+        except ValueError:
+            continue
+    if relative is None:
+        relative = Path(source.name)
+
+    destination = Path(quarantine_root) / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    base_destination = destination
+    counter = 1
+    while destination.exists():
+        destination = base_destination.with_name(
+            f"{base_destination.stem}.{counter}{base_destination.suffix}"
+        )
+        counter += 1
+    shutil.move(str(source), str(destination))
+    return destination
+
+
+def write_validation_report(path: Path | str, payload: dict) -> Path:
+    report_path = Path(f"{path}.validation.json")
+    report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report_path
+
+
+def purge_old_files(
+    root: Path | str,
+    retention_days: int,
+    *,
+    now_timestamp: Optional[float] = None,
+    exclude: Iterable[Path | str] = (),
+) -> list[Path]:
+    """Delete files older than the retention cutoff and remove empty child directories."""
+    directory = Path(root)
+    if not directory.exists():
+        return []
+    cutoff = (now_timestamp if now_timestamp is not None else datetime.now(timezone.utc).timestamp()) - (
+        retention_days * 86400
+    )
+    excluded = {str(Path(path).resolve()) for path in exclude}
+    removed: list[Path] = []
+    for path in directory.rglob("*"):
+        if not (path.is_file() or path.is_symlink()):
+            continue
+        if str(path.resolve()) in excluded:
+            continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed.append(path)
+        except FileNotFoundError:
+            continue
+
+    child_directories = sorted(
+        (path for path in directory.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for child in child_directories:
+        try:
+            child.rmdir()
+        except OSError:
+            pass
+    return removed
+
+
 def delete_or_quarantine(path: Path, quarantine_dir: Optional[Path], do_delete: bool) -> None:
     if shutdown_requested:
         raise InterruptedError("Shutdown requested")
-    
+
     if quarantine_dir is not None:
         quarantine_dir.mkdir(parents=True, exist_ok=True)
         target = quarantine_dir / path.name
-        # Avoid overwriting
         i = 1
         while target.exists():
             target = quarantine_dir / f"{path.stem}.{i}{path.suffix}"
@@ -154,18 +1126,94 @@ def delete_or_quarantine(path: Path, quarantine_dir: Optional[Path], do_delete: 
     if do_delete:
         path.unlink()
 
+
+def _process_file(
+    path: Path,
+    detector,
+    target_language: Language,
+    args,
+    quarantine_dir: Optional[Path],
+    counters: dict,
+) -> None:
+    is_valid, reason = validate_subtitle_file(
+        path,
+        detector,
+        target_language,
+        target_lang=args.target_lang,
+        min_chars=args.min_chars,
+        min_confidence=args.min_confidence,
+        max_unique_ratio=args.max_unique_ratio,
+        max_cyrillic_ratio=args.max_cyrillic_ratio,
+        max_cjk_ratio=args.max_cjk_ratio,
+        max_latin_ratio=args.max_latin_ratio,
+        min_letters_for_script=args.min_letters_for_script,
+    )
+
+    if is_valid:
+        if args.verbose:
+            print(f"OK ({reason}): {path}")
+        if "too short" in reason:
+            counters["skipped_short"] += 1
+        elif "unknown" in reason:
+            counters["unknown"] += 1
+        else:
+            counters["candidates"] += 1
+        return
+
+    if "garbage pattern" in reason:
+        counters["garbage"] += 1
+    elif any(x in reason for x in ("Cyrillic", "CJK", "Latin", "non-Latin", "Latin script")):
+        counters["script"] += 1
+    elif "repetitive" in reason:
+        counters["repetitive"] += 1
+    else:
+        counters["not_target"] += 1
+
+    action_label = "DRYRUN"
+    if args.delete or quarantine_dir is not None:
+        action_label = "DELETE" if quarantine_dir is None else "QUARANTINE"
+
+    print(f"{action_label} ({reason}): {path}")
+
+    if args.delete or quarantine_dir is not None:
+        try:
+            delete_or_quarantine(path, quarantine_dir, do_delete=args.delete and quarantine_dir is None)
+            counters["actions"] += 1
+        except InterruptedError:
+            raise
+        except Exception as e:
+            print(f"ERROR: could not apply action to {path}: {e}", file=sys.stderr)
+            sys.stderr.flush()
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Delete or quarantine .et.srt files that are not actually Estonian.")
+    # Unbuffered output for log visibility
+    sys.stdout = os.fdopen(sys.stdout.fileno(), "w", buffering=1)
+    sys.stderr = os.fdopen(sys.stderr.fileno(), "w", buffering=1)
+    _register_signal_handlers()
+
+    ap = argparse.ArgumentParser(
+        description="Delete or quarantine subtitle files that are not in the expected target language."
+    )
     ap.add_argument(
         "--root",
         action="append",
-        required=True,
         help="Root folder to scan (repeatable). Example: --root /media/tv --root /media/movies",
+    )
+    ap.add_argument(
+        "--file",
+        action="append",
+        help="Single subtitle file to validate (repeatable). Skips directory scan.",
+    )
+    ap.add_argument(
+        "--target-lang",
+        default="et",
+        help="Expected target language code2. Default: et",
     )
     ap.add_argument(
         "--suffix",
         default=".et.srt",
-        help="File suffix to match. Default: .et.srt",
+        help="File suffix to match when scanning --root. Default: .et.srt",
     )
     ap.add_argument(
         "--min-chars",
@@ -196,6 +1244,30 @@ def main() -> int:
         help="Flag files where unique_words/total_words is below this — catches repetition hallucinations. Default: 0.15",
     )
     ap.add_argument(
+        "--max-cyrillic-ratio",
+        type=float,
+        default=0.05,
+        help="Max Cyrillic letter ratio for Latin-target files. Default: 0.05",
+    )
+    ap.add_argument(
+        "--max-cjk-ratio",
+        type=float,
+        default=0.05,
+        help="Max CJK letter ratio for Latin-target files. Default: 0.05",
+    )
+    ap.add_argument(
+        "--max-latin-ratio",
+        type=float,
+        default=0.80,
+        help="Max Latin letter ratio for Cyrillic-target files. Default: 0.80",
+    )
+    ap.add_argument(
+        "--min-letters-for-script",
+        type=int,
+        default=20,
+        help="Minimum letters before whole-file script check applies. Default: 20",
+    )
+    ap.add_argument(
         "--verbose",
         action="store_true",
         help="Print extra details for each file.",
@@ -203,152 +1275,68 @@ def main() -> int:
 
     args = ap.parse_args()
 
-    roots = [Path(r).expanduser().resolve() for r in args.root]
+    if not args.root and not args.file:
+        ap.error("at least one of --root or --file is required")
+
+    target_language = target_language_for_code(args.target_lang)
+    if target_language is None:
+        print(f"[ERROR] Unsupported --target-lang {args.target_lang!r}", file=sys.stderr)
+        return 1
+
+    roots = [Path(r).expanduser().resolve() for r in (args.root or [])]
+    files = [Path(f).expanduser().resolve() for f in (args.file or [])]
     quarantine_dir = Path(args.quarantine).expanduser().resolve() if args.quarantine else None
+    detector = build_detector()
 
-    # Focus detector on likely subtitle languages to reduce confusion and improve accuracy.
-    languages = [
-        Language.ESTONIAN,
-        Language.ENGLISH,
-        Language.RUSSIAN,
-        Language.FINNISH,
-        Language.SWEDISH,
-        Language.LATVIAN,
-        Language.LITHUANIAN,
-        Language.GERMAN,
-        Language.FRENCH,
-        Language.SPANISH,
-        Language.POLISH,
-        Language.UKRAINIAN,
-    ]
-    detector = LanguageDetectorBuilder.from_languages(*languages).build()
+    counters = {
+        "total": 0,
+        "candidates": 0,
+        "not_target": 0,
+        "skipped_short": 0,
+        "unknown": 0,
+        "actions": 0,
+        "garbage": 0,
+        "script": 0,
+        "repetitive": 0,
+    }
 
-    total = 0
-    candidates = 0
-    not_estonian = 0
-    skipped_short = 0
-    unknown = 0
-    actions = 0
-    http_errors = 0
-    repetitive = 0
+    paths: Iterable[Path]
+    if files:
+        paths = files
+    else:
+        paths = iter_srt_files(roots, args.suffix)
 
-    for path in iter_srt_files(roots, args.suffix):
+    for path in paths:
         if shutdown_requested:
             print("[WARNING] Shutdown requested. Stopping processing.", file=sys.stderr)
             sys.stderr.flush()
             break
-        
-        total += 1
-        raw = read_text_best_effort(path)
-        if raw is None:
-            unknown += 1
-            if args.verbose:
-                print(f"UNKNOWN (read failed): {path}")
-            continue
 
-        # Check for HTTP errors in raw text
-        error_count = count_http_errors(raw)
-        if error_count >= 2:
-            http_errors += 1
-            action_label = "DRYRUN"
-            if args.delete or quarantine_dir is not None:
-                action_label = "DELETE" if quarantine_dir is None else "QUARANTINE"
-            
-            print(f"{action_label} (HTTP errors: {error_count}): {path}")
-            
-            if args.delete or quarantine_dir is not None:
-                try:
-                    delete_or_quarantine(path, quarantine_dir, do_delete=args.delete and quarantine_dir is None)
-                    actions += 1
-                except InterruptedError:
-                    print("[WARNING] Processing interrupted by shutdown signal.", file=sys.stderr)
-                    sys.stderr.flush()
-                    break
-                except Exception as e:
-                    print(f"ERROR: could not apply action to {path}: {e}", file=sys.stderr)
-                    sys.stderr.flush()
-            continue
-
-        entries = parse_srt_entries(raw)
-        if len(entries) >= 5:
-            ratio = entry_unique_ratio(entries)
-            if ratio < args.max_unique_ratio:
-                repetitive += 1
-                action_label = "DRYRUN"
-                if args.delete or quarantine_dir is not None:
-                    action_label = "DELETE" if quarantine_dir is None else "QUARANTINE"
-                print(f"{action_label} (REPETITIVE unique={ratio:.3f}, {len(entries)} entries): {path}")
-                if args.delete or quarantine_dir is not None:
-                    try:
-                        delete_or_quarantine(path, quarantine_dir, do_delete=args.delete and quarantine_dir is None)
-                        actions += 1
-                    except InterruptedError:
-                        print("[WARNING] Processing interrupted by shutdown signal.", file=sys.stderr)
-                        sys.stderr.flush()
-                        break
-                    except Exception as e:
-                        print(f"ERROR: could not apply action to {path}: {e}", file=sys.stderr)
-                        sys.stderr.flush()
-                continue
-
-        cleaned = clean_srt_text(raw)
-
-        if len(cleaned) < args.min_chars:
-            skipped_short += 1
-            if args.verbose:
-                print(f"SKIP (too short {len(cleaned)} chars): {path}")
-            continue
-
-        candidates += 1
-        lang, conf = detect_language(detector, cleaned)
-
-        if lang is None:
-            unknown += 1
-            if args.verbose:
-                print(f"UNKNOWN (no language): {path}")
-            continue
-
-        is_et = (lang == Language.ESTONIAN) and (conf >= args.min_confidence)
-
-        if is_et:
-            if args.verbose:
-                print(f"OK (ET {conf:.2f}): {path}")
-            continue
-
-        not_estonian += 1
-        action_label = "DRYRUN"
-        if args.delete or quarantine_dir is not None:
-            action_label = "DELETE" if quarantine_dir is None else "QUARANTINE"
-
-        print(f"{action_label} (detected {lang.name} {conf:.2f}): {path}")
-
-        if args.delete or quarantine_dir is not None:
-            try:
-                delete_or_quarantine(path, quarantine_dir, do_delete=args.delete and quarantine_dir is None)
-                actions += 1
-            except InterruptedError:
-                print("[WARNING] Processing interrupted by shutdown signal.", file=sys.stderr)
-                sys.stderr.flush()
-                break
-            except Exception as e:
-                print(f"ERROR: could not apply action to {path}: {e}", file=sys.stderr)
-                sys.stderr.flush()
+        counters["total"] += 1
+        try:
+            _process_file(path, detector, target_language, args, quarantine_dir, counters)
+        except InterruptedError:
+            print("[WARNING] Processing interrupted by shutdown signal.", file=sys.stderr)
+            sys.stderr.flush()
+            break
 
     print("")
     print("Summary")
-    print(f"  matched files: {total}")
-    print(f"  analysed (>= min chars): {candidates}")
-    print(f"  skipped short: {skipped_short}")
-    print(f"  unknown/unreadable: {unknown}")
-    print(f"  HTTP errors (>= 2): {http_errors}")
-    print(f"  repetitive (hallucination): {repetitive}")
-    print(f"  not Estonian: {not_estonian}")
-    print(f"  actions taken: {actions} (dry run if 0 and no --delete/--quarantine)")
+    print(f"  matched files: {counters['total']}")
+    print(f"  analysed (>= min chars): {counters['candidates']}")
+    print(f"  skipped short: {counters['skipped_short']}")
+    print(f"  unknown/unreadable: {counters['unknown']}")
+    print(f"  garbage patterns: {counters['garbage']}")
+    print(f"  script mismatch: {counters['script']}")
+    print(f"  repetitive (hallucination): {counters['repetitive']}")
+    print(f"  not {args.target_lang}: {counters['not_target']}")
+    print(f"  actions taken: {counters['actions']} (dry run if 0 and no --delete/--quarantine)")
     sys.stdout.flush()
 
     if shutdown_requested:
-        return 130  # Standard exit code for SIGINT
+        return 130
     return 0
+
 
 if __name__ == "__main__":
     exit_code = 1
