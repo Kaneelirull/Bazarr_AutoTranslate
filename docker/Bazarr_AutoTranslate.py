@@ -5,7 +5,9 @@ import json
 import signal
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import tempfile
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 
 import requests
@@ -109,6 +111,7 @@ POLL_TIMEOUT = max(30, int(os.getenv("POLL_TIMEOUT", "900")))
 RESUBMIT_COOLDOWN = max(60, int(os.getenv("RESUBMIT_COOLDOWN", "3600")))
 SYNC_TIMEOUT = max(30, int(os.getenv("SYNC_TIMEOUT", "600")))
 SYNC_POLL_INTERVAL = max(5, int(os.getenv("SYNC_POLL_INTERVAL", "15")))
+SYNC_START_TIMEOUT = max(5, int(os.getenv("SYNC_START_TIMEOUT", "30")))
 CLEANUP_MIN_CONFIDENCE = float(os.getenv("CLEANUP_MIN_CONFIDENCE", "0.70"))
 CLEANUP_MIN_CHARS = int(os.getenv("CLEANUP_MIN_CHARS", "200"))
 CLEANUP_MAX_UNIQUE_RATIO = float(os.getenv("CLEANUP_MAX_UNIQUE_RATIO", "0.15"))
@@ -124,6 +127,9 @@ CLEANUP_MAX_SOURCE_SIMILARITY = min(1.0, max(0.5, float(os.getenv("CLEANUP_MAX_S
 CLEANUP_REPAIR_ENABLED = os.getenv("CLEANUP_REPAIR_ENABLED", "true").lower() in ("1", "true", "yes")
 CLEANUP_MAX_REPAIR_ATTEMPTS = max(1, int(os.getenv("CLEANUP_MAX_REPAIR_ATTEMPTS", "2")))
 CLEANUP_REPAIR_CONTEXT_LINES = max(0, int(os.getenv("CLEANUP_REPAIR_CONTEXT_LINES", "5")))
+CLEANUP_FORMAT_REPAIR_ENABLED = os.getenv("CLEANUP_FORMAT_REPAIR_ENABLED", "true").lower() in ("1", "true", "yes")
+CLEANUP_REPAIR_WORKERS = max(1, int(os.getenv("CLEANUP_REPAIR_WORKERS", "1")))
+CLEANUP_REPAIR_QUEUE_MAX = max(1, int(os.getenv("CLEANUP_REPAIR_QUEUE_MAX", "100")))
 CLEANUP_SCAN_EXISTING = os.getenv("CLEANUP_SCAN_EXISTING", "true").lower() in ("1", "true", "yes")
 CLEANUP_SCAN_INTERVAL = max(300, int(os.getenv("CLEANUP_SCAN_INTERVAL", "21600")))
 CLEANUP_SCAN_DRY_RUN = os.getenv("CLEANUP_SCAN_DRY_RUN", "false").lower() in ("1", "true", "yes")
@@ -162,10 +168,31 @@ _cleanup_detector_lock = threading.Lock()
 _validation_state = None
 _validation_state_lock = threading.Lock()
 _cleanup_scan_lock = threading.Lock()
+_repair_executor = None
+_repair_executor_lock = threading.Lock()
+_repair_capacity = threading.BoundedSemaphore(CLEANUP_REPAIR_WORKERS + CLEANUP_REPAIR_QUEUE_MAX)
+_pending_repairs: dict[Future, dict] = {}
+_pending_repairs_lock = threading.Lock()
+_repair_keys: set[tuple] = set()
+_target_repair_locks: dict[str, threading.Lock] = {}
+_target_repair_locks_lock = threading.Lock()
 
 _episode_cache: dict[int, int] = {}
 _movie_cache: dict[int, int] = {}
 _media_cache_lock = threading.Lock()
+
+
+@dataclass
+class RepairJobResult:
+    action: str
+    report: object
+    title: str
+    target_lang: str
+    item_type: str | None
+    item_id: int | None
+    attempts: int = 0
+    second_attempts: int = 0
+    target_path: str = ""
 
 
 def dbg(msg: str) -> None:
@@ -422,7 +449,9 @@ def wait_for_bazarr_sync(had_episodes: bool, had_movies: bool, timeout: int) -> 
 
     print(f"[INFO] Waiting for Bazarr subtitle scan to complete (timeout {timeout}s)...")
     deadline = time.time() + timeout
+    start_deadline = min(deadline, time.time() + SYNC_START_TIMEOUT)
     logged_jobs: set[int] = set()
+    observed_running = False
 
     while not shutdown_requested:
         try:
@@ -435,8 +464,17 @@ def wait_for_bazarr_sync(had_episodes: bool, had_movies: bool, timeout: int) -> 
 
         active = [j for j in jobs if _job_matches_scan(j, had_episodes, had_movies)]
         if not active:
-            print(f"{GREEN}[OK] Bazarr subtitle scan completed{RESET}")
-            return True
+            if observed_running:
+                print(f"{GREEN}[OK] Bazarr subtitle scan completed{RESET}")
+                return True
+            if time.time() >= start_deadline:
+                print(
+                    f"{YELLOW}[WARNING] Bazarr subtitle scan did not appear within "
+                    f"{SYNC_START_TIMEOUT}s{RESET}"
+                )
+                return False
+        else:
+            observed_running = True
 
         for job in active:
             jid = job.get("job_id")
@@ -606,6 +644,11 @@ def lingarr_translate_line(
     target_lang: str,
     context_before: list[str],
     context_after: list[str],
+    *,
+    repair_label: str = "",
+    cue_number: int | None = None,
+    attempt: int | None = None,
+    outcome_meta: dict | None = None,
 ) -> str | None:
     body = {
         "subtitleLine": subtitle_line,
@@ -618,6 +661,7 @@ def lingarr_translate_line(
         f"lingarr_translate_line: POST source={source_lang} target={target_lang} "
         f"before={len(context_before)} after={len(context_after)} chars={len(subtitle_line)}"
     )
+    started = time.monotonic()
     try:
         r = requests.post(
             lingarr_url("Translate/line"),
@@ -625,6 +669,12 @@ def lingarr_translate_line(
             json=body,
             timeout=max(CONNECT_TIMEOUT, 120),
         )
+        elapsed = time.monotonic() - started
+        if outcome_meta is not None:
+            outcome_meta.update({"httpStatus": r.status_code, "httpDurationSeconds": round(elapsed, 3)})
+        identity = f"{repair_label} cue {cue_number}".strip() if cue_number is not None else "line repair"
+        attempt_label = f" attempt {attempt}" if attempt is not None else ""
+        print(f"[REPAIR] Lingarr HTTP {r.status_code} for {identity}{attempt_label} after {elapsed:.1f}s")
         r.raise_for_status()
         try:
             payload = r.json()
@@ -640,7 +690,10 @@ def lingarr_translate_line(
                     return value.strip()
         print(f"{RED}[ERROR] lingarr_translate_line: unexpected response shape{RESET}")
     except Exception as e:
-        print(f"{RED}[ERROR] lingarr_translate_line: {e}{RESET}")
+        elapsed = time.monotonic() - started
+        if outcome_meta is not None:
+            outcome_meta.update({"httpStatus": getattr(getattr(e, "response", None), "status_code", None), "httpDurationSeconds": round(elapsed, 3)})
+        print(f"{RED}[ERROR] lingarr_translate_line failed after {elapsed:.1f}s: {e}{RESET}")
     return None
 
 
@@ -821,6 +874,9 @@ def _apply_cleanup_action(
     *,
     repair_attempts: int = 0,
     lingarr_outcome: str = "not attempted",
+    attempt_history: list[dict] | None = None,
+    format_fixes: list[str] | None = None,
+    format_recovered_cues: list[int] | None = None,
     dry_run: bool = False,
 ) -> str:
     from clean_et_subs import quarantine_subtitle, write_validation_report
@@ -835,6 +891,9 @@ def _apply_cleanup_action(
         "targetHash": target_hash,
         "targetLanguage": target_lang,
         "repairAttempts": repair_attempts,
+        "repairAttemptHistory": attempt_history or [],
+        "formatFixes": format_fixes or [],
+        "formatRecoveredCues": format_recovered_cues or [],
         "lingarrOutcome": lingarr_outcome,
         "validation": report.to_dict(),
         "recordedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -849,6 +908,9 @@ def _apply_cleanup_action(
             "dry-run-invalid" if dry_run else "reported-invalid",
             report,
             repairAttempts=repair_attempts,
+            repairAttemptHistory=attempt_history or [],
+            formatFixes=format_fixes or [],
+            formatRecoveredCues=format_recovered_cues or [],
             lingarrOutcome=lingarr_outcome,
         )
         return "dry-run" if dry_run else "reported"
@@ -868,6 +930,9 @@ def _apply_cleanup_action(
                 report,
                 quarantinePath=str(destination),
                 repairAttempts=repair_attempts,
+                repairAttemptHistory=attempt_history or [],
+                formatFixes=format_fixes or [],
+                formatRecoveredCues=format_recovered_cues or [],
                 lingarrOutcome=lingarr_outcome,
             )
             print(f"[CLEANUP] Quarantined {target} -> {destination}")
@@ -885,6 +950,9 @@ def _apply_cleanup_action(
             "deleted",
             report,
             repairAttempts=repair_attempts,
+            repairAttemptHistory=attempt_history or [],
+            formatFixes=format_fixes or [],
+            formatRecoveredCues=format_recovered_cues or [],
             lingarrOutcome=lingarr_outcome,
         )
         print(f"[CLEANUP] Deleted {target}")
@@ -892,6 +960,265 @@ def _apply_cleanup_action(
     except OSError as e:
         print(f"{RED}[ERROR] Could not delete {target}: {e}{RESET}")
         return "action-failed"
+
+
+def _target_repair_lock(target_path: str | Path) -> threading.Lock:
+    key = os.path.normcase(os.path.abspath(str(target_path)))
+    with _target_repair_locks_lock:
+        return _target_repair_locks.setdefault(key, threading.Lock())
+
+
+def _write_recovery_candidate(
+    target_path: str | Path,
+    raw: str,
+    *,
+    same_directory: bool = True,
+) -> Path:
+    target = Path(target_path)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="",
+        prefix=f".{target.name}.recovery.",
+        suffix=".srt",
+        dir=target.parent if same_directory else None,
+        delete=False,
+    ) as handle:
+        handle.write(raw)
+        return Path(handle.name)
+
+
+def _perform_repair(
+    source_path: str,
+    target_path: str,
+    source_lang: str,
+    target_lang: str,
+    item_id: int | None,
+    title: str,
+    item_type: str | None,
+    initial_report,
+    expected_target_hash: str | None,
+    recovery_raw: str | None = None,
+    format_fixes: list[str] | None = None,
+    format_recovered_cues: list[int] | None = None,
+) -> RepairJobResult:
+    from clean_et_subs import repair_subtitle_file, target_language_for_code
+
+    label = title or os.path.basename(target_path)
+    detector = _get_cleanup_detector()
+    target_language = target_language_for_code(target_lang)
+    if detector is None or target_language is None:
+        return RepairJobResult(
+            "repair-deferred", initial_report, label, target_lang, item_type, item_id,
+            target_path=str(target_path),
+        )
+
+    with _target_repair_lock(target_path):
+        if expected_target_hash is not None and _file_hash_or_none(target_path) != expected_target_hash:
+            print(f"[REPAIR] Deferred {label} '{target_lang}': target changed while queued")
+            return RepairJobResult(
+                "repair-deferred", initial_report, label, target_lang, item_type, item_id,
+                target_path=str(target_path),
+            )
+
+        working_path = Path(target_path)
+        recovery_temp: Path | None = None
+        if recovery_raw is not None:
+            recovery_temp = _write_recovery_candidate(target_path, recovery_raw)
+            working_path = recovery_temp
+
+        attempt_state: dict = {}
+
+        def attempt_logger(event: dict) -> None:
+            attempt_state.clear()
+            attempt_state.update(event)
+            cue = event.get("cueNumber")
+            attempt = event.get("attempt")
+            maximum = event.get("maxAttempts")
+            duration = event.get("durationSeconds", 0)
+            http_status = event.get("httpStatus")
+            http_label = f" HTTP {http_status}" if http_status is not None else ""
+            worker = threading.current_thread().name
+            if event["event"] == "sending":
+                context = (
+                    "without context"
+                    if event.get("withoutContext")
+                    else f"with context before={event.get('contextBefore', 0)} after={event.get('contextAfter', 0)}"
+                )
+                print(f"[REPAIR] {worker} sending {label} '{target_lang}' cue {cue} attempt {attempt}/{maximum} {context}")
+            elif event["event"] == "accepted":
+                print(f"[REPAIR] Cue {cue} attempt {attempt} accepted{http_label} after {duration:.1f}s")
+            elif event["event"] == "rejected":
+                rules = ",".join(event.get("validationRules", [])) or "validation"
+                print(f"[REPAIR] Cue {cue} attempt {attempt} rejected{http_label} after {duration:.1f}s: {rules}")
+            else:
+                print(f"[REPAIR] Cue {cue} attempt {attempt} failed{http_label} after {duration:.1f}s: {event.get('outcome')}")
+
+        def translator(line: str, before: list[str], after: list[str]):
+            outcome_meta: dict = {}
+            translated = lingarr_translate_line(
+                line,
+                source_lang,
+                target_lang,
+                before,
+                after,
+                repair_label=label,
+                cue_number=attempt_state.get("cueNumber"),
+                attempt=attempt_state.get("attempt"),
+                outcome_meta=outcome_meta,
+            )
+            return translated, outcome_meta
+
+        cue_list = ", ".join(str(i + 1) for i in initial_report.repairable_cue_indexes)
+        print(f"[REPAIR] Retrying {label} '{target_lang}' cue position(s): {cue_list}")
+        try:
+            repair = repair_subtitle_file(
+                Path(source_path),
+                working_path,
+                detector,
+                target_language,
+                translator,
+                target_lang=target_lang,
+                max_attempts=CLEANUP_MAX_REPAIR_ATTEMPTS,
+                context_lines=CLEANUP_REPAIR_CONTEXT_LINES,
+                attempt_logger=attempt_logger,
+                **_validation_kwargs(),
+            )
+            second_attempts = sum(
+                entry.get("attempt", 0) > 1 and entry.get("withoutContext")
+                for entry in repair.attempt_history
+            )
+            if repair.success:
+                if recovery_temp is not None:
+                    os.replace(recovery_temp, target_path)
+                    recovery_temp = None
+                repaired = ", ".join(str(number) for number in repair.repaired_cues)
+                print(f"{GREEN}[REPAIR] Repaired and validated {label} '{target_lang}' cue(s): {repaired}{RESET}")
+                _record_validation_result(
+                    target_path,
+                    _file_hash_or_none(source_path),
+                    _file_hash_or_none(target_path),
+                    "valid",
+                    repair.report,
+                    repairedCues=repair.repaired_cues,
+                    repairAttempts=repair.attempts,
+                    repairAttemptHistory=repair.attempt_history,
+                    formatFixes=format_fixes or [],
+                    formatRecoveredCues=format_recovered_cues or [],
+                    lingarrOutcome="repaired",
+                )
+                return RepairJobResult(
+                    "repaired", repair.report, label, target_lang, item_type, item_id,
+                    repair.attempts, second_attempts, str(target_path),
+                )
+
+            print(f"{YELLOW}[REPAIR] Could not repair {label} '{target_lang}': {repair.reason}{RESET}")
+            action = _apply_cleanup_action(
+                target_path,
+                source_path,
+                target_lang,
+                repair.report,
+                repair_attempts=repair.attempts,
+                lingarr_outcome=repair.reason,
+                attempt_history=repair.attempt_history,
+                format_fixes=format_fixes,
+                format_recovered_cues=format_recovered_cues,
+            )
+            if action in ("quarantined", "deleted") and item_id is not None:
+                _clear_submission(item_id, target_lang)
+                print(f"[CLEANUP] Cleared cooldown for retry: {label} '{target_lang}'")
+            return RepairJobResult(
+                action, repair.report, label, target_lang, item_type, item_id,
+                repair.attempts, second_attempts, str(target_path),
+            )
+        finally:
+            if recovery_temp is not None:
+                try:
+                    recovery_temp.unlink()
+                except OSError:
+                    pass
+
+
+def _get_repair_executor() -> ThreadPoolExecutor:
+    global _repair_executor
+    with _repair_executor_lock:
+        if _repair_executor is None:
+            _repair_executor = ThreadPoolExecutor(
+                max_workers=CLEANUP_REPAIR_WORKERS,
+                thread_name_prefix="repair-worker",
+            )
+        return _repair_executor
+
+
+def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, target_lang: str) -> str:
+    with _pending_repairs_lock:
+        if repair_key in _repair_keys:
+            print(f"[REPAIR] Duplicate repair suppressed for {label} '{target_lang}'")
+            return "repair-duplicate"
+        if not _repair_capacity.acquire(blocking=False):
+            print(f"[REPAIR] Queue full; deferred {label} '{target_lang}' to the next scan")
+            return "repair-deferred"
+        _repair_keys.add(repair_key)
+        try:
+            future = _get_repair_executor().submit(_perform_repair, **job_kwargs)
+        except Exception:
+            _repair_keys.discard(repair_key)
+            _repair_capacity.release()
+            raise
+        _pending_repairs[future] = {"key": repair_key, "report": report}
+    for index in report.repairable_cue_indexes:
+        print(f"[REPAIR] Queued {label} '{target_lang}' cue position {index + 1}")
+    return "repair-queued"
+
+
+def _drain_pending_repairs(stats: dict) -> list[RepairJobResult]:
+    with _pending_repairs_lock:
+        futures = list(_pending_repairs)
+    results: list[RepairJobResult] = []
+    for future in as_completed(futures):
+        with _pending_repairs_lock:
+            metadata = _pending_repairs.pop(future, {})
+            _repair_keys.discard(metadata.get("key"))
+        _repair_capacity.release()
+        try:
+            result = future.result()
+        except Exception as exc:
+            print(f"{RED}[ERROR] Repair worker failed: {exc}{RESET}")
+            stats["cleanup_repair_failures"] = stats.get("cleanup_repair_failures", 0) + 1
+            continue
+        results.append(result)
+        stats["cleanup_repair_attempts"] = stats.get("cleanup_repair_attempts", 0) + result.attempts
+        stats["cleanup_second_attempts"] = stats.get("cleanup_second_attempts", 0) + result.second_attempts
+        _record_cleanup_stats(stats, result.action, result.report)
+        if result.action == "repaired":
+            stats["completed"] += 1
+            stats["translations"].append(f"{result.title}: repaired {result.target_lang}")
+            if result.item_type:
+                _mark_activity(stats, result.item_type)
+            else:
+                stats["episode_activity"] = True
+                stats["movie_activity"] = True
+        elif result.action in ("quarantined", "deleted"):
+            stats["failed"] += 1
+            stats["cleaned"] = stats.get("cleaned", 0) + 1
+            if result.item_type:
+                _mark_activity(stats, result.item_type)
+            else:
+                stats["episode_activity"] = True
+                stats["movie_activity"] = True
+        elif result.action == "repair-deferred":
+            stats["cleanup_repair_deferred"] = stats.get("cleanup_repair_deferred", 0) + 1
+    return results
+
+
+def _shutdown_repair_executor() -> None:
+    global _repair_executor
+    with _repair_executor_lock:
+        executor = _repair_executor
+        _repair_executor = None
+    if executor is not None:
+        print("[REPAIR] Waiting for active repair worker(s) to stop")
+        executor.shutdown(wait=True, cancel_futures=False)
 
 
 def _validate_translated_file(
@@ -902,96 +1229,151 @@ def _validate_translated_file(
     item_id: int | None,
     title: str = "",
     dry_run: bool = False,
+    *,
+    defer_repair: bool = False,
+    item_type: str | None = None,
 ) -> tuple[str, object]:
     if target_lang not in CLEANUP_LANGUAGES:
         return "valid", None
 
-    from clean_et_subs import (
-        repair_subtitle_file,
-        target_language_for_code,
-        validate_subtitle_pair,
-    )
+    from clean_et_subs import recover_subtitle_pair, target_language_for_code, validate_subtitle_pair
 
     target_language = target_language_for_code(target_lang)
-    if target_language is None:
-        dbg(f"_validate_translated_file: no lingua mapping for {target_lang!r}")
-        return "valid", None
-
     detector = _get_cleanup_detector()
-    if detector is None:
+    if target_language is None or detector is None:
         return "valid", None
 
-    validation_kwargs = _validation_kwargs()
     source_hash = _file_hash_or_none(source_path)
+    expected_target_hash = _file_hash_or_none(target_path)
     report = validate_subtitle_pair(
-        Path(source_path),
-        Path(target_path),
-        detector,
-        target_language,
-        target_lang=target_lang,
-        **validation_kwargs,
+        Path(source_path), Path(target_path), detector, target_language,
+        target_lang=target_lang, **_validation_kwargs(),
     )
     if report.valid:
+        if CLEANUP_FORMAT_REPAIR_ENABLED:
+            recovery = recover_subtitle_pair(source_path, target_path)
+            if recovery.safe and recovery.changed and recovery.raw is not None:
+                candidate = _write_recovery_candidate(target_path, recovery.raw, same_directory=False)
+                try:
+                    normalized_report = validate_subtitle_pair(
+                        Path(source_path), candidate, detector, target_language,
+                        target_lang=target_lang, **_validation_kwargs(),
+                    )
+                finally:
+                    try:
+                        candidate.unlink()
+                    except OSError:
+                        pass
+                if not normalized_report.valid:
+                    print(
+                        f"{YELLOW}[FORMAT] Normalized candidate rejected for "
+                        f"{os.path.basename(target_path)}: {normalized_report.summary()}{RESET}"
+                    )
+                    recovery = None
+                if recovery is None:
+                    print(f"[CLEANUP] OK {os.path.basename(target_path)} (original retained)")
+                    _record_validation_result(target_path, source_hash, expected_target_hash, "valid", report)
+                    return "valid", report
+                if dry_run:
+                    print(f"[FORMAT] DRYRUN: would normalize {target_path}")
+                    return "dry-run", report
+                with _target_repair_lock(target_path):
+                    temp = _write_recovery_candidate(target_path, recovery.raw)
+                    os.replace(temp, target_path)
+                print(
+                    f"{GREEN}[FORMAT] Normalized {os.path.basename(target_path)} without AI: "
+                    f"{', '.join(recovery.fixes) or 'canonicalized'}{RESET}"
+                )
+                _record_validation_result(
+                    target_path,
+                    source_hash,
+                    _file_hash_or_none(target_path),
+                    "valid",
+                    normalized_report,
+                    formatFixes=recovery.fixes,
+                    formatRecoveredCues=recovery.recovered_cues,
+                )
+                return "formatted", normalized_report
         print(f"[CLEANUP] OK {os.path.basename(target_path)} (source-aware validation passed)")
-        _record_validation_result(
-            target_path,
-            source_hash,
-            _file_hash_or_none(target_path),
-            "valid",
-            report,
-        )
+        _record_validation_result(target_path, source_hash, expected_target_hash, "valid", report)
         return "valid", report
 
     label = title or os.path.basename(target_path)
     print(f"{YELLOW}[CLEANUP] Invalid translation {label} '{target_lang}': {report.summary()}{RESET}")
+    recovery_raw = None
+    format_fixes: list[str] = []
+    format_recovered_cues: list[int] = []
+    if CLEANUP_FORMAT_REPAIR_ENABLED:
+        recovery = recover_subtitle_pair(source_path, target_path)
+        if recovery.safe and recovery.changed and recovery.raw is not None:
+            candidate = _write_recovery_candidate(target_path, recovery.raw, same_directory=False)
+            try:
+                recovered_report = validate_subtitle_pair(
+                    Path(source_path), candidate, detector, target_language,
+                    target_lang=target_lang, **_validation_kwargs(),
+                )
+            finally:
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
+            format_fixes = recovery.fixes
+            format_recovered_cues = recovery.recovered_cues
+            print(
+                f"[FORMAT] Source-anchored recovery prepared for {label} '{target_lang}': "
+                f"{', '.join(format_fixes) or 'canonicalized'}"
+            )
+            if recovered_report.valid:
+                if dry_run:
+                    print(f"[FORMAT] DRYRUN: would atomically repair {target_path}")
+                    return "dry-run", report
+                with _target_repair_lock(target_path):
+                    temp = _write_recovery_candidate(target_path, recovery.raw)
+                    os.replace(temp, target_path)
+                print(f"{GREEN}[FORMAT] Repaired and validated {label} '{target_lang}' without AI{RESET}")
+                _record_validation_result(
+                    target_path, source_hash, _file_hash_or_none(target_path), "valid", recovered_report,
+                    formatFixes=format_fixes, formatRecoveredCues=format_recovered_cues,
+                )
+                return "formatted", recovered_report
+            report = recovered_report
+            recovery_raw = recovery.raw
+        elif not recovery.safe:
+            dbg(f"Format recovery unsafe for {label}: {recovery.reason}")
 
     if CLEANUP_REPAIR_ENABLED and report.repairable_cue_indexes and not dry_run:
-        cue_list = ", ".join(str(i + 1) for i in report.repairable_cue_indexes)
-        print(f"[REPAIR] Retrying {label} '{target_lang}' cue position(s): {cue_list}")
-
-        def translator(line: str, before: list[str], after: list[str]) -> str | None:
-            return lingarr_translate_line(line, source_lang, target_lang, before, after)
-
-        repair = repair_subtitle_file(
-            Path(source_path),
-            Path(target_path),
-            detector,
-            target_language,
-            translator,
-            target_lang=target_lang,
-            max_attempts=CLEANUP_MAX_REPAIR_ATTEMPTS,
-            context_lines=CLEANUP_REPAIR_CONTEXT_LINES,
-            **validation_kwargs,
-        )
-        if repair.success:
-            repaired = ", ".join(str(number) for number in repair.repaired_cues)
-            print(f"{GREEN}[REPAIR] Repaired and validated {label} '{target_lang}' cue(s): {repaired}{RESET}")
-            _record_validation_result(
-                target_path,
-                source_hash,
-                _file_hash_or_none(target_path),
-                "valid",
-                repair.report,
-                repairedCues=repair.repaired_cues,
-                repairAttempts=repair.attempts,
-                lingarrOutcome="repaired",
+        job_kwargs = {
+            "source_path": source_path,
+            "target_path": target_path,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "item_id": item_id,
+            "title": label,
+            "item_type": item_type,
+            "initial_report": report,
+            "expected_target_hash": expected_target_hash,
+            "recovery_raw": recovery_raw,
+            "format_fixes": format_fixes,
+            "format_recovered_cues": format_recovered_cues,
+        }
+        if defer_repair:
+            repair_key = (
+                os.path.normcase(os.path.abspath(target_path)), source_hash, expected_target_hash,
+                target_lang, tuple(report.repairable_cue_indexes),
             )
-            return "repaired", repair.report
-        print(f"{YELLOW}[REPAIR] Could not repair {label} '{target_lang}': {repair.reason}{RESET}")
-        action = _apply_cleanup_action(
-            target_path,
-            source_path,
-            target_lang,
-            repair.report,
-            repair_attempts=repair.attempts,
-            lingarr_outcome=repair.reason,
-            dry_run=dry_run,
-        )
-    else:
-        action = _apply_cleanup_action(
-            target_path, source_path, target_lang, report, dry_run=dry_run
-        )
+            return _queue_repair(repair_key, job_kwargs, report, label, target_lang), report
+        result = _perform_repair(**job_kwargs)
+        return result.action, result.report
 
+    action = _apply_cleanup_action(
+        target_path,
+        source_path,
+        target_lang,
+        report,
+        format_fixes=format_fixes,
+        format_recovered_cues=format_recovered_cues,
+        dry_run=dry_run,
+    )
     if action in ("quarantined", "deleted") and item_id is not None:
         _clear_submission(item_id, target_lang)
         print(f"[CLEANUP] Cleared cooldown for retry: {label} '{target_lang}'")
@@ -1014,6 +1396,18 @@ def _mark_activity(stats: dict, item_type: str) -> None:
         stats["movie_activity"] = True
 
 
+def _bazarr_has_repaired_path(result: RepairJobResult) -> bool:
+    if result.item_id is None or result.item_type not in ("episodes", "movies"):
+        return True
+    id_field = "sonarrEpisodeId" if result.item_type == "episodes" else "radarrId"
+    _, subtitles = fetch_subtitles(result.item_type, result.item_id, id_field)
+    expected = os.path.normcase(os.path.normpath(result.target_path))
+    return any(
+        os.path.normcase(os.path.normpath(str(subtitle.get("path", "")))) == expected
+        for subtitle in subtitles
+    )
+
+
 def _record_cleanup_stats(stats: dict, action: str, report) -> None:
     if report is None:
         return
@@ -1021,7 +1415,9 @@ def _record_cleanup_stats(stats: dict, action: str, report) -> None:
     excessive = sum(issue.rule == "excessive_lines" for issue in report.issues)
     stats["cleanup_excessive_lines"] = stats.get("cleanup_excessive_lines", 0) + excessive
     stats["cleanup_other_issues"] = stats.get("cleanup_other_issues", 0) + len(report.issues) - excessive
-    if action == "repaired":
+    if action == "formatted":
+        stats["cleanup_formatted"] = stats.get("cleanup_formatted", 0) + 1
+    elif action == "repaired":
         stats["cleanup_repaired"] = stats.get("cleanup_repaired", 0) + 1
     elif action in ("quarantined", "deleted", "reported", "dry-run"):
         stats[f"cleanup_{action}"] = stats.get(f"cleanup_{action}", 0) + 1
@@ -1103,14 +1499,23 @@ def process_item(item: dict, item_type: str, id_field: str,
         if existing:
             print(f"[DISK] {title} '{target_lang}': {os.path.basename(existing)} already on disk")
             validation_action, validation_report = _validate_translated_file(
-                source_path, existing, source_lang, target_lang, item_id, title=title
+                source_path, existing, source_lang, target_lang, item_id, title=title,
+                defer_repair=True, item_type=item_type,
             )
-            if validation_action in ("valid", "repaired"):
+            if validation_action in ("valid", "formatted", "repaired"):
                 with stats_lock:
                     stats["completed"] += 1
                     stats["translations"].append(f"{title}: {source_lang} -> {target_lang} (on disk)")
                     _record_cleanup_stats(stats, validation_action, validation_report)
                     _mark_activity(stats, item_type)
+            elif validation_action.startswith("repair-"):
+                with stats_lock:
+                    stats["cleanup_repair_queued"] = stats.get("cleanup_repair_queued", 0) + (
+                        validation_action == "repair-queued"
+                    )
+                    stats["cleanup_repair_deferred"] = stats.get("cleanup_repair_deferred", 0) + (
+                        validation_action == "repair-deferred"
+                    )
             else:
                 with stats_lock:
                     stats["failed"] += 1
@@ -1134,14 +1539,23 @@ def process_item(item: dict, item_type: str, id_field: str,
         if os.path.exists(target_path):
             print(f"[DISK] {title} '{target_lang}': appeared during queue wait")
             validation_action, validation_report = _validate_translated_file(
-                source_path, target_path, source_lang, target_lang, item_id, title=title
+                source_path, target_path, source_lang, target_lang, item_id, title=title,
+                defer_repair=True, item_type=item_type,
             )
-            if validation_action in ("valid", "repaired"):
+            if validation_action in ("valid", "formatted", "repaired"):
                 with stats_lock:
                     stats["completed"] += 1
                     stats["translations"].append(f"{title}: {source_lang} -> {target_lang} (on disk)")
                     _record_cleanup_stats(stats, validation_action, validation_report)
                     _mark_activity(stats, item_type)
+            elif validation_action.startswith("repair-"):
+                with stats_lock:
+                    stats["cleanup_repair_queued"] = stats.get("cleanup_repair_queued", 0) + (
+                        validation_action == "repair-queued"
+                    )
+                    stats["cleanup_repair_deferred"] = stats.get("cleanup_repair_deferred", 0) + (
+                        validation_action == "repair-deferred"
+                    )
             else:
                 with stats_lock:
                     stats["failed"] += 1
@@ -1193,15 +1607,24 @@ def process_item(item: dict, item_type: str, id_field: str,
             continue
 
         validation_action, validation_report = _validate_translated_file(
-            source_path, target_path, source_lang, target_lang, item_id, title=title
+            source_path, target_path, source_lang, target_lang, item_id, title=title,
+            defer_repair=True, item_type=item_type,
         )
-        if validation_action in ("valid", "repaired"):
+        if validation_action in ("valid", "formatted", "repaired"):
             print(f"{GREEN}[OK] {title} '{target_lang}' translated to {os.path.basename(target_path)}{RESET}")
             with stats_lock:
                 stats["completed"] += 1
                 stats["translations"].append(f"{title}: {source_lang} -> {target_lang}")
                 _record_cleanup_stats(stats, validation_action, validation_report)
                 _mark_activity(stats, item_type)
+        elif validation_action.startswith("repair-"):
+            with stats_lock:
+                stats["cleanup_repair_queued"] = stats.get("cleanup_repair_queued", 0) + (
+                    validation_action == "repair-queued"
+                )
+                stats["cleanup_repair_deferred"] = stats.get("cleanup_repair_deferred", 0) + (
+                    validation_action == "repair-deferred"
+                )
         else:
             with stats_lock:
                 stats["failed"] += 1
@@ -1219,8 +1642,11 @@ def run_existing_cleanup_scan() -> dict:
         "skipped_unchanged": 0,
         "excessive_line_cues": 0,
         "other_invalid_cues": 0,
+        "formatted_files": 0,
         "repaired_files": 0,
         "repair_failures": 0,
+        "repair_queued": 0,
+        "repair_deferred": 0,
         "quarantined_files": 0,
         "deleted_files": 0,
         "reported_files": 0,
@@ -1281,6 +1707,7 @@ def run_existing_cleanup_scan() -> dict:
                     None,
                     title=candidate.path.name,
                     dry_run=CLEANUP_SCAN_DRY_RUN,
+                    defer_repair=not CLEANUP_SCAN_DRY_RUN,
                 )
             else:
                 stats["without_source"] += 1
@@ -1316,7 +1743,7 @@ def run_existing_cleanup_scan() -> dict:
                 stats["excessive_line_cues"] += excessive
                 stats["other_invalid_cues"] += len(report.issues) - excessive
                 if (
-                    action not in ("valid", "repaired")
+                    action not in ("valid", "formatted", "repaired", "repair-queued", "repair-duplicate", "repair-deferred")
                     and source_path is not None
                     and CLEANUP_REPAIR_ENABLED
                     and report.repairable_cue_indexes
@@ -1324,9 +1751,16 @@ def run_existing_cleanup_scan() -> dict:
                 ):
                     stats["repair_failures"] += 1
 
-            if action == "repaired":
+            if action == "formatted":
+                stats["formatted_files"] += 1
+                changed = True
+            elif action == "repaired":
                 stats["repaired_files"] += 1
                 changed = True
+            elif action == "repair-queued":
+                stats["repair_queued"] += 1
+            elif action == "repair-deferred":
+                stats["repair_deferred"] += 1
             elif action == "quarantined":
                 stats["quarantined_files"] += 1
                 _clear_submission_for_path(candidate.path, candidate.target_lang)
@@ -1347,7 +1781,10 @@ def run_existing_cleanup_scan() -> dict:
         print(f"  Skipped unchanged   : {stats['skipped_unchanged']}")
         print(f"  Excessive-line cues : {stats['excessive_line_cues']}")
         print(f"  Other invalid cues  : {stats['other_invalid_cues']}")
+        print(f"  Format-only repairs : {stats['formatted_files']}")
         print(f"  Repaired files      : {stats['repaired_files']}")
+        print(f"  AI repairs queued   : {stats['repair_queued']}")
+        print(f"  AI repairs deferred : {stats['repair_deferred']}")
         print(f"  Repair failures     : {stats['repair_failures']}")
         print(f"  Quarantined files   : {stats['quarantined_files']}")
         if CLEANUP_SCAN_DRY_RUN:
@@ -1459,6 +1896,12 @@ def run_cycle(cycle_num: int) -> None:
                 except Exception as e:
                     print(f"{RED}[ERROR] Worker exception: {e}{RESET}")
 
+    repair_results: list[RepairJobResult] = []
+    pending_count = len(_pending_repairs)
+    if pending_count:
+        print(f"[REPAIR] Waiting for {pending_count} queued repair job(s) before Bazarr sync")
+        repair_results = _drain_pending_repairs(stats)
+
     print(f"\n{BOLD}===== Cycle #{cycle_num} Summary ====={RESET}")
     print(f"  Submitted  : {stats['submitted']}")
     print(f"  Completed  : {stats['completed']}")
@@ -1470,6 +1913,11 @@ def run_cycle(cycle_num: int) -> None:
         print(f"  Cleanup checked       : {stats['cleanup_checked']}")
         print(f"  Excessive-line cues   : {stats.get('cleanup_excessive_lines', 0)}")
         print(f"  Other cleanup issues  : {stats.get('cleanup_other_issues', 0)}")
+        print(f"  Format-only repairs   : {stats.get('cleanup_formatted', 0)}")
+        print(f"  AI repairs queued     : {stats.get('cleanup_repair_queued', 0)}")
+        print(f"  AI repair attempts    : {stats.get('cleanup_repair_attempts', 0)}")
+        print(f"  No-context attempts   : {stats.get('cleanup_second_attempts', 0)}")
+        print(f"  AI repairs deferred   : {stats.get('cleanup_repair_deferred', 0)}")
         print(f"  Repaired translations : {stats.get('cleanup_repaired', 0)}")
         print(f"  Quarantined files     : {stats.get('cleanup_quarantined', 0)}")
     if stats["translations"]:
@@ -1481,12 +1929,32 @@ def run_cycle(cycle_num: int) -> None:
         print(f"  Lingarr active queue now: {active_after}")
     sys.stdout.flush()
 
-    had_activity = stats["submitted"] > 0 or stats["completed"] > 0
+    had_activity = (
+        stats["submitted"] > 0
+        or stats["completed"] > 0
+        or stats["episode_activity"]
+        or stats["movie_activity"]
+    )
     if had_activity and not shutdown_requested:
         had_episodes = stats["episode_activity"]
         had_movies = stats["movie_activity"]
         trigger_bazarr_sync(had_episodes, had_movies)
         wait_for_bazarr_sync(had_episodes, had_movies, SYNC_TIMEOUT)
+        repaired_with_ids = [
+            result for result in repair_results
+            if result.action == "repaired" and result.item_id is not None
+        ]
+        missing = [result for result in repaired_with_ids if not _bazarr_has_repaired_path(result)]
+        if missing and not shutdown_requested:
+            retry_episodes = any(result.item_type == "episodes" for result in missing)
+            retry_movies = any(result.item_type == "movies" for result in missing)
+            print(f"{YELLOW}[WARNING] Bazarr did not register {len(missing)} repaired path(s); retrying scan once{RESET}")
+            trigger_bazarr_sync(retry_episodes, retry_movies)
+            wait_for_bazarr_sync(retry_episodes, retry_movies, SYNC_TIMEOUT)
+            still_missing = [result for result in missing if not _bazarr_has_repaired_path(result)]
+            stats["cleanup_bazarr_registration_failures"] = len(still_missing)
+            for result in still_missing:
+                print(f"{YELLOW}[WARNING] Bazarr still does not list repaired subtitle for {result.title} '{result.target_lang}'{RESET}")
 
     _drain_lingarr_queue()
 
@@ -1504,11 +1972,15 @@ def main() -> int:
     print(f"  Cleanup roots     : {', '.join(str(root) for root in CLEANUP_ROOTS)}")
     print(f"  Cleanup action    : {CLEANUP_ACTION}{' (scan dry-run)' if CLEANUP_SCAN_DRY_RUN else ''}")
     print(f"  Max cue lines     : {CLEANUP_MAX_CUE_LINES}")
+    print(f"  Format recovery   : {'ON' if CLEANUP_FORMAT_REPAIR_ENABLED else 'off'}")
+    print(f"  Repair workers    : {CLEANUP_REPAIR_WORKERS} (+{CLEANUP_REPAIR_WORKERS} beyond file workers)")
+    print(f"  Repair queue max  : {CLEANUP_REPAIR_QUEUE_MAX}")
     print(f"  Retention         : {RETENTION_DAYS} days (checked every {RETENTION_CHECK_INTERVAL}s)")
     print(f"  Parallel workers  : {PARALLEL_TRANSLATES}")
     print(f"  Check interval    : {CHECK_INTERVAL}s (after Bazarr sync)")
     print(f"  Poll interval     : {POLL_INTERVAL}s  (floor {POLL_TIMEOUT}s per translation)")
     print(f"  Sync timeout      : {SYNC_TIMEOUT}s")
+    print(f"  Sync start timeout: {SYNC_START_TIMEOUT}s")
     print(f"  Resubmit cooldown : {RESUBMIT_COOLDOWN}s")
     print(f"  Debug mode        : {'ON' if DEBUG else 'off'}")
     sys.stdout.flush()
@@ -1560,6 +2032,7 @@ def main() -> int:
                 break
             time.sleep(1)
 
+    _shutdown_repair_executor()
     print("[INFO] Bazarr AutoTranslate stopped cleanly.")
     return 0
 

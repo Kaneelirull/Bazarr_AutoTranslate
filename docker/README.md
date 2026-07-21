@@ -8,9 +8,10 @@ Continuously monitors Bazarr for missing subtitles and translates them through L
 2. Scans existing configured target subtitles at startup and every `CLEANUP_SCAN_INTERVAL`.
 3. Pairs target files with `.eng.srt` first, then `.en.srt`, and skips unchanged pairs that already passed validation.
 4. Uses the first available language in `LANGUAGES` as the source for wanted Bazarr items.
-5. Validates translated cues against the source, including structure, language, writing system, prompt leakage, character expansion, and physical line count.
-6. Retries only invalid cues through Lingarr. The first repair uses bounded context; the second uses no context.
-7. Quarantines translations that remain invalid and triggers Bazarr subtitle rescans after repair or quarantine.
+5. Uses source cue anchors to repair safe SRT formatting damage before validation.
+6. Validates translated cues against the source, including structure, language, writing system, prompt leakage, character expansion, and physical line count.
+7. Sends only remaining invalid cues through a dedicated Lingarr line-repair worker. The first attempt uses bounded context; the second uses no context.
+8. Quarantines translations that remain invalid and triggers Bazarr subtitle rescans after repair or quarantine.
 
 Translation timeout is calculated dynamically from the source subtitle's dialogue line count.
 
@@ -65,11 +66,19 @@ Existing-library cleanup runs after startup synchronization and then on its own 
 | `CLEANUP_REPAIR_ENABLED` | `true` | Retry aligned invalid cues through `/api/Translate/line` |
 | `CLEANUP_MAX_REPAIR_ATTEMPTS` | `2` | Maximum attempts per invalid cue |
 | `CLEANUP_REPAIR_CONTEXT_LINES` | `5` | Context cues on attempt one; attempt two always uses none |
+| `CLEANUP_FORMAT_REPAIR_ENABLED` | `true` | Repair source-anchored SRT formatting damage without AI |
+| `CLEANUP_REPAIR_WORKERS` | `1` | Dedicated line-repair workers in addition to `PARALLEL_TRANSLATES` |
+| `CLEANUP_REPAIR_QUEUE_MAX` | `100` | Maximum queued cue-repair files; overflow is deferred |
+| `SYNC_START_TIMEOUT` | `30` | Seconds to wait for a triggered Bazarr scan to appear |
 | `RETENTION_DAYS` | `30` | Maximum age for quarantine files, reports, application logs, and validation-state records |
 | `RETENTION_CHECK_INTERVAL` | `3600` | Seconds between retention checks; cleanup also runs at startup |
 | `LOG_DIR` | `/var/log/bazarr-autotranslate` | Daily application log directory |
 
 Target variants `.et.srt`, `.et.hi.srt`, `.et.sdh.srt`, and numbered forms such as `.et.2.srt` are included. Files without a matching English source receive strong target-only checks but cannot be automatically repaired.
+
+Source-anchored recovery normalizes BOMs, newlines, trailing whitespace, timestamp spacing, repeated separators, and blank lines inside cues. Orphan text is folded into its preceding cue only when every numbered timestamp anchor still matches the source in order. Missing, duplicate, reordered, or mismatched anchors are never guessed.
+
+`CLEANUP_REPAIR_WORKERS=1` provides one additional repair lane: with `PARALLEL_TRANSLATES=1`, one complete subtitle job and one small line repair may run concurrently. Repair logs show queueing, worker, cue number, attempt, context counts, safe HTTP status, duration, validation rejection, and the no-context retry. Subtitle text, context contents, and credentials are never logged.
 
 ## Quarantine recovery
 
