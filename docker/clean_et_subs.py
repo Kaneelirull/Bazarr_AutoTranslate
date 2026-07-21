@@ -9,6 +9,7 @@ import sys
 import signal
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -128,7 +129,7 @@ REPAIRABLE_CUE_RULES = {
     "excessive_lines",
 }
 
-VALIDATOR_VERSION = "source-aware-v2-lines"
+VALIDATOR_VERSION = "source-aware-v3-format-recovery"
 
 
 @dataclass
@@ -199,6 +200,17 @@ class RepairResult:
     report: ValidationReport
     reason: str
     attempts: int = 0
+    attempt_history: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class FormatRecoveryResult:
+    safe: bool
+    changed: bool
+    raw: Optional[str]
+    fixes: list[str] = field(default_factory=list)
+    recovered_cues: list[int] = field(default_factory=list)
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -373,6 +385,119 @@ def parse_srt_cues(raw: str) -> tuple[list[SubtitleCue], list[str]]:
         cues.append(SubtitleCue(int(number_text), timestamp, lines[2:]))
 
     return cues, errors
+
+
+def _canonical_timestamp(value: str) -> Optional[str]:
+    match = re.match(
+        r"^\s*(\d{2}:\d{2}:\d{2})[,\.](\d{3})\s*-->\s*"
+        r"(\d{2}:\d{2}:\d{2})[,\.](\d{3})(?:\s+.*)?$",
+        value,
+    )
+    if not match:
+        return None
+    return f"{match.group(1)},{match.group(2)} --> {match.group(3)},{match.group(4)}"
+
+
+def recover_srt_structure(source_raw: str, target_raw: str) -> FormatRecoveryResult:
+    """Conservatively rebuild target blocks when all source anchors still match in order."""
+    source_cues, source_errors = parse_srt_cues(source_raw)
+    if source_errors or not source_cues:
+        return FormatRecoveryResult(False, False, None, reason="source structure is invalid")
+
+    had_bom = target_raw.startswith("\ufeff")
+    had_crlf = "\r\n" in target_raw
+    lines = target_raw.lstrip("\ufeff").splitlines()
+    anchors: list[tuple[int, int, str]] = []
+    timestamp_fixes = 0
+    for index in range(len(lines) - 1):
+        number_text = lines[index].strip()
+        if not number_text.isdigit():
+            continue
+        timestamp = _canonical_timestamp(lines[index + 1])
+        if timestamp is None:
+            continue
+        if lines[index + 1].strip() != timestamp:
+            timestamp_fixes += 1
+        anchors.append((index, int(number_text), timestamp))
+
+    if len(anchors) != len(source_cues):
+        return FormatRecoveryResult(
+            False,
+            False,
+            None,
+            reason=f"anchor count differs ({len(source_cues)} source, {len(anchors)} target)",
+        )
+
+    first_anchor = anchors[0][0]
+    if any(line.strip() for line in lines[:first_anchor]):
+        return FormatRecoveryResult(False, False, None, reason="non-empty content precedes first cue")
+
+    recovered: list[SubtitleCue] = []
+    recovered_numbers: list[int] = []
+    trailing_space_lines = 0
+    repeated_separators = 0
+    for position, ((line_index, number, timestamp), source_cue) in enumerate(zip(anchors, source_cues)):
+        source_timestamp = _canonical_timestamp(source_cue.timestamp)
+        if number != source_cue.number or timestamp != source_timestamp:
+            return FormatRecoveryResult(
+                False,
+                False,
+                None,
+                reason=(
+                    f"target anchor {number} at position {position + 1} does not match "
+                    f"source cue {source_cue.number}"
+                ),
+            )
+
+        next_anchor = anchors[position + 1][0] if position + 1 < len(anchors) else len(lines)
+        content = lines[line_index + 2:next_anchor]
+        trailing_space_lines += sum(line != line.rstrip() for line in content)
+        while content and not content[0].strip():
+            content.pop(0)
+        trailing_blanks = 0
+        while content and not content[-1].strip():
+            content.pop()
+            trailing_blanks += 1
+        if trailing_blanks > 1:
+            repeated_separators += trailing_blanks - 1
+        if any(not line.strip() for line in content):
+            recovered_numbers.append(number)
+        cleaned = [line.rstrip() for line in content if line.strip()]
+        recovered.append(SubtitleCue(number, source_cue.timestamp.strip(), cleaned))
+
+    newline = "\r\n" if had_crlf else "\n"
+    rendered = render_srt_cues(recovered, newline=newline)
+    comparable_original = target_raw.lstrip("\ufeff")
+    fixes: list[str] = []
+    if had_bom:
+        fixes.append("removed_bom")
+    if timestamp_fixes:
+        fixes.append(f"normalized_timestamps:{timestamp_fixes}")
+    if trailing_space_lines:
+        fixes.append(f"trimmed_trailing_whitespace:{trailing_space_lines}")
+    if repeated_separators:
+        fixes.append(f"collapsed_repeated_separators:{repeated_separators}")
+    if recovered_numbers:
+        fixes.append(f"folded_orphan_breaks:{len(recovered_numbers)}")
+    if rendered != comparable_original:
+        fixes.append("canonicalized_srt_structure")
+
+    return FormatRecoveryResult(
+        True,
+        rendered != target_raw,
+        rendered,
+        fixes=fixes,
+        recovered_cues=sorted(set(recovered_numbers)),
+        reason="source anchors match",
+    )
+
+
+def recover_subtitle_pair(source_path: Path | str, target_path: Path | str) -> FormatRecoveryResult:
+    source_raw = read_text_best_effort(Path(source_path))
+    target_raw = read_text_best_effort(Path(target_path))
+    if source_raw is None or target_raw is None:
+        return FormatRecoveryResult(False, False, None, reason="source or target is unreadable")
+    return recover_srt_structure(source_raw, target_raw)
 
 
 def parse_srt_entries(raw: str) -> list[str]:
@@ -657,6 +782,7 @@ def repair_subtitle_file(
     target_lang: str,
     max_attempts: int = 2,
     context_lines: int = 5,
+    attempt_logger: Optional[Callable[[dict], None]] = None,
     **validation_kwargs,
 ) -> RepairResult:
     """Repair only invalid aligned cues, then atomically replace the target after full validation."""
@@ -669,24 +795,25 @@ def repair_subtitle_file(
         **validation_kwargs,
     )
     if initial_report.valid:
-        return RepairResult(True, [], initial_report, "already valid", 0)
+        return RepairResult(True, [], initial_report, "already valid", 0, [])
 
     cue_indexes = initial_report.repairable_cue_indexes
     if not cue_indexes:
-        return RepairResult(False, [], initial_report, "validation failure is not safely repairable", 0)
+        return RepairResult(False, [], initial_report, "validation failure is not safely repairable", 0, [])
 
     source_raw = read_text_best_effort(Path(source_path))
     target_raw = read_text_best_effort(Path(target_path))
     if source_raw is None or target_raw is None:
-        return RepairResult(False, [], initial_report, "source or target became unreadable", 0)
+        return RepairResult(False, [], initial_report, "source or target became unreadable", 0, [])
     source_cues, source_errors = parse_srt_cues(source_raw)
     target_cues, target_errors = parse_srt_cues(target_raw)
     if source_errors or target_errors:
-        return RepairResult(False, [], initial_report, "source or target structure changed", 0)
+        return RepairResult(False, [], initial_report, "source or target structure changed", 0, [])
 
     candidate_cues = [SubtitleCue(cue.number, cue.timestamp, list(cue.lines)) for cue in target_cues]
     repaired_numbers: list[int] = []
     attempt_count = 0
+    attempt_history: list[dict] = []
 
     cue_validation_keys = {
         "max_cue_lines",
@@ -713,12 +840,49 @@ def repair_subtitle_file(
             attempt_count += 1
             attempt_before = before if attempt == 0 else []
             attempt_after = after if attempt == 0 else []
+            attempt_record = {
+                "cueNumber": source_cue.number,
+                "attempt": attempt + 1,
+                "maxAttempts": max(1, max_attempts),
+                "contextBefore": len(attempt_before),
+                "contextAfter": len(attempt_after),
+                "withoutContext": not attempt_before and not attempt_after,
+                "startedAt": datetime.now(timezone.utc).isoformat(),
+            }
+            started = time.monotonic()
+            if attempt_logger is not None:
+                attempt_logger({**attempt_record, "event": "sending"})
             try:
-                translated = translator(source_cue.text, attempt_before, attempt_after)
+                translated_result = translator(source_cue.text, attempt_before, attempt_after)
             except Exception as exc:
                 last_reason = f"translator error: {exc}"
+                attempt_record.update({
+                    "durationSeconds": round(time.monotonic() - started, 3),
+                    "outcome": "translator_error",
+                    "reason": str(exc),
+                })
+                attempt_history.append(attempt_record)
+                if attempt_logger is not None:
+                    attempt_logger({**attempt_record, "event": "failed"})
                 continue
+            response_metadata: dict = {}
+            if (
+                isinstance(translated_result, tuple)
+                and len(translated_result) == 2
+                and isinstance(translated_result[1], dict)
+            ):
+                translated, response_metadata = translated_result
+                attempt_record.update(response_metadata)
+            else:
+                translated = translated_result
             if translated is None or not translated.strip():
+                attempt_record.update({
+                    "durationSeconds": round(time.monotonic() - started, 3),
+                    "outcome": "empty_response",
+                })
+                attempt_history.append(attempt_record)
+                if attempt_logger is not None:
+                    attempt_logger({**attempt_record, "event": "failed"})
                 continue
 
             replacement = SubtitleCue(
@@ -735,10 +899,26 @@ def repair_subtitle_file(
             )
             if replacement_issues:
                 last_reason = ValidationReport(replacement_issues).summary()
+                attempt_record.update({
+                    "durationSeconds": round(time.monotonic() - started, 3),
+                    "outcome": "rejected",
+                    "validationRules": sorted({issue.rule for issue in replacement_issues}),
+                })
+                attempt_history.append(attempt_record)
+                if attempt_logger is not None:
+                    attempt_logger({**attempt_record, "event": "rejected"})
                 continue
 
             candidate_cues[cue_index] = replacement
             repaired_numbers.append(replacement.number)
+            attempt_record.update({
+                "durationSeconds": round(time.monotonic() - started, 3),
+                "outcome": "accepted",
+                "validationRules": [],
+            })
+            attempt_history.append(attempt_record)
+            if attempt_logger is not None:
+                attempt_logger({**attempt_record, "event": "accepted"})
             accepted = True
             break
 
@@ -749,6 +929,7 @@ def repair_subtitle_file(
                 initial_report,
                 f"cue {source_cue.number} could not be repaired: {last_reason}",
                 attempt_count,
+                attempt_history,
             )
 
     newline = "\r\n" if "\r\n" in target_raw else "\n"
@@ -776,11 +957,15 @@ def repair_subtitle_file(
             **validation_kwargs,
         )
         if not final_report.valid:
-            return RepairResult(False, repaired_numbers, final_report, final_report.summary(), attempt_count)
+            return RepairResult(
+                False, repaired_numbers, final_report, final_report.summary(), attempt_count, attempt_history
+            )
 
         os.replace(temp_name, target)
         temp_name = None
-        return RepairResult(True, repaired_numbers, final_report, "repaired and validated", attempt_count)
+        return RepairResult(
+            True, repaired_numbers, final_report, "repaired and validated", attempt_count, attempt_history
+        )
     except OSError as exc:
         return RepairResult(
             False,
@@ -788,6 +973,7 @@ def repair_subtitle_file(
             initial_report,
             f"could not write repaired file: {exc}",
             attempt_count,
+            attempt_history,
         )
     finally:
         if temp_name is not None:

@@ -21,6 +21,7 @@ from clean_et_subs import (  # noqa: E402
     parse_srt_cues,
     purge_old_files,
     quarantine_subtitle,
+    recover_srt_structure,
     repair_subtitle_file,
     target_language_for_code,
     validate_subtitle_pair,
@@ -93,6 +94,53 @@ class SubtitleValidationTests(unittest.TestCase):
 
             self.assertIn("cue_count_mismatch", {issue.rule for issue in report.issues})
             self.assertEqual(report.repairable_cue_indexes, [])
+
+    def test_source_anchored_recovery_folds_internal_blank_line_without_ai(self):
+        source = make_srt("First source line", "Second source cue")
+        target = (
+            "\ufeff1\r\n00:00:01.000-->00:00:01.900\r\nEsimene rida   \r\n\r\n"
+            "Teine rida\r\n\r\n\r\n2\r\n00:00:02,000 --> 00:00:02,900\r\nTeine subtiiter\r\n"
+        )
+
+        recovery = recover_srt_structure(source, target)
+
+        self.assertTrue(recovery.safe, recovery.reason)
+        self.assertTrue(recovery.changed)
+        self.assertEqual(recovery.recovered_cues, [1])
+        self.assertIn("removed_bom", recovery.fixes)
+        cues, errors = parse_srt_cues(recovery.raw)
+        self.assertEqual(errors, [])
+        self.assertEqual(cues[0].lines, ["Esimene rida", "Teine rida"])
+
+    def test_source_anchored_recovery_exposes_prompt_leak_for_cue_repair(self):
+        source = make_srt("Did you get the Hulk reference?", "Forget it.")
+        target = (
+            "1\n00:00:01,000 --> 00:00:01,900\nPrevious translated context\n[/SOURCE]\n\n"
+            "Sa ei saanud Hulki vihjest aru?\n\n"
+            "2\n00:00:02,000 --> 00:00:02,900\nUnusta ära.\n"
+        )
+
+        recovery = recover_srt_structure(source, target)
+
+        self.assertTrue(recovery.safe, recovery.reason)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "show.eng.srt"
+            target_path = root / "show.et.srt"
+            source_path.write_text(source, encoding="utf-8")
+            target_path.write_text(recovery.raw, encoding="utf-8")
+            report = self.validate_pair(source_path, target_path)
+        self.assertIn("prompt_marker", {issue.rule for issue in report.issues})
+        self.assertEqual(report.repairable_cue_indexes, [0])
+
+    def test_source_anchored_recovery_refuses_missing_anchor(self):
+        source = make_srt("One", "Two")
+        target = make_srt("Üks")
+
+        recovery = recover_srt_structure(source, target)
+
+        self.assertFalse(recovery.safe)
+        self.assertIn("anchor count differs", recovery.reason)
 
     def test_repair_retries_without_context_and_replaces_atomically(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -217,6 +265,33 @@ class SubtitleValidationTests(unittest.TestCase):
             self.assertEqual(calls[0], (["Before"], ["After"]))
             self.assertEqual(calls[1], ([], []))
             self.assertEqual(result.attempts, 2)
+            self.assertEqual([entry["outcome"] for entry in result.attempt_history], ["rejected", "accepted"])
+            self.assertTrue(result.attempt_history[1]["withoutContext"])
+
+    def test_attempt_logger_contains_metadata_not_subtitle_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "episode.eng.srt"
+            target = root / "episode.et.srt"
+            source.write_text(make_srt("Secret source dialogue"), encoding="utf-8")
+            target.write_text(make_srt("[SOURCE] leaked [/SOURCE]"), encoding="utf-8")
+            events = []
+
+            result = repair_subtitle_file(
+                source,
+                target,
+                self.detector,
+                self.estonian,
+                lambda line, before, after: "Parandatud rida",
+                target_lang="et",
+                attempt_logger=events.append,
+            )
+
+            self.assertTrue(result.success, result.reason)
+            serialized = json.dumps(events)
+            self.assertNotIn("Secret source dialogue", serialized)
+            self.assertNotIn("Parandatud rida", serialized)
+            self.assertEqual([event["event"] for event in events], ["sending", "accepted"])
 
     def test_target_only_validation_uses_hard_line_limit(self):
         with tempfile.TemporaryDirectory() as directory:
