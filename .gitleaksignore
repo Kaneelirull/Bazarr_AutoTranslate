@@ -1,0 +1,2 @@
+# Removed historical BAZARR_APIKEY value from legacy cleanup documentation.
+3c404810bf19cb966c9900a099b7363dd1b369ea:docker/MULTIPLE_CLEANUP_ROOT.md:generic-api-key:270
