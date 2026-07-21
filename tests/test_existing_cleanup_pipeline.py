@@ -1,9 +1,11 @@
+import json
 import os
 import io
 import sys
 import tempfile
 import threading
 import unittest
+from collections import defaultdict
 from types import SimpleNamespace
 from pathlib import Path
 from contextlib import redirect_stdout
@@ -31,6 +33,17 @@ def make_multi_srt(*texts: str) -> str:
     ) + "\n"
 
 
+def make_timed_srt(cue_count: int, final_second: int, text: str = "Dialogue line") -> str:
+    blocks = []
+    for index in range(1, cue_count + 1):
+        second = max(1, int(final_second * index / cue_count))
+        hours, remainder = divmod(second, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        stamp = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        blocks.append(f"{index}\n{stamp},000 --> {stamp},900\n{text} {index}")
+    return "\n\n".join(blocks) + "\n"
+
+
 class ExistingCleanupPipelineTests(unittest.TestCase):
     def tearDown(self):
         app._shutdown_repair_executor()
@@ -54,6 +67,228 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 cleared = app._clear_submission_for_path(target, "et")
                 self.assertEqual(cleared, 1)
                 self.assertIsNone(app._check_cooldown(42, "et"))
+
+    def test_regular_undersized_sidecar_is_quarantined(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "media"
+            root.mkdir()
+            video = root / "movie.mkv"
+            video.write_bytes(b"video")
+            target = root / "movie.eng.srt"
+            target.write_text(make_multi_srt("One", "Two", "Three"), encoding="utf-8")
+            quarantine = Path(directory) / "quarantine"
+            state = ValidationStateStore(Path(directory) / "state.json")
+            stats = defaultdict(int)
+
+            with patch.multiple(
+                app,
+                CLEANUP_ROOTS=[root],
+                CLEANUP_ACTION="quarantine",
+                CLEANUP_SCAN_DRY_RUN=False,
+                CLEANUP_QUARANTINE_DIR=quarantine,
+                _validation_state=state,
+                _probe_media_duration=lambda _path: 7200.0,
+            ):
+                changed = app._scan_undersized_sidecars(stats)
+
+            self.assertTrue(changed)
+            self.assertFalse(target.exists())
+            self.assertTrue((quarantine / "movie.eng.srt").exists())
+            self.assertEqual(stats["undersized_quarantined"], 1)
+            audit = json.loads(
+                (quarantine / "movie.eng.srt.validation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(audit["origin"], "unknown")
+            self.assertEqual(audit["filenameClassification"], "regular")
+            self.assertTrue(audit["completeness"]["undersized"])
+            self.assertGreaterEqual(len(audit["completeness"]["failedSignals"]), 3)
+            self.assertEqual(audit["completeness"]["thresholds"]["requiredSignals"], 3)
+            self.assertIn(
+                "undersized_subtitle",
+                {issue["rule"] for issue in audit["validation"]["issues"]},
+            )
+
+    def test_explicit_forced_sidecar_is_exempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "media"
+            root.mkdir()
+            (root / "movie.mkv").write_bytes(b"video")
+            forced = root / "movie.eng.forced.srt"
+            forced.write_text(make_srt("Sign"), encoding="utf-8")
+            stats = defaultdict(int)
+
+            with patch.multiple(app, CLEANUP_ROOTS=[root], _probe_media_duration=lambda _path: 7200.0):
+                changed = app._scan_undersized_sidecars(stats)
+
+            self.assertFalse(changed)
+            self.assertTrue(forced.exists())
+            self.assertEqual(stats["undersized_forced_exempt"], 1)
+
+    def test_completeness_scan_defers_malformed_srt_to_structural_handling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "media"
+            root.mkdir()
+            (root / "show.mkv").write_bytes(b"video")
+            target = root / "show.et.srt"
+            target.write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\n\nOrphan line\n",
+                encoding="utf-8",
+            )
+            quarantine = Path(directory) / "quarantine"
+            stats = defaultdict(int)
+
+            with patch.multiple(
+                app,
+                CLEANUP_ROOTS=[root],
+                CLEANUP_ACTION="quarantine",
+                CLEANUP_QUARANTINE_DIR=quarantine,
+                _probe_media_duration=lambda _path: 3600.0,
+            ):
+                changed = app._scan_undersized_sidecars(stats)
+
+            self.assertFalse(changed)
+            self.assertTrue(target.exists())
+            self.assertFalse(quarantine.exists())
+
+    def test_source_fallback_uses_next_complete_language(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "media"
+            root.mkdir()
+            video = root / "movie.mkv"
+            video.write_bytes(b"video")
+            english = root / "movie.en.srt"
+            swedish = root / "movie.sv.srt"
+            english.write_text(make_timed_srt(5, 3500, "Sign"), encoding="utf-8")
+            swedish.write_text(make_timed_srt(150, 3500, "Detta ar en fullstandig dialograd"), encoding="utf-8")
+            quarantine = Path(directory) / "quarantine"
+            state = ValidationStateStore(Path(directory) / "state.json")
+            stats = defaultdict(int)
+            stats["translations"] = []
+            item = {"radarrId": 7, "title": "Movie", "missing_subtitles": [{"code2": "et"}]}
+            subtitles = [
+                {"code2": "en", "path": str(english), "forced": False},
+                {"code2": "sv", "path": str(swedish), "forced": False},
+            ]
+
+            with patch.multiple(
+                app,
+                LANGUAGES=["en", "sv", "et"],
+                CLEANUP_ROOTS=[root],
+                CLEANUP_ACTION="quarantine",
+                CLEANUP_QUARANTINE_DIR=quarantine,
+                _validation_state=state,
+                _probe_media_duration=lambda _path: 3600.0,
+                fetch_subtitles=lambda *_args: (str(video), subtitles),
+                lingarr_resolve_media_id=lambda *_args: None,
+            ):
+                app.process_item(item, "movies", "radarrId", stats, threading.Lock())
+
+            self.assertFalse(english.exists())
+            self.assertTrue((quarantine / "movie.en.srt").exists())
+            self.assertTrue(swedish.exists())
+            self.assertEqual(stats["cleanup_alternative_sources"], 1)
+
+    def test_ffprobe_failure_returns_safe_none(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / "movie.mkv"
+            video.write_bytes(b"video")
+            failed = SimpleNamespace(returncode=1, stdout="", stderr="probe failed")
+
+            with (
+                patch.multiple(app, _duration_cache={}),
+                patch.object(app.subprocess, "run", return_value=failed),
+            ):
+                duration = app._probe_media_duration(video)
+
+            self.assertIsNone(duration)
+            self.assertTrue(video.exists())
+
+    def test_unknown_independently_segmented_target_skips_exact_alignment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "movie.eng.srt"
+            target = root / "movie.et.srt"
+            source.write_text(make_multi_srt(*(["English dialogue"] * 8)), encoding="utf-8")
+            target.write_text(
+                make_multi_srt(*[
+                    f"See on korralik eestikeelne subtiitrite dialoog number {index}."
+                    for index in range(1, 8)
+                ]),
+                encoding="utf-8",
+            )
+            state = ValidationStateStore(root / "state.json")
+
+            with patch.multiple(app, _validation_state=state, CLEANUP_LANGUAGES={"et"}):
+                action, report = app._validate_translated_file(
+                    str(source), str(target), "en", "et", None, dry_run=True
+                )
+
+            self.assertEqual(action, "valid")
+            self.assertTrue(report.valid, report.summary())
+            self.assertTrue(target.exists())
+
+    def test_recorded_lingarr_target_keeps_exact_alignment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "movie.eng.srt"
+            target = root / "movie.et.srt"
+            source.write_text(make_multi_srt(*(["English dialogue"] * 8)), encoding="utf-8")
+            target.write_text(
+                make_multi_srt(*(["See on korralik eestikeelne subtiitrite dialoog."] * 7)),
+                encoding="utf-8",
+            )
+            state = ValidationStateStore(root / "state.json")
+            state.record(
+                target,
+                source_hash="source",
+                target_hash=app._file_hash_or_none(target),
+                result="valid",
+                origin="lingarr",
+            )
+
+            with patch.multiple(app, _validation_state=state, CLEANUP_LANGUAGES={"et"}):
+                action, report = app._validate_translated_file(
+                    str(source), str(target), "en", "et", None, dry_run=True
+                )
+
+            self.assertEqual(action, "dry-run")
+            self.assertIn("cue_count_mismatch", {issue.rule for issue in report.issues})
+
+    def test_completed_lingarr_output_outside_cleanup_languages_checks_completeness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "movie.eng.srt"
+            target = root / "movie.sv.srt"
+            source.write_text(make_timed_srt(150, 3500, "Complete source dialogue"), encoding="utf-8")
+            target.write_text(make_timed_srt(3, 3500, "Fragment"), encoding="utf-8")
+            quarantine = root / "quarantine"
+            state = ValidationStateStore(root / "state.json")
+
+            with patch.multiple(
+                app,
+                CLEANUP_LANGUAGES={"et"},
+                CLEANUP_ROOTS=[root],
+                CLEANUP_ACTION="quarantine",
+                CLEANUP_QUARANTINE_DIR=quarantine,
+                _validation_state=state,
+            ):
+                action, report = app._validate_translated_file(
+                    str(source),
+                    str(target),
+                    "en",
+                    "sv",
+                    None,
+                    media_duration=3600.0,
+                    origin="lingarr",
+                )
+
+            self.assertEqual(action, "quarantined")
+            self.assertIn("undersized_subtitle", {issue.rule for issue in report.issues})
+            self.assertFalse(target.exists())
+            audit = json.loads(
+                (quarantine / "movie.sv.srt.validation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(audit["origin"], "lingarr")
 
     def test_existing_valid_file_is_scanned_then_skipped_by_hash(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -104,7 +339,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 patch.object(app, "lingarr_translate_line") as translate,
             ):
                 action, report = app._validate_translated_file(
-                    str(source), str(target), "en", "et", None, title="show"
+                    str(source), str(target), "en", "et", None, title="show", origin="lingarr"
                 )
 
             self.assertEqual(action, "formatted")
@@ -147,7 +382,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 redirect_stdout(output),
             ):
                 action, _ = app._validate_translated_file(
-                    str(source), str(target), "en", "et", None, title="show"
+                    str(source), str(target), "en", "et", None, title="show", origin="lingarr"
                 )
 
             logs = output.getvalue()
