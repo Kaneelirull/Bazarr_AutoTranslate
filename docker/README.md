@@ -5,9 +5,9 @@ Continuously monitors Bazarr for missing subtitles and translates them through L
 ## How it works
 
 1. Synchronizes Bazarr's subtitle inventory.
-2. Scans existing configured target subtitles at startup and every `CLEANUP_SCAN_INTERVAL`.
-3. Pairs target files with `.eng.srt` first, then `.en.srt`, and skips unchanged pairs that already passed validation.
-4. Uses the first available language in `LANGUAGES` as the source for wanted Bazarr items.
+2. Scans every regular sidecar SRT for media-duration completeness, then scans configured target languages, at startup and every `CLEANUP_SCAN_INTERVAL`.
+3. Uses `ffprobe` plus cue, text, byte, and timeline density to quarantine high-confidence forced/truncated fragments that are mislabeled as full subtitles.
+4. Rejects incomplete or explicitly forced sources and falls back through `LANGUAGES` before submitting a translation.
 5. Uses source cue anchors to repair safe SRT formatting damage before validation.
 6. Validates translated cues against the source, including structure, language, writing system, prompt leakage, character expansion, and physical line count.
 7. Sends only remaining invalid cues through a dedicated Lingarr line-repair worker. The first attempt uses bounded context; the second uses no context.
@@ -69,12 +69,22 @@ Existing-library cleanup runs after startup synchronization and then on its own 
 | `CLEANUP_FORMAT_REPAIR_ENABLED` | `true` | Repair source-anchored SRT formatting damage without AI |
 | `CLEANUP_REPAIR_WORKERS` | `1` | Dedicated line-repair workers in addition to `PARALLEL_TRANSLATES` |
 | `CLEANUP_REPAIR_QUEUE_MAX` | `100` | Maximum queued cue-repair files; overflow is deferred |
+| `CLEANUP_UNDERSIZED_ENABLED` | `true` | Check every regular sidecar SRT against media duration |
+| `CLEANUP_MIN_MEDIA_DURATION` | `900` | Minimum media duration in seconds before density checks apply |
+| `CLEANUP_MIN_CUES_PER_MINUTE` | `1.5` | Cue-density completeness signal |
+| `CLEANUP_MIN_TEXT_CHARS_PER_MINUTE` | `40` | Dialogue-character-density completeness signal |
+| `CLEANUP_MIN_BYTES_PER_MINUTE` | `100` | File-byte-density completeness signal |
+| `CLEANUP_MIN_TIMELINE_COVERAGE` | `0.60` | Final cue must reach this fraction of media duration |
+| `CLEANUP_UNDERSIZED_REQUIRED_SIGNALS` | `3` | Failed completeness signals required for quarantine |
+| `CLEANUP_FFPROBE_TIMEOUT` | `15` | Maximum seconds for one duration probe |
 | `SYNC_START_TIMEOUT` | `30` | Seconds to wait for a triggered Bazarr scan to appear |
 | `RETENTION_DAYS` | `30` | Maximum age for quarantine files, reports, application logs, and validation-state records |
 | `RETENTION_CHECK_INTERVAL` | `3600` | Seconds between retention checks; cleanup also runs at startup |
 | `LOG_DIR` | `/var/log/bazarr-autotranslate` | Daily application log directory |
 
-Target variants `.et.srt`, `.et.hi.srt`, `.et.sdh.srt`, and numbered forms such as `.et.2.srt` are included. Files without a matching English source receive strong target-only checks but cannot be automatically repaired.
+Completeness scanning covers regular subtitles in every language, including HI, SDH, numbered, and language-less sidecars. Files explicitly labelled `forced`, `foreign`, `signs`, or `commentary` are exempt. A file is undersized only when at least three configured density/coverage signals fail; an unavailable duration is a safe skip.
+
+Target variants `.et.srt`, `.et.hi.srt`, `.et.sdh.srt`, and numbered forms such as `.et.2.srt` receive language/content validation. Exact source cue alignment, source-anchored formatting recovery, and AI cue repair apply only to unchanged outputs recorded as created by Lingarr. Bazarr/manual subtitles are treated as independently segmented and are not rejected merely for differing English cue counts or timestamps.
 
 Source-anchored recovery normalizes BOMs, newlines, trailing whitespace, timestamp spacing, repeated separators, and blank lines inside cues. Orphan text is folded into its preceding cue only when every numbered timestamp anchor still matches the source in order. Missing, duplicate, reordered, or mismatched anchors are never guessed.
 
@@ -82,7 +92,7 @@ Source-anchored recovery normalizes BOMs, newlines, trailing whitespace, timesta
 
 ## Quarantine recovery
 
-Each quarantined subtitle has a companion `.validation.json` report containing its original path, hashes, failed cues, validation rules, and repair outcome.
+Each quarantined subtitle has a companion `.validation.json` report containing its original path, hashes, failed cues, validation rules, repair outcome, provenance, filename classification, and—when applicable—the media duration, completeness metrics, thresholds, and failed signals.
 
 1. Read `targetPath` and the validation issues in the report.
 2. Correct the subtitle or adjust settings only for a confirmed false positive.
