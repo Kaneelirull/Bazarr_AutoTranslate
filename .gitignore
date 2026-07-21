@@ -1,8 +1,51 @@
+# Local configuration and secrets
 .env
+.env.*
+!.env.example
+
+# Local assistant and agent state
+.claude/
+.agents/
+
+# Python caches, tooling, and virtual environments
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+coverage.xml
+htmlcov/
+.python-version
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+
+# JavaScript dependencies
 node_modules/
+
+# Editor and operating-system files
+.idea/
+.vscode/
 .DS_Store
 Thumbs.db
+Desktop.ini
+*.swp
+
+# Logs and temporary files
 *.log
-.claude/settings.local.json
+*.tmp
+*.temp
+*.bak
+
+# Local cleanup runtime data (normally mounted at /config)
+config/
+quarantine/
+validation_state.json
+*.validation.json
