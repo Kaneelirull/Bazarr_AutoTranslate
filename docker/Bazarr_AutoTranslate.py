@@ -3,6 +3,7 @@ import re as _re
 import sys
 import json
 import signal
+import subprocess
 import time
 import threading
 import tempfile
@@ -130,6 +131,14 @@ CLEANUP_REPAIR_CONTEXT_LINES = max(0, int(os.getenv("CLEANUP_REPAIR_CONTEXT_LINE
 CLEANUP_FORMAT_REPAIR_ENABLED = os.getenv("CLEANUP_FORMAT_REPAIR_ENABLED", "true").lower() in ("1", "true", "yes")
 CLEANUP_REPAIR_WORKERS = max(1, int(os.getenv("CLEANUP_REPAIR_WORKERS", "1")))
 CLEANUP_REPAIR_QUEUE_MAX = max(1, int(os.getenv("CLEANUP_REPAIR_QUEUE_MAX", "100")))
+CLEANUP_UNDERSIZED_ENABLED = os.getenv("CLEANUP_UNDERSIZED_ENABLED", "true").lower() in ("1", "true", "yes")
+CLEANUP_MIN_MEDIA_DURATION = max(0.0, float(os.getenv("CLEANUP_MIN_MEDIA_DURATION", "900")))
+CLEANUP_MIN_CUES_PER_MINUTE = max(0.0, float(os.getenv("CLEANUP_MIN_CUES_PER_MINUTE", "1.5")))
+CLEANUP_MIN_TEXT_CHARS_PER_MINUTE = max(0.0, float(os.getenv("CLEANUP_MIN_TEXT_CHARS_PER_MINUTE", "40")))
+CLEANUP_MIN_BYTES_PER_MINUTE = max(0.0, float(os.getenv("CLEANUP_MIN_BYTES_PER_MINUTE", "100")))
+CLEANUP_MIN_TIMELINE_COVERAGE = min(1.0, max(0.0, float(os.getenv("CLEANUP_MIN_TIMELINE_COVERAGE", "0.60"))))
+CLEANUP_UNDERSIZED_REQUIRED_SIGNALS = min(4, max(1, int(os.getenv("CLEANUP_UNDERSIZED_REQUIRED_SIGNALS", "3"))))
+CLEANUP_FFPROBE_TIMEOUT = max(1, int(os.getenv("CLEANUP_FFPROBE_TIMEOUT", "15")))
 CLEANUP_SCAN_EXISTING = os.getenv("CLEANUP_SCAN_EXISTING", "true").lower() in ("1", "true", "yes")
 CLEANUP_SCAN_INTERVAL = max(300, int(os.getenv("CLEANUP_SCAN_INTERVAL", "21600")))
 CLEANUP_SCAN_DRY_RUN = os.getenv("CLEANUP_SCAN_DRY_RUN", "false").lower() in ("1", "true", "yes")
@@ -176,6 +185,8 @@ _pending_repairs_lock = threading.Lock()
 _repair_keys: set[tuple] = set()
 _target_repair_locks: dict[str, threading.Lock] = {}
 _target_repair_locks_lock = threading.Lock()
+_duration_cache: dict[tuple[str, int, int], float | None] = {}
+_duration_cache_lock = threading.Lock()
 
 _episode_cache: dict[int, int] = {}
 _movie_cache: dict[int, int] = {}
@@ -779,6 +790,114 @@ def _find_existing_target(video_path: str, target_lang: str) -> str | None:
     return None
 
 
+_VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts", ".webm"}
+_NON_FULL_SUBTITLE_TOKENS = {"forced", "foreign", "signs", "commentary"}
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes")
+
+
+def _sidecar_tokens(video_path: str | Path, subtitle_path: str | Path) -> list[str]:
+    video_stem = Path(video_path).stem
+    subtitle_stem = Path(subtitle_path).stem
+    if subtitle_stem.casefold() == video_stem.casefold():
+        return []
+    prefix = f"{video_stem}."
+    if not subtitle_stem.casefold().startswith(prefix.casefold()):
+        return []
+    return [token.casefold() for token in subtitle_stem[len(prefix):].split(".") if token]
+
+
+def _explicit_non_full_sidecar(video_path: str | Path, subtitle_path: str | Path) -> str | None:
+    return next((token for token in _sidecar_tokens(video_path, subtitle_path)
+                 if token in _NON_FULL_SUBTITLE_TOKENS), None)
+
+
+def _find_sidecar_video(subtitle_path: str | Path) -> Path | None:
+    subtitle = Path(subtitle_path)
+    subtitle_stem = subtitle.stem.casefold()
+    try:
+        candidates = [
+            path for path in subtitle.parent.iterdir()
+            if path.is_file() and path.suffix.casefold() in _VIDEO_EXTENSIONS
+            and (subtitle_stem == path.stem.casefold()
+                 or subtitle_stem.startswith(f"{path.stem.casefold()}."))
+        ]
+    except OSError:
+        return None
+    return max(candidates, key=lambda path: len(path.stem), default=None)
+
+
+def _probe_media_duration(video_path: str | Path) -> float | None:
+    video = Path(video_path)
+    try:
+        stat = video.stat()
+    except OSError as e:
+        dbg(f"Could not stat media for duration {video}: {e}")
+        return None
+    key = (os.path.normcase(os.path.abspath(str(video))), stat.st_size, stat.st_mtime_ns)
+    with _duration_cache_lock:
+        if key in _duration_cache:
+            return _duration_cache[key]
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(video),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=CLEANUP_FFPROBE_TIMEOUT,
+            check=False,
+        )
+        duration = float(completed.stdout.strip()) if completed.returncode == 0 else 0.0
+        if duration <= 0:
+            error = completed.stderr.strip().splitlines()[-1:] or ["invalid duration"]
+            print(f"{YELLOW}[SIZE] ffprobe unavailable for {video.name}: {error[0]}{RESET}")
+            result = None
+        else:
+            result = duration
+    except (OSError, subprocess.TimeoutExpired, ValueError) as e:
+        print(f"{YELLOW}[SIZE] ffprobe unavailable for {video.name}: {e}{RESET}")
+        result = None
+    if result is not None:
+        with _duration_cache_lock:
+            _duration_cache[key] = result
+    return result
+
+
+def _completeness_kwargs() -> dict:
+    return {
+        "min_media_duration": CLEANUP_MIN_MEDIA_DURATION,
+        "min_cues_per_minute": CLEANUP_MIN_CUES_PER_MINUTE,
+        "min_text_chars_per_minute": CLEANUP_MIN_TEXT_CHARS_PER_MINUTE,
+        "min_bytes_per_minute": CLEANUP_MIN_BYTES_PER_MINUTE,
+        "min_timeline_coverage": CLEANUP_MIN_TIMELINE_COVERAGE,
+        "required_signals": CLEANUP_UNDERSIZED_REQUIRED_SIGNALS,
+    }
+
+
+def _evaluate_completeness(subtitle_path: str | Path, media_duration: float | None):
+    if not CLEANUP_UNDERSIZED_ENABLED or media_duration is None:
+        return None
+    from clean_et_subs import evaluate_subtitle_completeness
+    return evaluate_subtitle_completeness(
+        subtitle_path, media_duration, **_completeness_kwargs()
+    )
+
+
+def _add_completeness_issue(report, completeness) -> None:
+    if completeness is None:
+        return
+    from clean_et_subs import completeness_issue
+    issue = completeness_issue(completeness)
+    if issue is not None:
+        report.issues.append(issue)
+
+
 def _count_dialogue_lines(path: str) -> int | None:
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -851,15 +970,19 @@ def _record_validation_result(
     target_hash: str | None,
     result: str,
     report,
+    origin: str | None = None,
     **extra,
 ) -> None:
     try:
         details = {"validation": report.to_dict(), **extra}
+        if details.get("completeness") is not None:
+            details.setdefault("filenameClassification", "regular")
         _get_validation_state().record(
             target_path,
             source_hash=source_hash,
             target_hash=target_hash,
             result=result,
+            origin=origin,
             details=details,
         )
     except OSError as e:
@@ -877,6 +1000,8 @@ def _apply_cleanup_action(
     attempt_history: list[dict] | None = None,
     format_fixes: list[str] | None = None,
     format_recovered_cues: list[int] | None = None,
+    completeness=None,
+    origin: str | None = None,
     dry_run: bool = False,
 ) -> str:
     from clean_et_subs import quarantine_subtitle, write_validation_report
@@ -895,6 +1020,9 @@ def _apply_cleanup_action(
         "formatFixes": format_fixes or [],
         "formatRecoveredCues": format_recovered_cues or [],
         "lingarrOutcome": lingarr_outcome,
+        "origin": origin or "unknown",
+        "filenameClassification": "regular" if completeness is not None else None,
+        "completeness": completeness.to_dict() if completeness is not None else None,
         "validation": report.to_dict(),
         "recordedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -907,11 +1035,13 @@ def _apply_cleanup_action(
             target_hash,
             "dry-run-invalid" if dry_run else "reported-invalid",
             report,
+            origin=origin,
             repairAttempts=repair_attempts,
             repairAttemptHistory=attempt_history or [],
             formatFixes=format_fixes or [],
             formatRecoveredCues=format_recovered_cues or [],
             lingarrOutcome=lingarr_outcome,
+            completeness=completeness.to_dict() if completeness is not None else None,
         )
         return "dry-run" if dry_run else "reported"
 
@@ -928,12 +1058,14 @@ def _apply_cleanup_action(
                 target_hash,
                 "quarantined",
                 report,
+                origin=origin,
                 quarantinePath=str(destination),
                 repairAttempts=repair_attempts,
                 repairAttemptHistory=attempt_history or [],
                 formatFixes=format_fixes or [],
                 formatRecoveredCues=format_recovered_cues or [],
                 lingarrOutcome=lingarr_outcome,
+                completeness=completeness.to_dict() if completeness is not None else None,
             )
             print(f"[CLEANUP] Quarantined {target} -> {destination}")
             return "quarantined"
@@ -949,11 +1081,13 @@ def _apply_cleanup_action(
             target_hash,
             "deleted",
             report,
+            origin=origin,
             repairAttempts=repair_attempts,
             repairAttemptHistory=attempt_history or [],
             formatFixes=format_fixes or [],
             formatRecoveredCues=format_recovered_cues or [],
             lingarrOutcome=lingarr_outcome,
+            completeness=completeness.to_dict() if completeness is not None else None,
         )
         print(f"[CLEANUP] Deleted {target}")
         return "deleted"
@@ -1001,6 +1135,8 @@ def _perform_repair(
     recovery_raw: str | None = None,
     format_fixes: list[str] | None = None,
     format_recovered_cues: list[int] | None = None,
+    completeness=None,
+    origin: str | None = "lingarr",
 ) -> RepairJobResult:
     from clean_et_subs import repair_subtitle_file, target_language_for_code
 
@@ -1100,12 +1236,14 @@ def _perform_repair(
                     _file_hash_or_none(target_path),
                     "valid",
                     repair.report,
+                    origin=origin,
                     repairedCues=repair.repaired_cues,
                     repairAttempts=repair.attempts,
                     repairAttemptHistory=repair.attempt_history,
                     formatFixes=format_fixes or [],
                     formatRecoveredCues=format_recovered_cues or [],
                     lingarrOutcome="repaired",
+                    completeness=completeness.to_dict() if completeness is not None else None,
                 )
                 return RepairJobResult(
                     "repaired", repair.report, label, target_lang, item_type, item_id,
@@ -1123,6 +1261,8 @@ def _perform_repair(
                 attempt_history=repair.attempt_history,
                 format_fixes=format_fixes,
                 format_recovered_cues=format_recovered_cues,
+                completeness=completeness,
+                origin=origin,
             )
             if action in ("quarantined", "deleted") and item_id is not None:
                 _clear_submission(item_id, target_lang)
@@ -1232,11 +1372,46 @@ def _validate_translated_file(
     *,
     defer_repair: bool = False,
     item_type: str | None = None,
+    media_duration: float | None = None,
+    origin: str | None = None,
 ) -> tuple[str, object]:
     if target_lang not in CLEANUP_LANGUAGES:
-        return "valid", None
+        from clean_et_subs import validate_srt_structure
 
-    from clean_et_subs import recover_subtitle_pair, target_language_for_code, validate_subtitle_pair
+        report = validate_srt_structure(target_path)
+        completeness = _evaluate_completeness(target_path, media_duration)
+        _add_completeness_issue(report, completeness)
+        if report.valid:
+            _record_validation_result(
+                target_path,
+                _file_hash_or_none(source_path),
+                _file_hash_or_none(target_path),
+                "valid",
+                report,
+                origin=origin,
+                completeness=completeness.to_dict() if completeness is not None else None,
+            )
+            return "valid", report
+        label = title or os.path.basename(target_path)
+        print(f"{YELLOW}[CLEANUP] Invalid translation {label} '{target_lang}': {report.summary()}{RESET}")
+        action = _apply_cleanup_action(
+            target_path,
+            source_path,
+            target_lang,
+            report,
+            lingarr_outcome="not attempted: file-level issue is not cue-repairable",
+            completeness=completeness,
+            origin=origin,
+            dry_run=dry_run,
+        )
+        return action, report
+
+    from clean_et_subs import (
+        recover_subtitle_pair,
+        target_language_for_code,
+        validate_subtitle_pair,
+        validate_subtitle_without_source,
+    )
 
     target_language = target_language_for_code(target_lang)
     detector = _get_cleanup_detector()
@@ -1245,12 +1420,26 @@ def _validate_translated_file(
 
     source_hash = _file_hash_or_none(source_path)
     expected_target_hash = _file_hash_or_none(target_path)
-    report = validate_subtitle_pair(
-        Path(source_path), Path(target_path), detector, target_language,
-        target_lang=target_lang, **_validation_kwargs(),
+    recorded_origin = (
+        _get_validation_state().matching_origin(target_path, expected_target_hash)
+        if expected_target_hash is not None else None
     )
+    effective_origin = origin or recorded_origin
+    source_aligned = effective_origin == "lingarr"
+    if source_aligned:
+        report = validate_subtitle_pair(
+            Path(source_path), Path(target_path), detector, target_language,
+            target_lang=target_lang, **_validation_kwargs(),
+        )
+    else:
+        report = validate_subtitle_without_source(
+            Path(target_path), detector, target_language,
+            target_lang=target_lang, **_validation_kwargs(),
+        )
+    completeness = _evaluate_completeness(target_path, media_duration)
+    _add_completeness_issue(report, completeness)
     if report.valid:
-        if CLEANUP_FORMAT_REPAIR_ENABLED:
+        if CLEANUP_FORMAT_REPAIR_ENABLED and source_aligned:
             recovery = recover_subtitle_pair(source_path, target_path)
             if recovery.safe and recovery.changed and recovery.raw is not None:
                 candidate = _write_recovery_candidate(target_path, recovery.raw, same_directory=False)
@@ -1259,6 +1448,7 @@ def _validate_translated_file(
                         Path(source_path), candidate, detector, target_language,
                         target_lang=target_lang, **_validation_kwargs(),
                     )
+                    _add_completeness_issue(normalized_report, completeness)
                 finally:
                     try:
                         candidate.unlink()
@@ -1272,7 +1462,11 @@ def _validate_translated_file(
                     recovery = None
                 if recovery is None:
                     print(f"[CLEANUP] OK {os.path.basename(target_path)} (original retained)")
-                    _record_validation_result(target_path, source_hash, expected_target_hash, "valid", report)
+                    _record_validation_result(
+                        target_path, source_hash, expected_target_hash, "valid", report,
+                        origin=effective_origin,
+                        completeness=completeness.to_dict() if completeness is not None else None,
+                    )
                     return "valid", report
                 if dry_run:
                     print(f"[FORMAT] DRYRUN: would normalize {target_path}")
@@ -1290,12 +1484,19 @@ def _validate_translated_file(
                     _file_hash_or_none(target_path),
                     "valid",
                     normalized_report,
+                    origin=effective_origin,
                     formatFixes=recovery.fixes,
                     formatRecoveredCues=recovery.recovered_cues,
+                    completeness=completeness.to_dict() if completeness is not None else None,
                 )
                 return "formatted", normalized_report
-        print(f"[CLEANUP] OK {os.path.basename(target_path)} (source-aware validation passed)")
-        _record_validation_result(target_path, source_hash, expected_target_hash, "valid", report)
+        mode = "source-aware" if source_aligned else "independent target"
+        print(f"[CLEANUP] OK {os.path.basename(target_path)} ({mode} validation passed)")
+        _record_validation_result(
+            target_path, source_hash, expected_target_hash, "valid", report,
+            origin=effective_origin,
+            completeness=completeness.to_dict() if completeness is not None else None,
+        )
         return "valid", report
 
     label = title or os.path.basename(target_path)
@@ -1303,7 +1504,7 @@ def _validate_translated_file(
     recovery_raw = None
     format_fixes: list[str] = []
     format_recovered_cues: list[int] = []
-    if CLEANUP_FORMAT_REPAIR_ENABLED:
+    if CLEANUP_FORMAT_REPAIR_ENABLED and source_aligned:
         recovery = recover_subtitle_pair(source_path, target_path)
         if recovery.safe and recovery.changed and recovery.raw is not None:
             candidate = _write_recovery_candidate(target_path, recovery.raw, same_directory=False)
@@ -1312,6 +1513,7 @@ def _validate_translated_file(
                     Path(source_path), candidate, detector, target_language,
                     target_lang=target_lang, **_validation_kwargs(),
                 )
+                _add_completeness_issue(recovered_report, completeness)
             finally:
                 try:
                     candidate.unlink()
@@ -1333,7 +1535,9 @@ def _validate_translated_file(
                 print(f"{GREEN}[FORMAT] Repaired and validated {label} '{target_lang}' without AI{RESET}")
                 _record_validation_result(
                     target_path, source_hash, _file_hash_or_none(target_path), "valid", recovered_report,
+                    origin=effective_origin,
                     formatFixes=format_fixes, formatRecoveredCues=format_recovered_cues,
+                    completeness=completeness.to_dict() if completeness is not None else None,
                 )
                 return "formatted", recovered_report
             report = recovered_report
@@ -1341,7 +1545,7 @@ def _validate_translated_file(
         elif not recovery.safe:
             dbg(f"Format recovery unsafe for {label}: {recovery.reason}")
 
-    if CLEANUP_REPAIR_ENABLED and report.repairable_cue_indexes and not dry_run:
+    if source_aligned and CLEANUP_REPAIR_ENABLED and report.repairable_cue_indexes and not dry_run:
         job_kwargs = {
             "source_path": source_path,
             "target_path": target_path,
@@ -1355,6 +1559,8 @@ def _validate_translated_file(
             "recovery_raw": recovery_raw,
             "format_fixes": format_fixes,
             "format_recovered_cues": format_recovered_cues,
+            "completeness": completeness,
+            "origin": effective_origin,
         }
         if defer_repair:
             repair_key = (
@@ -1372,6 +1578,8 @@ def _validate_translated_file(
         report,
         format_fixes=format_fixes,
         format_recovered_cues=format_recovered_cues,
+        completeness=completeness,
+        origin=effective_origin,
         dry_run=dry_run,
     )
     if action in ("quarantined", "deleted") and item_id is not None:
@@ -1413,7 +1621,9 @@ def _record_cleanup_stats(stats: dict, action: str, report) -> None:
         return
     stats["cleanup_checked"] = stats.get("cleanup_checked", 0) + 1
     excessive = sum(issue.rule == "excessive_lines" for issue in report.issues)
+    undersized = sum(issue.rule == "undersized_subtitle" for issue in report.issues)
     stats["cleanup_excessive_lines"] = stats.get("cleanup_excessive_lines", 0) + excessive
+    stats["cleanup_undersized_targets"] = stats.get("cleanup_undersized_targets", 0) + undersized
     stats["cleanup_other_issues"] = stats.get("cleanup_other_issues", 0) + len(report.issues) - excessive
     if action == "formatted":
         stats["cleanup_formatted"] = stats.get("cleanup_formatted", 0) + 1
@@ -1423,6 +1633,42 @@ def _record_cleanup_stats(stats: dict, action: str, report) -> None:
         stats[f"cleanup_{action}"] = stats.get(f"cleanup_{action}", 0) + 1
     elif action == "action-failed":
         stats["cleanup_action_failed"] = stats.get("cleanup_action_failed", 0) + 1
+
+
+def _source_is_usable(
+    source_path: str,
+    source_lang: str,
+    media_duration: float | None,
+    title: str,
+    item_type: str,
+    stats: dict,
+    stats_lock: threading.Lock,
+) -> bool:
+    from clean_et_subs import validate_srt_structure
+
+    report = validate_srt_structure(source_path)
+    completeness = _evaluate_completeness(source_path, media_duration)
+    _add_completeness_issue(report, completeness)
+    if report.valid:
+        return True
+    print(f"{YELLOW}[SOURCE] Rejected {title} '{source_lang}': {report.summary()}{RESET}")
+    action = _apply_cleanup_action(
+        source_path,
+        None,
+        source_lang,
+        report,
+        completeness=completeness,
+        origin="bazarr",
+        lingarr_outcome="not attempted: source is not suitable for full translation",
+    )
+    with stats_lock:
+        stats["cleanup_undersized_sources"] = stats.get("cleanup_undersized_sources", 0) + int(
+            completeness is not None and completeness.undersized
+        )
+        _record_cleanup_stats(stats, action, report)
+        if action in ("quarantined", "deleted"):
+            _mark_activity(stats, item_type)
+    return False
 
 
 def process_item(item: dict, item_type: str, id_field: str,
@@ -1443,16 +1689,23 @@ def process_item(item: dict, item_type: str, id_field: str,
         return
 
     video_path, subs = fetch_subtitles(item_type, item_id, id_field)
-    available_map: dict[str, str] = {}
+    available_by_lang: dict[str, list[str]] = {}
     for s in subs:
         code, path = s.get("code2"), s.get("path", "")
         if not code or not path:
             continue
-        if code not in available_map or _sub_priority(path, code) < _sub_priority(available_map[code], code):
-            available_map[code] = path
+        if _truthy(s.get("forced")) or (
+            video_path and _explicit_non_full_sidecar(video_path, path) is not None
+        ):
+            with stats_lock:
+                stats["cleanup_forced_sources_skipped"] = stats.get("cleanup_forced_sources_skipped", 0) + 1
+            continue
+        available_by_lang.setdefault(code, []).append(path)
+    for code, paths in available_by_lang.items():
+        paths.sort(key=lambda path: _sub_priority(path, code))
 
-    target_langs = [l for l in LANGUAGES if l in missing and l not in available_map]
-    source_langs = [l for l in LANGUAGES if l in available_map]
+    target_langs = [l for l in LANGUAGES if l in missing and l not in available_by_lang]
+    source_langs = [l for l in LANGUAGES if l in available_by_lang]
 
     if not source_langs:
         print(f"[SKIP] {title}: no source subtitle available from {LANGUAGES}")
@@ -1460,8 +1713,28 @@ def process_item(item: dict, item_type: str, id_field: str,
     if not target_langs:
         return
 
-    source_lang = source_langs[0]
-    source_path = available_map[source_lang]
+    media_duration = _probe_media_duration(video_path) if video_path and CLEANUP_UNDERSIZED_ENABLED else None
+    source_lang = ""
+    source_path = ""
+    rejected_sources = 0
+    for candidate_lang in source_langs:
+        for candidate_path in available_by_lang[candidate_lang]:
+            if _source_is_usable(
+                candidate_path, candidate_lang, media_duration, title, item_type, stats, stats_lock
+            ):
+                source_lang = candidate_lang
+                source_path = candidate_path
+                break
+            rejected_sources += 1
+        if source_path:
+            break
+    if not source_path:
+        print(f"{YELLOW}[SKIP] {title}: no complete source subtitle available{RESET}")
+        return
+    if rejected_sources:
+        with stats_lock:
+            stats["cleanup_alternative_sources"] = stats.get("cleanup_alternative_sources", 0) + 1
+        print(f"[SOURCE] {title}: selected fallback '{source_lang}' after rejecting {rejected_sources} source(s)")
     if item_type == "episodes":
         _se = _re.search(r"[Ss](\d{1,2})[Ee](\d{1,2})", os.path.basename(source_path))
         if _se:
@@ -1500,7 +1773,7 @@ def process_item(item: dict, item_type: str, id_field: str,
             print(f"[DISK] {title} '{target_lang}': {os.path.basename(existing)} already on disk")
             validation_action, validation_report = _validate_translated_file(
                 source_path, existing, source_lang, target_lang, item_id, title=title,
-                defer_repair=True, item_type=item_type,
+                defer_repair=True, item_type=item_type, media_duration=media_duration,
             )
             if validation_action in ("valid", "formatted", "repaired"):
                 with stats_lock:
@@ -1540,7 +1813,7 @@ def process_item(item: dict, item_type: str, id_field: str,
             print(f"[DISK] {title} '{target_lang}': appeared during queue wait")
             validation_action, validation_report = _validate_translated_file(
                 source_path, target_path, source_lang, target_lang, item_id, title=title,
-                defer_repair=True, item_type=item_type,
+                defer_repair=True, item_type=item_type, media_duration=media_duration,
             )
             if validation_action in ("valid", "formatted", "repaired"):
                 with stats_lock:
@@ -1608,7 +1881,8 @@ def process_item(item: dict, item_type: str, id_field: str,
 
         validation_action, validation_report = _validate_translated_file(
             source_path, target_path, source_lang, target_lang, item_id, title=title,
-            defer_repair=True, item_type=item_type,
+            defer_repair=True, item_type=item_type, media_duration=media_duration,
+            origin="lingarr",
         )
         if validation_action in ("valid", "formatted", "repaired"):
             print(f"{GREEN}[OK] {title} '{target_lang}' translated to {os.path.basename(target_path)}{RESET}")
@@ -1636,6 +1910,94 @@ def process_item(item: dict, item_type: str, id_field: str,
 # Existing-library cleanup
 # ---------------------------------------------------------------------------
 
+def _scan_undersized_sidecars(stats: dict) -> bool:
+    """Validate regular subtitle density for every language using sibling media duration."""
+    if not CLEANUP_UNDERSIZED_ENABLED:
+        return False
+    from clean_et_subs import file_sha256, validate_srt_structure
+
+    changed = False
+    seen: set[Path] = set()
+    for root in CLEANUP_ROOTS:
+        if not root.exists():
+            continue
+        for subtitle in root.rglob("*.srt"):
+            if shutdown_requested:
+                return changed
+            if not subtitle.is_file() or subtitle in seen:
+                continue
+            seen.add(subtitle)
+            video = _find_sidecar_video(subtitle)
+            if video is None:
+                continue
+            exempt_token = _explicit_non_full_sidecar(video, subtitle)
+            if exempt_token is not None:
+                stats["undersized_forced_exempt"] += 1
+                dbg(f"Completeness exempt {subtitle.name}: explicit {exempt_token} track")
+                continue
+
+            stats["undersized_checked"] += 1
+            duration = _probe_media_duration(video)
+            if duration is None:
+                stats["undersized_duration_unavailable"] += 1
+                continue
+            report = validate_srt_structure(subtitle)
+            if not report.valid:
+                dbg(
+                    f"Completeness deferred {subtitle.name}: structural validation must handle "
+                    f"{report.summary()}"
+                )
+                continue
+            completeness = _evaluate_completeness(subtitle, duration)
+            _add_completeness_issue(report, completeness)
+            if completeness is not None and completeness.undersized:
+                stats["undersized_detected"] += 1
+                print(
+                    f"{YELLOW}[SIZE] Undersized {subtitle.name}: "
+                    f"{completeness.cue_count} cues, {completeness.subtitle_bytes} bytes, "
+                    f"{completeness.media_duration_seconds / 60:.1f} min, "
+                    f"failed={','.join(completeness.failed_signals)}{RESET}"
+                )
+            if report.valid:
+                continue
+
+            try:
+                subtitle_hash = file_sha256(subtitle)
+            except OSError:
+                subtitle_hash = None
+            origin = (
+                _get_validation_state().matching_origin(subtitle, subtitle_hash)
+                if subtitle_hash is not None else None
+            )
+            tokens = _sidecar_tokens(video, subtitle)
+            language = next((token for token in tokens if len(token) in (2, 3) and token.isalpha()), "unknown")
+            action = _apply_cleanup_action(
+                subtitle,
+                None,
+                language,
+                report,
+                completeness=completeness,
+                origin=origin,
+                lingarr_outcome="not attempted: whole-file completeness failure",
+                dry_run=CLEANUP_SCAN_DRY_RUN,
+            )
+            if action == "quarantined":
+                if completeness is not None and completeness.undersized:
+                    stats["undersized_quarantined"] += 1
+                else:
+                    stats["quarantined_files"] += 1
+                changed = True
+            elif action == "deleted":
+                stats["deleted_files"] += 1
+                changed = True
+            elif action == "reported":
+                stats["reported_files"] += 1
+            elif action == "dry-run":
+                stats["dry_run_files"] += 1
+            elif action == "action-failed":
+                stats["action_failures"] += 1
+    return changed
+
 def run_existing_cleanup_scan() -> dict:
     stats = {
         "files_checked": 0,
@@ -1653,8 +2015,13 @@ def run_existing_cleanup_scan() -> dict:
         "dry_run_files": 0,
         "without_source": 0,
         "action_failures": 0,
+        "undersized_checked": 0,
+        "undersized_forced_exempt": 0,
+        "undersized_duration_unavailable": 0,
+        "undersized_detected": 0,
+        "undersized_quarantined": 0,
     }
-    if not CLEANUP_SCAN_EXISTING or not CLEANUP_LANGUAGES:
+    if not CLEANUP_SCAN_EXISTING:
         return stats
 
     from clean_et_subs import (
@@ -1667,16 +2034,19 @@ def run_existing_cleanup_scan() -> dict:
 
     with _cleanup_scan_lock:
         detector = _get_cleanup_detector()
-        if detector is None:
-            return stats
         state = _get_validation_state()
+        changed = _scan_undersized_sidecars(stats)
+        if detector is None or not CLEANUP_LANGUAGES:
+            if changed and not shutdown_requested:
+                trigger_bazarr_sync(True, True)
+                wait_for_bazarr_sync(True, True, SYNC_TIMEOUT)
+            return stats
         candidates = discover_target_subtitles(CLEANUP_ROOTS, CLEANUP_LANGUAGES)
         print(
             f"[SCAN] Existing subtitle cleanup found {len(candidates)} target file(s) "
             f"under {', '.join(str(root) for root in CLEANUP_ROOTS)}"
         )
 
-        changed = False
         for candidate in candidates:
             if shutdown_requested:
                 break
@@ -1699,6 +2069,7 @@ def run_existing_cleanup_scan() -> dict:
 
             stats["files_checked"] += 1
             if source_path is not None and source_lang is not None:
+                candidate_video = _find_sidecar_video(candidate.path)
                 action, report = _validate_translated_file(
                     str(source_path),
                     str(candidate.path),
@@ -1708,6 +2079,8 @@ def run_existing_cleanup_scan() -> dict:
                     title=candidate.path.name,
                     dry_run=CLEANUP_SCAN_DRY_RUN,
                     defer_repair=not CLEANUP_SCAN_DRY_RUN,
+                    media_duration=_probe_media_duration(candidate_video)
+                    if candidate_video is not None else None,
                 )
             else:
                 stats["without_source"] += 1
@@ -1787,6 +2160,11 @@ def run_existing_cleanup_scan() -> dict:
         print(f"  AI repairs deferred : {stats['repair_deferred']}")
         print(f"  Repair failures     : {stats['repair_failures']}")
         print(f"  Quarantined files   : {stats['quarantined_files']}")
+        print(f"  Regular size checks : {stats['undersized_checked']}")
+        print(f"  Forced-track skips  : {stats['undersized_forced_exempt']}")
+        print(f"  Undersized detected : {stats['undersized_detected']}")
+        print(f"  Undersized quarant. : {stats['undersized_quarantined']}")
+        print(f"  Duration unavailable: {stats['undersized_duration_unavailable']}")
         if CLEANUP_SCAN_DRY_RUN:
             print(f"  Dry-run files       : {stats['dry_run_files']}")
 
@@ -1920,6 +2298,10 @@ def run_cycle(cycle_num: int) -> None:
         print(f"  AI repairs deferred   : {stats.get('cleanup_repair_deferred', 0)}")
         print(f"  Repaired translations : {stats.get('cleanup_repaired', 0)}")
         print(f"  Quarantined files     : {stats.get('cleanup_quarantined', 0)}")
+        print(f"  Undersized sources    : {stats.get('cleanup_undersized_sources', 0)}")
+        print(f"  Undersized targets    : {stats.get('cleanup_undersized_targets', 0)}")
+        print(f"  Forced sources skipped: {stats.get('cleanup_forced_sources_skipped', 0)}")
+        print(f"  Alternative sources  : {stats.get('cleanup_alternative_sources', 0)}")
     if stats["translations"]:
         print("  Completed translations:")
         for t in stats["translations"]:
@@ -1975,6 +2357,12 @@ def main() -> int:
     print(f"  Format recovery   : {'ON' if CLEANUP_FORMAT_REPAIR_ENABLED else 'off'}")
     print(f"  Repair workers    : {CLEANUP_REPAIR_WORKERS} (+{CLEANUP_REPAIR_WORKERS} beyond file workers)")
     print(f"  Repair queue max  : {CLEANUP_REPAIR_QUEUE_MAX}")
+    print(f"  Size validation   : {'ON' if CLEANUP_UNDERSIZED_ENABLED else 'off'} "
+          f"({CLEANUP_UNDERSIZED_REQUIRED_SIGNALS}/4 signals, media >= {CLEANUP_MIN_MEDIA_DURATION:.0f}s)")
+    print(f"  Size thresholds   : {CLEANUP_MIN_CUES_PER_MINUTE:g} cues/min, "
+          f"{CLEANUP_MIN_TEXT_CHARS_PER_MINUTE:g} chars/min, "
+          f"{CLEANUP_MIN_BYTES_PER_MINUTE:g} bytes/min, "
+          f"{CLEANUP_MIN_TIMELINE_COVERAGE:.0%} timeline")
     print(f"  Retention         : {RETENTION_DAYS} days (checked every {RETENTION_CHECK_INTERVAL}s)")
     print(f"  Parallel workers  : {PARALLEL_TRANSLATES}")
     print(f"  Check interval    : {CHECK_INTERVAL}s (after Bazarr sync)")

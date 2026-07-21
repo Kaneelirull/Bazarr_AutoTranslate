@@ -16,6 +16,7 @@ from clean_et_subs import (  # noqa: E402
     ValidationStateStore,
     build_detector,
     discover_target_subtitles,
+    evaluate_subtitle_completeness,
     file_sha256,
     find_preferred_source,
     parse_srt_cues,
@@ -36,6 +37,17 @@ def make_srt(*texts: str) -> str:
         blocks.append(
             f"{index}\n00:00:{index:02d},000 --> 00:00:{index:02d},900\n{text}"
         )
+    return "\n\n".join(blocks) + "\n"
+
+
+def make_timed_srt(cue_count: int, final_second: int, text: str = "Dialogue line") -> str:
+    blocks = []
+    for index in range(1, cue_count + 1):
+        second = max(1, int(final_second * index / cue_count))
+        hours, remainder = divmod(second, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        stamp = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        blocks.append(f"{index}\n{stamp},000 --> {stamp},900\n{text}")
     return "\n\n".join(blocks) + "\n"
 
 
@@ -81,6 +93,59 @@ class SubtitleValidationTests(unittest.TestCase):
             report = self.validate_pair(source, target)
 
             self.assertTrue(report.valid, report.summary())
+
+    def test_one_kilobyte_movie_subtitle_is_undersized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "movie.et.srt"
+            target.write_text(make_timed_srt(18, 7000, "Short line"), encoding="utf-8")
+            result = evaluate_subtitle_completeness(target, 7200)
+
+            self.assertTrue(result.evaluated)
+            self.assertTrue(result.undersized)
+            self.assertGreaterEqual(len(result.failed_signals), 3)
+            self.assertIn("cue_density", result.failed_signals)
+
+    def test_full_timeline_forced_fragment_still_fails_density(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "movie.eng.srt"
+            target.write_text(make_timed_srt(21, 9500, "FOREIGN SIGN"), encoding="utf-8")
+            result = evaluate_subtitle_completeness(target, 9600)
+
+            self.assertTrue(result.undersized)
+            self.assertGreater(result.timeline_coverage, 0.95)
+            self.assertNotIn("timeline_coverage", result.failed_signals)
+            self.assertEqual(
+                {"cue_density", "text_density", "byte_density"},
+                set(result.failed_signals),
+            )
+
+    def test_short_media_is_exempt_from_completeness_density(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "short.et.srt"
+            target.write_text(make_timed_srt(2, 200, "Hi"), encoding="utf-8")
+            result = evaluate_subtitle_completeness(target, 600)
+
+            self.assertFalse(result.evaluated)
+            self.assertFalse(result.undersized)
+            self.assertIn("shorter", result.reason)
+
+    def test_validation_state_only_returns_origin_for_matching_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "movie.et.srt"
+            target.write_text(make_srt("Tere"), encoding="utf-8")
+            target_hash = file_sha256(target)
+            state = ValidationStateStore(root / "state.json")
+            state.record(
+                target,
+                source_hash="source",
+                target_hash=target_hash,
+                result="valid",
+                origin="lingarr",
+            )
+
+            self.assertEqual(state.matching_origin(target, target_hash), "lingarr")
+            self.assertIsNone(state.matching_origin(target, "changed"))
 
     def test_structural_mismatch_is_not_repairable(self):
         with tempfile.TemporaryDirectory() as directory:

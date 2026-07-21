@@ -129,7 +129,7 @@ REPAIRABLE_CUE_RULES = {
     "excessive_lines",
 }
 
-VALIDATOR_VERSION = "source-aware-v3-format-recovery"
+VALIDATOR_VERSION = "source-aware-v4-completeness-provenance"
 
 
 @dataclass
@@ -218,6 +218,40 @@ class DiscoveredSubtitle:
     path: Path
     target_lang: str
     variant: str
+
+
+@dataclass(frozen=True)
+class CompletenessResult:
+    evaluated: bool
+    undersized: bool
+    reason: str
+    media_duration_seconds: float
+    subtitle_bytes: int = 0
+    cue_count: int = 0
+    dialogue_chars: int = 0
+    cues_per_minute: float = 0.0
+    text_chars_per_minute: float = 0.0
+    bytes_per_minute: float = 0.0
+    timeline_coverage: float = 0.0
+    failed_signals: tuple[str, ...] = ()
+    thresholds: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "evaluated": self.evaluated,
+            "undersized": self.undersized,
+            "reason": self.reason,
+            "mediaDurationSeconds": round(self.media_duration_seconds, 3),
+            "subtitleBytes": self.subtitle_bytes,
+            "cueCount": self.cue_count,
+            "dialogueChars": self.dialogue_chars,
+            "cuesPerMinute": round(self.cues_per_minute, 3),
+            "textCharsPerMinute": round(self.text_chars_per_minute, 3),
+            "bytesPerMinute": round(self.bytes_per_minute, 3),
+            "timelineCoverage": round(self.timeline_coverage, 4),
+            "failedSignals": list(self.failed_signals),
+            "thresholds": dict(self.thresholds),
+        }
 
 
 def build_detector():
@@ -385,6 +419,138 @@ def parse_srt_cues(raw: str) -> tuple[list[SubtitleCue], list[str]]:
         cues.append(SubtitleCue(int(number_text), timestamp, lines[2:]))
 
     return cues, errors
+
+
+def validate_srt_structure(path: Path | str) -> ValidationReport:
+    """Return structural SRT findings without requiring a language detector."""
+    report = ValidationReport()
+    raw = read_text_best_effort(Path(path))
+    if raw is None:
+        report.issues.append(ValidationIssue("target_unreadable", "subtitle is unreadable"))
+        return report
+    cues, errors = parse_srt_cues(raw)
+    for error in errors:
+        report.issues.append(ValidationIssue("target_structure", error))
+    if not errors and not cues:
+        report.issues.append(ValidationIssue("target_structure", "subtitle contains no cues"))
+    return report
+
+
+def _timestamp_end_seconds(value: str) -> Optional[float]:
+    match = re.match(
+        r"^\s*\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*"
+        r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})",
+        value,
+    )
+    if not match:
+        return None
+    hours, minutes, seconds, milliseconds = (int(part) for part in match.groups())
+    return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000
+
+
+def evaluate_subtitle_completeness(
+    path: Path | str,
+    media_duration_seconds: float,
+    *,
+    min_media_duration: float = 900,
+    min_cues_per_minute: float = 1.5,
+    min_text_chars_per_minute: float = 40,
+    min_bytes_per_minute: float = 100,
+    min_timeline_coverage: float = 0.60,
+    required_signals: int = 3,
+) -> CompletenessResult:
+    """Evaluate whether a regular subtitle is dense enough to represent full dialogue."""
+    subtitle = Path(path)
+    thresholds = {
+        "minMediaDurationSeconds": min_media_duration,
+        "minCuesPerMinute": min_cues_per_minute,
+        "minTextCharsPerMinute": min_text_chars_per_minute,
+        "minBytesPerMinute": min_bytes_per_minute,
+        "minTimelineCoverage": min_timeline_coverage,
+        "requiredSignals": min(4, max(1, int(required_signals))),
+    }
+    try:
+        duration = float(media_duration_seconds)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration <= 0:
+        return CompletenessResult(
+            False, False, "media duration unavailable", duration, thresholds=thresholds
+        )
+    if duration < min_media_duration:
+        return CompletenessResult(
+            False,
+            False,
+            "media shorter than configured minimum",
+            duration,
+            thresholds=thresholds,
+        )
+
+    raw = read_text_best_effort(subtitle)
+    if raw is None:
+        return CompletenessResult(
+            False, False, "subtitle is unreadable", duration, thresholds=thresholds
+        )
+    cues, errors = parse_srt_cues(raw)
+    if errors or not cues:
+        return CompletenessResult(
+            False, False, "subtitle structure is invalid", duration, thresholds=thresholds
+        )
+
+    minutes = duration / 60
+    dialogue_chars = sum(len(TAG_RE.sub("", cue.text).strip()) for cue in cues)
+    try:
+        subtitle_bytes = subtitle.stat().st_size
+    except OSError:
+        subtitle_bytes = len(raw.encode("utf-8"))
+    last_end = max((_timestamp_end_seconds(cue.timestamp) or 0.0) for cue in cues)
+    cues_per_minute = len(cues) / minutes
+    text_chars_per_minute = dialogue_chars / minutes
+    bytes_per_minute = subtitle_bytes / minutes
+    timeline_coverage = min(1.0, max(0.0, last_end / duration))
+
+    failed: list[str] = []
+    if cues_per_minute < min_cues_per_minute:
+        failed.append("cue_density")
+    if text_chars_per_minute < min_text_chars_per_minute:
+        failed.append("text_density")
+    if bytes_per_minute < min_bytes_per_minute:
+        failed.append("byte_density")
+    if timeline_coverage < min_timeline_coverage:
+        failed.append("timeline_coverage")
+    required = thresholds["requiredSignals"]
+    undersized = len(failed) >= required
+    reason = (
+        f"{len(failed)}/{required} completeness signals failed"
+        if undersized else f"{len(failed)}/{required} completeness signals failed; accepted"
+    )
+    return CompletenessResult(
+        True,
+        undersized,
+        reason,
+        duration,
+        subtitle_bytes,
+        len(cues),
+        dialogue_chars,
+        cues_per_minute,
+        text_chars_per_minute,
+        bytes_per_minute,
+        timeline_coverage,
+        tuple(failed),
+        thresholds,
+    )
+
+
+def completeness_issue(result: CompletenessResult) -> Optional[ValidationIssue]:
+    if not result.evaluated or not result.undersized:
+        return None
+    signals = ", ".join(result.failed_signals)
+    detail = (
+        f"subtitle is undersized for {result.media_duration_seconds / 60:.1f} min media: "
+        f"{result.cue_count} cues, {result.dialogue_chars} text chars, "
+        f"{result.subtitle_bytes} bytes; failed {signals}"
+    )
+    return ValidationIssue("undersized_subtitle", detail)
 
 
 def _canonical_timestamp(value: str) -> Optional[str]:
@@ -1171,6 +1337,15 @@ class ValidationStateStore:
                 and entry.get("targetHash") == target_hash
             )
 
+    def matching_origin(self, target_path: Path | str, target_hash: str) -> Optional[str]:
+        """Return provenance only while the on-disk content still matches the recorded hash."""
+        with self._lock:
+            entry = self._data.get("files", {}).get(self._key(target_path), {})
+            if entry.get("targetHash") != target_hash:
+                return None
+            origin = entry.get("origin")
+            return origin if isinstance(origin, str) and origin else None
+
     def record(
         self,
         target_path: Path | str,
@@ -1178,6 +1353,7 @@ class ValidationStateStore:
         source_hash: Optional[str],
         target_hash: Optional[str],
         result: str,
+        origin: Optional[str] = None,
         details: Optional[dict] = None,
     ) -> None:
         entry = {
@@ -1187,6 +1363,8 @@ class ValidationStateStore:
             "result": result,
             "validatedAt": datetime.now(timezone.utc).isoformat(),
         }
+        if origin:
+            entry["origin"] = origin
         if details:
             entry["details"] = details
         with self._lock:
