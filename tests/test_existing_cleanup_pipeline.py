@@ -68,6 +68,224 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 self.assertEqual(cleared, 1)
                 self.assertIsNone(app._check_cooldown(42, "et"))
 
+    def _prune_fixture(self, directory: str, *, managed=("en", "et", "sv")):
+        root = Path(directory) / "media"
+        root.mkdir()
+        video = root / "movie.mkv"
+        video.write_bytes(b"video")
+        for language in managed:
+            (root / f"movie.{language}.srt").write_text(make_srt(f"Valid {language}"), encoding="utf-8")
+        return root, video
+
+    def test_prune_quarantines_recognized_extra_languages_and_special_tracks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, video = self._prune_fixture(directory)
+            extras = [root / "movie.tur.srt", root / "movie.fre.sdh.srt", root / "movie.commentary.srt"]
+            for path in extras:
+                path.write_text(make_srt("Extra"), encoding="utf-8")
+            quarantine = Path(directory) / "quarantine"
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et", "sv"],
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_QUARANTINE_DIR=quarantine,
+                    CLEANUP_PRUNE_EXTRA_LANGUAGES=True,
+                    CLEANUP_PRUNE_ACTION="quarantine",
+                    CLEANUP_PRUNE_SPECIAL_SIDECARS=True,
+                    CLEANUP_PRUNE_UNKNOWN_SIDECARS=False,
+                    CLEANUP_SCAN_DRY_RUN=False,
+                ),
+                patch.object(app, "_probe_media_duration", return_value=5400.0),
+                patch.object(app, "_managed_sidecar_is_valid", return_value=(True, {"valid": True})),
+            ):
+                stats, episodes_changed, movies_changed = app.run_extra_sidecar_prune()
+
+            self.assertEqual(stats["prune_quarantined"], 3)
+            self.assertTrue(episodes_changed)
+            self.assertTrue(movies_changed)
+            for path in extras:
+                self.assertFalse(path.exists())
+                report = quarantine / f"{path.name}.validation.json"
+                self.assertTrue(report.exists())
+            self.assertTrue((root / "movie.en.srt").exists())
+            self.assertTrue((root / "movie.et.srt").exists())
+            self.assertTrue((root / "movie.sv.srt").exists())
+
+    def test_missing_managed_language_blocks_all_pruning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, video = self._prune_fixture(directory, managed=("en", "et"))
+            extra = root / "movie.tur.srt"
+            extra.write_text(make_srt("Extra"), encoding="utf-8")
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et", "sv"],
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_PRUNE_EXTRA_LANGUAGES=True,
+                    CLEANUP_SCAN_DRY_RUN=False,
+                ),
+                patch.object(app, "_probe_media_duration", return_value=5400.0),
+                patch.object(app, "_managed_sidecar_is_valid", return_value=(True, {"valid": True})),
+            ):
+                stats, _, _ = app.run_extra_sidecar_prune([(video, "movies")])
+            self.assertEqual(stats["prune_deferred"], 1)
+            self.assertEqual(stats["prune_candidates"], 0)
+            self.assertTrue(extra.exists())
+
+    def test_invalid_managed_language_blocks_all_pruning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, video = self._prune_fixture(directory)
+            extra = root / "movie.tur.srt"
+            extra.write_text(make_srt("Extra"), encoding="utf-8")
+
+            def validate(entry, duration, detector):
+                valid = entry.language != "sv"
+                return valid, {"valid": valid, "language": entry.language}
+
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et", "sv"],
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_PRUNE_EXTRA_LANGUAGES=True,
+                ),
+                patch.object(app, "_probe_media_duration", return_value=5400.0),
+                patch.object(app, "_managed_sidecar_is_valid", side_effect=validate),
+            ):
+                stats, _, _ = app.run_extra_sidecar_prune([(video, "movies")])
+            self.assertEqual(stats["prune_invalid_languages"], 1)
+            self.assertEqual(stats["prune_candidates"], 0)
+            self.assertTrue(extra.exists())
+
+    def test_managed_variants_are_preserved_and_forced_only_does_not_satisfy_readiness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, video = self._prune_fixture(directory, managed=("en", "et"))
+            variants = [root / "movie.en.hi.srt", root / "movie.et.sdh.srt", root / "movie.sv.forced.srt"]
+            for path in variants:
+                path.write_text(make_srt("Managed variant"), encoding="utf-8")
+            extra = root / "movie.tur.srt"
+            extra.write_text(make_srt("Extra"), encoding="utf-8")
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et", "sv"],
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_PRUNE_EXTRA_LANGUAGES=True,
+                ),
+                patch.object(app, "_probe_media_duration", return_value=5400.0),
+                patch.object(app, "_managed_sidecar_is_valid", return_value=(True, {"valid": True})),
+            ):
+                stats, _, _ = app.run_extra_sidecar_prune([(video, None)])
+            self.assertEqual(stats["prune_deferred"], 1)
+            self.assertTrue(extra.exists())
+            self.assertTrue(all(path.exists() for path in variants))
+
+    def test_unknown_sidecars_are_retained_by_default_and_removable_by_opt_in(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, video = self._prune_fixture(directory)
+            unknown = [root / "movie.srt", root / "movie.2.srt", root / "movie.custom.srt"]
+            for path in unknown:
+                path.write_text(make_srt("Unknown"), encoding="utf-8")
+            common = dict(
+                LANGUAGES=["en", "et", "sv"],
+                CLEANUP_ROOTS=[root],
+                CLEANUP_PRUNE_EXTRA_LANGUAGES=True,
+                CLEANUP_PRUNE_ACTION="report",
+                CLEANUP_SCAN_DRY_RUN=False,
+            )
+            with (
+                patch.multiple(app, CLEANUP_PRUNE_UNKNOWN_SIDECARS=False, **common),
+                patch.object(app, "_probe_media_duration", return_value=5400.0),
+                patch.object(app, "_managed_sidecar_is_valid", return_value=(True, {"valid": True})),
+            ):
+                retained, _, _ = app.run_extra_sidecar_prune([(video, None)])
+            with (
+                patch.multiple(app, CLEANUP_PRUNE_UNKNOWN_SIDECARS=True, **common),
+                patch.object(app, "_probe_media_duration", return_value=5400.0),
+                patch.object(app, "_managed_sidecar_is_valid", return_value=(True, {"valid": True})),
+            ):
+                removable, _, _ = app.run_extra_sidecar_prune([(video, None)])
+            self.assertEqual(retained["prune_retained_unknown"], 3)
+            self.assertEqual(retained["prune_candidates"], 0)
+            self.assertEqual(removable["prune_candidates"], 3)
+
+    def test_overlapping_video_names_do_not_share_sidecars(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, short_video = self._prune_fixture(directory)
+            long_video = root / "movie.extended.mkv"
+            long_video.write_bytes(b"video")
+            long_extra = root / "movie.extended.tur.srt"
+            long_extra.write_text(make_srt("Extra"), encoding="utf-8")
+            self.assertNotIn(long_extra, app._video_sidecars(short_video))
+            self.assertIn(long_extra, app._video_sidecars(long_video))
+
+    def test_dry_run_prune_reports_without_moving(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, video = self._prune_fixture(directory)
+            extra = root / "movie.tur.srt"
+            extra.write_text(make_srt("Extra"), encoding="utf-8")
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et", "sv"],
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_PRUNE_EXTRA_LANGUAGES=True,
+                    CLEANUP_PRUNE_ACTION="quarantine",
+                    CLEANUP_SCAN_DRY_RUN=True,
+                ),
+                patch.object(app, "_probe_media_duration", return_value=5400.0),
+                patch.object(app, "_managed_sidecar_is_valid", return_value=(True, {"valid": True})),
+            ):
+                stats, episodes_changed, movies_changed = app.run_extra_sidecar_prune([(video, "movies")])
+            self.assertEqual(stats["prune_candidates"], 1)
+            self.assertTrue(extra.exists())
+            self.assertFalse(episodes_changed or movies_changed)
+
+    def test_failed_prune_quarantine_leaves_original_untouched(self):
+        import clean_et_subs
+
+        with tempfile.TemporaryDirectory() as directory:
+            root, video = self._prune_fixture(directory)
+            extra = root / "movie.tur.srt"
+            extra.write_text(make_srt("Extra"), encoding="utf-8")
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et", "sv"],
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_PRUNE_EXTRA_LANGUAGES=True,
+                    CLEANUP_PRUNE_ACTION="quarantine",
+                    CLEANUP_SCAN_DRY_RUN=False,
+                ),
+                patch.object(app, "_probe_media_duration", return_value=5400.0),
+                patch.object(app, "_managed_sidecar_is_valid", return_value=(True, {"valid": True})),
+                patch.object(clean_et_subs, "quarantine_subtitle", side_effect=OSError("move failed")),
+            ):
+                stats, episodes_changed, movies_changed = app.run_extra_sidecar_prune([(video, "movies")])
+            self.assertEqual(stats["prune_failures"], 1)
+            self.assertTrue(extra.exists())
+            self.assertFalse(episodes_changed or movies_changed)
+
+    def test_unavailable_duration_blocks_pruning_safely(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, video = self._prune_fixture(directory)
+            extra = root / "movie.tur.srt"
+            extra.write_text(make_srt("Extra"), encoding="utf-8")
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et", "sv"],
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_PRUNE_EXTRA_LANGUAGES=True,
+                ),
+                patch.object(app, "_probe_media_duration", return_value=None),
+            ):
+                stats, _, _ = app.run_extra_sidecar_prune([(video, None)])
+            self.assertEqual(stats["prune_duration_unavailable"], 1)
+            self.assertEqual(stats["prune_candidates"], 0)
+            self.assertTrue(extra.exists())
+
     def test_regular_undersized_sidecar_is_quarantined(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "media"

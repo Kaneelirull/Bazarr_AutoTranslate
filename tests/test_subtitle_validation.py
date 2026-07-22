@@ -415,6 +415,26 @@ class SubtitleValidationTests(unittest.TestCase):
             target.write_text(make_srt("Tere jälle"), encoding="utf-8")
             self.assertFalse(state.is_unchanged_valid(target, source_hash, file_sha256(target)))
 
+    def test_validation_state_returns_current_target_only_details(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "show.et.srt"
+            target.write_text(make_srt("Tere"), encoding="utf-8")
+            target_hash = file_sha256(target)
+            state = ValidationStateStore(root / "validation_state.json")
+            state.record(
+                target,
+                source_hash="source-hash-is-irrelevant-for-target-only-reuse",
+                target_hash=target_hash,
+                result="valid",
+                details={"completeness": {"mediaDurationSeconds": 3600.0}},
+            )
+
+            details = state.current_valid_details(target, target_hash)
+            self.assertEqual(details["completeness"]["mediaDurationSeconds"], 3600.0)
+            target.write_text(make_srt("Muudetud"), encoding="utf-8")
+            self.assertIsNone(state.current_valid_details(target, file_sha256(target)))
+
     def test_quarantine_preserves_relative_path_and_writes_report(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "media"
