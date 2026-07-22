@@ -9,5 +9,6 @@ echo "  - Languages: ${LANGUAGES:-en,et,sv}"
 echo "  - Parallel workers: ${PARALLEL_TRANSLATES:-1}"
 echo "  - Check Interval: ${CHECK_INTERVAL:-1200}s"
 echo "  - Cleanup languages: ${CLEANUP_LANGUAGES:-et}"
+echo "  - Prune extra SRT languages: ${CLEANUP_PRUNE_EXTRA_LANGUAGES:-true} (${CLEANUP_PRUNE_ACTION:-quarantine})"
 
 exec python3 -u /app/Bazarr_AutoTranslate.py

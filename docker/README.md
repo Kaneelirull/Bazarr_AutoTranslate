@@ -11,7 +11,8 @@ Continuously monitors Bazarr for missing subtitles and translates them through L
 5. Uses source cue anchors to repair safe SRT formatting damage before validation.
 6. Validates translated cues against the source, including structure, language, writing system, prompt leakage, character expansion, and physical line count.
 7. Sends only remaining invalid cues through a dedicated Lingarr line-repair worker. The first attempt uses bounded context; the second uses no context.
-8. Quarantines translations that remain invalid and triggers Bazarr subtitle rescans after repair or quarantine.
+8. Once every managed language is valid, quarantines recognized extra-language and unmanaged special-purpose SRT sidecars.
+9. Quarantines translations that remain invalid and triggers Bazarr subtitle rescans after repair, quarantine, or pruning.
 
 Translation timeout is calculated dynamically from the source subtitle's dialogue line count.
 
@@ -54,6 +55,10 @@ Existing-library cleanup runs after startup synchronization and then on its own 
 | `CLEANUP_SCAN_EXISTING` | `true` | Scan existing files independently of Bazarr's wanted list |
 | `CLEANUP_SCAN_INTERVAL` | `21600` | Seconds between existing-library scans (6 hours) |
 | `CLEANUP_SCAN_DRY_RUN` | `false` | Report existing-file actions without repair, move, or deletion |
+| `CLEANUP_PRUNE_EXTRA_LANGUAGES` | `true` | Prune recognized unmanaged SRT sidecars after all managed languages are ready |
+| `CLEANUP_PRUNE_ACTION` | `quarantine` | Prune action: `quarantine`, `delete`, or `report` |
+| `CLEANUP_PRUNE_SPECIAL_SIDECARS` | `true` | Remove unmanaged forced, foreign, signs, and commentary sidecars |
+| `CLEANUP_PRUNE_UNKNOWN_SIDECARS` | `false` | Also remove language-less, numeric-only, or unclassifiable sidecars |
 | `CLEANUP_ROOT` | `/media` | Scan root; separate multiple Linux paths with `:` |
 | `CLEANUP_ACTION` | `quarantine` | Failure action: `quarantine`, `delete`, or `report` |
 | `CLEANUP_QUARANTINE_DIR` | `/config/quarantine` | Persistent quarantine directory |
@@ -83,6 +88,10 @@ Existing-library cleanup runs after startup synchronization and then on its own 
 | `LOG_DIR` | `/var/log/bazarr-autotranslate` | Daily application log directory |
 
 Completeness scanning covers regular subtitles in every language, including HI, SDH, numbered, and language-less sidecars. Files explicitly labelled `forced`, `foreign`, `signs`, or `commentary` are exempt. A file is undersized only when at least three configured density/coverage signals fail; an unavailable duration is a safe skip.
+
+Sidecar pruning runs after queued cue repairs and during each existing-library scan. It groups files by the exact sibling video stem and proceeds only when every language in `LANGUAGES` has a validated full subtitle and the media duration is usable. Every managed-language variant is preserved, including HI, SDH, numbered, and forced tracks; forced-only tracks do not satisfy readiness. Recognized non-managed languages and unmanaged forced/foreign/signs/commentary tracks are pruned. Language-less, numeric-only, and unclassifiable files are retained unless `CLEANUP_PRUNE_UNKNOWN_SIDECARS=true`.
+
+The default prune action moves candidates out of the media directory immediately into `/config/quarantine`, so Bazarr no longer sees them. They remain recoverable until retention housekeeping permanently purges the subtitle and its audit report after 30 days by default. Use `CLEANUP_SCAN_DRY_RUN=true` to preview candidates without moving files or triggering Bazarr.
 
 Target variants `.et.srt`, `.et.hi.srt`, `.et.sdh.srt`, and numbered forms such as `.et.2.srt` receive language/content validation. Exact source cue alignment, source-anchored formatting recovery, and AI cue repair apply only to unchanged outputs recorded as created by Lingarr. Bazarr/manual subtitles are treated as independently segmented and are not rejected merely for differing English cue counts or timestamps.
 
