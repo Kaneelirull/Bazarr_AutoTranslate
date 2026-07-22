@@ -1346,6 +1346,19 @@ class ValidationStateStore:
             origin = entry.get("origin")
             return origin if isinstance(origin, str) and origin else None
 
+    def current_valid_details(self, target_path: Path | str, target_hash: str) -> Optional[dict]:
+        """Return cached validation details only for unchanged content and this validator version."""
+        with self._lock:
+            entry = self._data.get("files", {}).get(self._key(target_path), {})
+            if (
+                entry.get("validatorVersion") != VALIDATOR_VERSION
+                or entry.get("result") != "valid"
+                or entry.get("targetHash") != target_hash
+            ):
+                return None
+            details = entry.get("details")
+            return dict(details) if isinstance(details, dict) else {}
+
     def record(
         self,
         target_path: Path | str,
