@@ -24,6 +24,8 @@ os.environ.setdefault(
 
 import Bazarr_AutoTranslate as app  # noqa: E402
 import clean_et_subs as cleanup  # noqa: E402
+from state_store import StateStore  # noqa: E402
+from state_store import StateStoreError  # noqa: E402
 
 
 class FakeResponse:
@@ -42,8 +44,18 @@ class FakeResponse:
 
 
 class ServiceReliabilityTests(unittest.TestCase):
+    def setUp(self):
+        self._state_directory = tempfile.TemporaryDirectory()
+        app._validation_state = StateStore(
+            Path(self._state_directory.name) / "state.sqlite3",
+            validator_version=cleanup.VALIDATOR_VERSION,
+        )
+
     def tearDown(self):
         app._translation_capacity.reset()
+        app._validation_state.close()
+        app._validation_state = None
+        self._state_directory.cleanup()
 
     def test_request_json_retries_transient_failures_with_bounded_backoff(self):
         response = FakeResponse({"data": []})
@@ -152,6 +164,134 @@ class ServiceReliabilityTests(unittest.TestCase):
         self.assertEqual(stats["deferred"], 1)
         self.assertEqual(stats["api_errors"], 1)
 
+    def test_persistence_failure_prevents_lingarr_submission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            source = root / "movie.en.srt"
+            video.write_bytes(b"video")
+            source.write_text(
+                "1\n00:00:01,000 --> 00:00:01,900\nEnglish\n",
+                encoding="utf-8",
+            )
+            item = {
+                "radarrId": 7,
+                "title": "Movie",
+                "missing_subtitles": [{"code2": "et"}],
+            }
+            stats = {
+                "deferred": 0,
+                "api_errors": 0,
+                "translations": [],
+                "episode_activity": False,
+                "movie_activity": False,
+            }
+            submit = Mock()
+            with patch.multiple(
+                app,
+                LANGUAGES=["en", "et"],
+                CLEANUP_UNDERSIZED_ENABLED=False,
+                fetch_subtitles=lambda *_args: (
+                    str(video),
+                    [{"code2": "en", "path": str(source), "forced": False}],
+                ),
+                lingarr_resolve_media_id=lambda *_args: 99,
+                lingarr_get_active_translations=lambda: [],
+                lingarr_submit_file=submit,
+                _count_dialogue_lines=lambda _path: 1,
+                _estimate_timeout=lambda _path: 60,
+                _record_submission=Mock(
+                    side_effect=StateStoreError("disk unavailable")
+                ),
+            ):
+                app.process_item(
+                    item, "movies", "radarrId", stats, threading.Lock()
+                )
+
+            submit.assert_not_called()
+            self.assertEqual(stats["deferred"], 1)
+
+    def test_repair_defers_if_source_changed_while_queued(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "movie.en.srt"
+            target = root / "movie.et.srt"
+            source.write_text(
+                "1\n00:00:01,000 --> 00:00:01,900\nOriginal\n",
+                encoding="utf-8",
+            )
+            target.write_text(
+                "1\n00:00:01,000 --> 00:00:01,900\nKatki\n",
+                encoding="utf-8",
+            )
+            expected_source = app._file_hash_or_none(source)
+            expected_target = app._file_hash_or_none(target)
+            source.write_text(
+                "1\n00:00:01,000 --> 00:00:01,900\nChanged\n",
+                encoding="utf-8",
+            )
+            report = SimpleNamespace(repairable_cue_indexes=[0])
+            translate_line = Mock()
+            with (
+                patch.object(app, "_get_cleanup_detector", return_value=object()),
+                patch.object(
+                    cleanup,
+                    "target_language_for_code",
+                    return_value=SimpleNamespace(),
+                ),
+                patch.object(app, "lingarr_translate_line", translate_line),
+            ):
+                result = app._perform_repair(
+                    str(source),
+                    str(target),
+                    "en",
+                    "et",
+                    None,
+                    "Movie",
+                    "movies",
+                    report,
+                    expected_target,
+                    expected_source_hash=expected_source,
+                )
+
+            self.assertEqual(result.action, "repair-deferred")
+            translate_line.assert_not_called()
+
+    def test_moved_source_requires_matching_hash_and_language(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            moved = root / "movie.eng.hi.srt"
+            moved.write_text(
+                "1\n00:00:01,000 --> 00:00:01,900\nEnglish\n",
+                encoding="utf-8",
+            )
+            metadata = {
+                "sourcePath": str(root / "movie.en.srt"),
+                "sourceHash": app._file_hash_or_none(moved),
+                "sourceLanguage": "en",
+            }
+            target = root / "movie.et.hi.srt"
+
+            self.assertTrue(
+                app._submission_matches_source(
+                    metadata, str(moved), "en", target, "et"
+                )
+            )
+            self.assertFalse(
+                app._submission_matches_source(
+                    metadata, str(moved), "sv", target, "et"
+                )
+            )
+            moved.write_text(
+                "1\n00:00:01,000 --> 00:00:01,900\nChanged\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(
+                app._submission_matches_source(
+                    metadata, str(moved), "en", target, "et"
+                )
+            )
+
     def test_lingarr_language_schema_is_normalized(self):
         payload = [
             {"name": "English", "code": "en", "targets": ["et", "sv"]},
@@ -227,7 +367,7 @@ class ServiceReliabilityTests(unittest.TestCase):
                 "1\n00:00:01,000 --> 00:00:01,900\nTere maailm\n",
                 encoding="utf-8",
             )
-            state = cleanup.ValidationStateStore(root / "state.json")
+            state = app._validation_state
 
             with patch.multiple(
                 app, CLEANUP_LANGUAGES={"et"}, _validation_state=state

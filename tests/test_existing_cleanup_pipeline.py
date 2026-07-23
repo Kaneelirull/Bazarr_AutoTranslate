@@ -24,6 +24,7 @@ os.environ.setdefault(
 import Bazarr_AutoTranslate as app  # noqa: E402
 import clean_et_subs as cleanup  # noqa: E402
 from clean_et_subs import ValidationStateStore  # noqa: E402
+from state_store import StateStore  # noqa: E402
 
 
 def make_srt(text: str) -> str:
@@ -50,6 +51,11 @@ def make_timed_srt(cue_count: int, final_second: int, text: str = "Dialogue line
 
 class ExistingCleanupPipelineTests(unittest.TestCase):
     def setUp(self):
+        self._state_directory = tempfile.TemporaryDirectory()
+        app._validation_state = StateStore(
+            Path(self._state_directory.name) / "state.sqlite3",
+            validator_version=cleanup.VALIDATOR_VERSION,
+        )
         self._permissions_patcher = patch.object(
             cleanup, "normalize_managed_file", lambda _path: None
         )
@@ -62,24 +68,39 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             app._pending_repairs.clear()
             app._repair_keys.clear()
         self._permissions_patcher.stop()
+        if isinstance(app._validation_state, StateStore):
+            app._validation_state.close()
+        app._validation_state = None
+        self._state_directory.cleanup()
+
+    def _record_lingarr_artifact(
+        self, source: Path, target: Path, target_language: str = "et"
+    ) -> None:
+        suffix = app._target_suffix(target, target_language)
+        app._validation_state.record(
+            target,
+            source_hash=app._file_hash_or_none(source),
+            target_hash=app._file_hash_or_none(target),
+            result="pending",
+            origin="lingarr",
+            source_path=source,
+            source_language="en",
+            target_language=target_language,
+            target_identity=app._target_identity_from_sidecar(
+                target, target_language
+            ),
+            target_variant=suffix[1] if suffix is not None else "",
+            operation="translation",
+        )
 
     def test_cooldown_can_be_cleared_by_removed_target_path(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "show.et.srt"
-            cache_file = Path(directory) / "submitted_cache.json"
-            with patch.multiple(
-                app,
-                STATE_DIR=directory,
-                SUBMIT_CACHE_FILE=str(cache_file),
-                _submitted_cache={},
-                _submitted_paths={},
-                _submitted_metadata={},
-            ):
-                app._record_submission(42, "et", str(target))
-                self.assertIsNotNone(app._check_cooldown(42, "et"))
-                cleared = app._clear_submission_for_path(target, "et")
-                self.assertEqual(cleared, 1)
-                self.assertIsNone(app._check_cooldown(42, "et"))
+            app._record_submission(42, "et", str(target))
+            self.assertIsNotNone(app._check_cooldown(42, "et"))
+            cleared = app._clear_submission_for_path(target, "et")
+            self.assertEqual(cleared, 1)
+            self.assertIsNone(app._check_cooldown(42, "et"))
 
     def test_variant_paths_and_dynamic_target_discovery(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -128,24 +149,16 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             root = Path(directory)
             video = root / "show.mkv"
             target = root / "show.et.hi.srt"
-            cache_file = root / "submitted_cache.json"
             video.write_bytes(b"video")
-            with patch.multiple(
-                app,
-                SUBMIT_CACHE_FILE=str(cache_file),
-                _submitted_cache={},
-                _submitted_paths={},
-                _submitted_metadata={},
-            ):
-                app._record_submission(
-                    42,
-                    "et",
-                    str(root / "show.et.srt"),
-                    expected_target_path=str(root / "show.et.srt"),
-                    video_path=str(video),
-                )
-                self.assertEqual(app._clear_submission_for_path(target, "et"), 1)
-                self.assertIsNone(app._check_cooldown(42, "et"))
+            app._record_submission(
+                42,
+                "et",
+                str(root / "show.et.srt"),
+                expected_target_path=str(root / "show.et.srt"),
+                video_path=str(video),
+            )
+            self.assertEqual(app._clear_submission_for_path(target, "et"), 1)
+            self.assertIsNone(app._check_cooldown(42, "et"))
 
     def test_submit_cache_loads_legacy_entries_and_ignores_malformed_keys(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -161,17 +174,16 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with patch.multiple(
-                app,
-                SUBMIT_CACHE_FILE=str(cache_file),
-                RESUBMIT_COOLDOWN=3600,
-                _submitted_cache={},
-                _submitted_paths={},
-                _submitted_metadata={},
-            ):
-                app._load_submit_cache()
-                self.assertIsNotNone(app._check_cooldown(42, "et"))
-                self.assertEqual(set(app._submitted_cache), {(42, "et")})
+            validation_file = Path(directory) / "validation_state.json"
+            state = StateStore(Path(directory) / "migrated.sqlite3")
+            try:
+                result = state.migrate_legacy(
+                    cache_file, validation_file, cooldown_seconds=3600
+                )
+                self.assertEqual(result["submissions"], 1)
+                self.assertIsNotNone(state.check_cooldown("legacy", 42, "et"))
+            finally:
+                state.close()
 
     def _prune_fixture(self, directory: str, *, managed=("en", "et", "sv")):
         root = Path(directory) / "media"
@@ -400,7 +412,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             target = root / "movie.eng.srt"
             target.write_text(make_multi_srt("One", "Two", "Three"), encoding="utf-8")
             quarantine = Path(directory) / "quarantine"
-            state = ValidationStateStore(Path(directory) / "state.json")
+            state = app._validation_state
             stats = defaultdict(int)
 
             with patch.multiple(
@@ -484,7 +496,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             english.write_text(make_timed_srt(5, 3500, "Sign"), encoding="utf-8")
             swedish.write_text(make_timed_srt(150, 3500, "Detta ar en fullstandig dialograd"), encoding="utf-8")
             quarantine = Path(directory) / "quarantine"
-            state = ValidationStateStore(Path(directory) / "state.json")
+            state = app._validation_state
             stats = defaultdict(int)
             stats["translations"] = []
             item = {"radarrId": 7, "title": "Movie", "missing_subtitles": [{"code2": "et"}]}
@@ -559,9 +571,11 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                     lingarr_poll_job=completed,
                     _count_dialogue_lines=lambda _path: 1,
                     _estimate_timeout=lambda _path: 60,
-                    _record_submission=lambda *_args, **_kwargs: None,
+                    _record_submission=lambda *_args, **_kwargs: 1,
+                    _mark_submission_submitted=lambda *_args, **_kwargs: None,
+                    _mark_submission_failed=lambda *_args, **_kwargs: None,
                     _update_submission_actual_path=lambda *_args, **_kwargs: None,
-                    _record_pending_lingarr_output=lambda *_args, **_kwargs: None,
+                    _record_pending_lingarr_output=lambda *_args, **_kwargs: True,
                     _validate_translated_file=lambda *_args, **_kwargs: ("valid", report),
                 ),
             ):
@@ -585,7 +599,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 "missing_subtitles": [{"code2": "et"}],
             }
             subtitles = [{"code2": "en", "path": str(source), "forced": False}]
-            state = ValidationStateStore(root / "validation_state.json")
+            state = app._validation_state
             stats = defaultdict(int)
             stats["translations"] = []
 
@@ -599,10 +613,6 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                     app,
                     LANGUAGES=["en", "et"],
                     CLEANUP_UNDERSIZED_ENABLED=False,
-                    SUBMIT_CACHE_FILE=str(root / "submitted_cache.json"),
-                    _submitted_cache={},
-                    _submitted_paths={},
-                    _submitted_metadata={},
                     _validation_state=state,
                     fetch_subtitles=lambda *_args: (str(video), subtitles),
                     lingarr_resolve_media_id=lambda *_args: 99,
@@ -618,12 +628,19 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 ) as normalize_output,
             ):
                 app.process_item(item, "movies", "radarrId", stats, threading.Lock())
-                metadata = dict(app._submitted_metadata[(7, "et")])
+                identity = app._target_identity_from_sidecar(target, "et")
+                metadata = state.find_submission(identity, "et")
 
             self.assertEqual(stats["completed"], 1)
             self.assertEqual(stats["variant_outputs_discovered"], 0)
-            self.assertEqual(metadata["expectedTargetPath"], str(target))
-            self.assertEqual(metadata["actualTargetPath"], str(target))
+            self.assertEqual(
+                os.path.normcase(metadata["expectedTargetPath"]),
+                os.path.normcase(str(target)),
+            )
+            self.assertEqual(
+                os.path.normcase(metadata["actualTargetPath"]),
+                os.path.normcase(str(target)),
+            )
             self.assertEqual(metadata["targetVariant"], ".hi")
             normalize_output.assert_called_once_with(str(target), "Movie")
             self.assertEqual(state.matching_origin(target, app._file_hash_or_none(target)), "lingarr")
@@ -681,7 +698,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 ]),
                 encoding="utf-8",
             )
-            state = ValidationStateStore(root / "state.json")
+            state = app._validation_state
 
             with patch.multiple(app, _validation_state=state, CLEANUP_LANGUAGES={"et"}):
                 action, report = app._validate_translated_file(
@@ -700,7 +717,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 make_srt("Üks\nKaks\nKolm\nNeli\nViis"),
                 encoding="utf-8",
             )
-            state = ValidationStateStore(root / "state.json")
+            state = app._validation_state
 
             with patch.multiple(
                 app,
@@ -731,7 +748,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 encoding="utf-8",
             )
             quarantine = root / "quarantine"
-            state = ValidationStateStore(root / "state.json")
+            state = app._validation_state
 
             with patch.multiple(
                 app,
@@ -761,7 +778,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             target = root / "movie.et.srt"
             source.write_text(make_srt("English"), encoding="utf-8")
             target.write_text(make_srt("Üks\nKaks\nKolm\nNeli\nViis"), encoding="utf-8")
-            state = ValidationStateStore(root / "state.json")
+            state = app._validation_state
             target_hash = app._file_hash_or_none(target)
             identity = app._quarantine_identity("et", target_path=target)
             state.record_quarantine_tombstone(
@@ -773,6 +790,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 origin="lingarr",
                 hold_days=30,
             )
+            self._record_lingarr_artifact(source, target)
 
             with (
                 patch.multiple(
@@ -808,7 +826,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             source.write_text(make_srt("English"), encoding="utf-8")
             invalid = make_srt("[CONTEXT]\nÜks\nKaks\nKolm\nNeli")
             target.write_text(invalid, encoding="utf-8")
-            state = ValidationStateStore(root / "state.json")
+            state = app._validation_state
             quarantine = root / "quarantine"
 
             common = dict(
@@ -880,7 +898,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             root = Path(directory)
             target = root / "movie.et.srt"
             target.write_text(make_srt("Katki\nÜks\nKaks\nKolm\nNeli"), encoding="utf-8")
-            state = ValidationStateStore(root / "state.json")
+            state = app._validation_state
             identity = app._quarantine_identity("et", target_path=target)
             state.record_quarantine_tombstone(
                 identity,
@@ -921,14 +939,8 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 make_multi_srt(*(["See on korralik eestikeelne subtiitrite dialoog."] * 7)),
                 encoding="utf-8",
             )
-            state = ValidationStateStore(root / "state.json")
-            state.record(
-                target,
-                source_hash=app._file_hash_or_none(source),
-                target_hash=app._file_hash_or_none(target),
-                result="valid",
-                origin="lingarr",
-            )
+            state = app._validation_state
+            self._record_lingarr_artifact(source, target)
 
             with patch.multiple(app, _validation_state=state, CLEANUP_LANGUAGES={"et"}):
                 action, report = app._validate_translated_file(
@@ -948,7 +960,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 encoding="utf-8",
             )
             target.write_text(make_srt("See on korras."), encoding="utf-8")
-            state = ValidationStateStore(root / "state.json")
+            state = app._validation_state
             state.record(
                 target,
                 source_hash="old-source-hash",
@@ -973,7 +985,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             source.write_text(make_timed_srt(150, 3500, "Complete source dialogue"), encoding="utf-8")
             target.write_text(make_timed_srt(3, 3500, "Fragment"), encoding="utf-8")
             quarantine = root / "quarantine"
-            state = ValidationStateStore(root / "state.json")
+            state = app._validation_state
 
             with patch.multiple(
                 app,
@@ -1008,7 +1020,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             root.mkdir()
             (root / "show.eng.srt").write_text(make_srt("Good evening"), encoding="utf-8")
             (root / "show.et.srt").write_text(make_srt("Tere õhtust"), encoding="utf-8")
-            state = ValidationStateStore(Path(directory) / "state.json")
+            state = app._validation_state
 
             with patch.multiple(
                 app,
@@ -1032,13 +1044,14 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             root = Path(directory)
             source = root / "show.eng.srt"
             target = root / "show.et.srt"
-            state = ValidationStateStore(root / "state.json")
+            state = app._validation_state
             source.write_text(make_multi_srt("First line", "Second cue"), encoding="utf-8")
             target.write_text(
                 "1\n00:00:01,000 --> 00:00:01,900\nEsimene\n\nteine rida\n\n"
                 "2\n00:00:02,000 --> 00:00:02,900\nTeine subtiiter\n",
                 encoding="utf-8",
             )
+            self._record_lingarr_artifact(source, target)
 
             with (
                 patch.multiple(
@@ -1071,7 +1084,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             root = Path(directory)
             source = root / "show.eng.srt"
             target = root / "show.et.srt"
-            state = ValidationStateStore(root / "state.json")
+            state = app._validation_state
             source.write_text(
                 make_multi_srt("Before secret", "Target secret dialogue", "After secret"),
                 encoding="utf-8",
@@ -1080,6 +1093,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 make_multi_srt("Enne", "[SOURCE] leaked [/SOURCE]", "Pärast"),
                 encoding="utf-8",
             )
+            self._record_lingarr_artifact(source, target)
             responses = ["[SOURCE] still leaked [/SOURCE]", "Parandatud"]
 
             def translate(*args, **kwargs):
@@ -1128,7 +1142,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             target = root / "show.et.srt"
             target.write_text(make_srt("Üks\nKaks\nKolm\nNeli\nViis"), encoding="utf-8")
             quarantine = Path(directory) / "quarantine"
-            state = ValidationStateStore(Path(directory) / "state.json")
+            state = app._validation_state
 
             with (
                 patch.multiple(
@@ -1164,7 +1178,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             target = root / "show.et.srt"
             original = make_srt("Üks\nKaks\nKolm\nNeli\nViis")
             target.write_text(original, encoding="utf-8")
-            state = ValidationStateStore(Path(directory) / "state.json")
+            state = app._validation_state
 
             with (
                 patch.multiple(

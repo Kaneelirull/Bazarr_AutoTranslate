@@ -232,6 +232,36 @@ class StatusDashboardTests(unittest.TestCase):
             )
             self.assertFalse((Path(directory) / "status.json.tmp").exists())
 
+    def test_snapshot_writers_use_unique_temporary_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / "status.json"
+            history = root / "status.jsonl"
+            first = StatusTracker(snapshot, history)
+            second = StatusTracker(snapshot, history)
+            errors = []
+
+            def write_many(tracker, prefix):
+                try:
+                    for index in range(20):
+                        tracker.set_phase(f"{prefix}-{index}")
+                except Exception as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+
+            threads = [
+                threading.Thread(target=write_many, args=(first, "first")),
+                threading.Thread(target=write_many, args=(second, "second")),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(errors, [])
+            payload = json.loads(snapshot.read_text(encoding="utf-8"))
+            self.assertIn("service", payload)
+            self.assertEqual(list(root.glob(".status.json.*.tmp")), [])
+
     def test_html_escapes_titles_and_contains_no_paths_or_auto_refresh(self):
         with tempfile.TemporaryDirectory() as directory:
             tracker = self.make_tracker(directory)

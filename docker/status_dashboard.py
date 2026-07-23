@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import tempfile
 import threading
 import time
 from collections import Counter
@@ -265,11 +266,30 @@ class StatusTracker:
             before = len(self._history)
             self._drop_expired_locked()
             self.history_path.parent.mkdir(parents=True, exist_ok=True)
-            temp = self.history_path.with_suffix(self.history_path.suffix + ".tmp")
-            with temp.open("w", encoding="utf-8", newline="\n") as handle:
-                for event in self._history:
-                    handle.write(json.dumps(event, ensure_ascii=False) + "\n")
-            os.replace(temp, self.history_path)
+            temp: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    newline="\n",
+                    prefix=f".{self.history_path.name}.",
+                    suffix=".tmp",
+                    dir=self.history_path.parent,
+                    delete=False,
+                ) as handle:
+                    temp = Path(handle.name)
+                    for event in self._history:
+                        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp, self.history_path)
+                temp = None
+            finally:
+                if temp is not None:
+                    try:
+                        temp.unlink()
+                    except OSError:
+                        pass
             self._write_snapshot_locked()
             return before - len(self._history)
 
@@ -430,12 +450,34 @@ class StatusTracker:
 
     def _write_snapshot_locked(self) -> None:
         self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.snapshot_path.with_suffix(self.snapshot_path.suffix + ".tmp")
-        temp.write_text(
-            json.dumps(self._snapshot_locked(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        os.replace(temp, self.snapshot_path)
+        temp: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="\n",
+                prefix=f".{self.snapshot_path.name}.",
+                suffix=".tmp",
+                dir=self.snapshot_path.parent,
+                delete=False,
+            ) as handle:
+                temp = Path(handle.name)
+                json.dump(
+                    self._snapshot_locked(),
+                    handle,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, self.snapshot_path)
+            temp = None
+        finally:
+            if temp is not None:
+                try:
+                    temp.unlink()
+                except OSError:
+                    pass
 
 
 def render_dashboard(snapshot: dict) -> str:
