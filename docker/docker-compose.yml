@@ -93,12 +93,22 @@ services:
       - RETENTION_CHECK_INTERVAL=${RETENTION_CHECK_INTERVAL:-3600}
       - LOG_DIR=${LOG_DIR:-/var/log/bazarr-autotranslate}
 
+      # Read-only translation status dashboard
+      - STATUS_ENABLED=${STATUS_ENABLED:-true}
+      - STATUS_BIND=${STATUS_BIND:-0.0.0.0}
+      - STATUS_PORT=${STATUS_PORT:-8765}
+      - STATUS_HISTORY_RETENTION_DAYS=${STATUS_HISTORY_RETENTION_DAYS:-30}
+      - STATUS_RECENT_LIMIT=${STATUS_RECENT_LIMIT:-20}
+
       - TZ=${TZ:-Europe/Tallinn}
 
     volumes:
       - ${MEDIA_PATH}:/media
       - ./logs:/var/log/bazarr-autotranslate
       - autotranslate_data:/config
+
+    ports:
+      - "${STATUS_PORT:-8765}:${STATUS_PORT:-8765}"
 
     logging:
       driver: local
