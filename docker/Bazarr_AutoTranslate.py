@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import requests
+from status_dashboard import StatusTracker, build_cycle_jobs, start_status_server
 
 # Unbuffered output
 sys.stdout = os.fdopen(sys.stdout.fileno(), "w", buffering=1)
@@ -159,6 +160,15 @@ VALIDATION_STATE_FILE = Path(STATE_DIR) / "validation_state.json"
 LOG_DIR = Path(os.getenv("LOG_DIR", "/var/log/bazarr-autotranslate"))
 RETENTION_DAYS = max(1, int(os.getenv("RETENTION_DAYS", "30")))
 RETENTION_CHECK_INTERVAL = max(300, int(os.getenv("RETENTION_CHECK_INTERVAL", "3600")))
+STATUS_ENABLED = os.getenv("STATUS_ENABLED", "true").lower() in ("1", "true", "yes")
+STATUS_BIND = os.getenv("STATUS_BIND", "0.0.0.0").strip() or "0.0.0.0"
+STATUS_PORT = int(os.getenv("STATUS_PORT", "8765"))
+STATUS_HISTORY_RETENTION_DAYS = max(
+    7, int(os.getenv("STATUS_HISTORY_RETENTION_DAYS", "30"))
+)
+STATUS_RECENT_LIMIT = max(1, int(os.getenv("STATUS_RECENT_LIMIT", "20")))
+STATUS_SNAPSHOT_FILE = Path(STATE_DIR) / "status.json"
+STATUS_HISTORY_FILE = Path(STATE_DIR) / "status_history.jsonl"
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
 
 if not LANGUAGES:
@@ -169,6 +179,9 @@ if CLEANUP_ACTION not in ("quarantine", "delete", "report"):
     sys.exit(1)
 if CLEANUP_PRUNE_ACTION not in ("quarantine", "delete", "report"):
     print(f"{RED}[ERROR] CLEANUP_PRUNE_ACTION must be quarantine, delete, or report{RESET}")
+    sys.exit(1)
+if not 1 <= STATUS_PORT <= 65535:
+    print(f"{RED}[ERROR] STATUS_PORT must be between 1 and 65535{RESET}")
     sys.exit(1)
 
 _app_log_sink = _DailyLogSink(LOG_DIR)
@@ -197,6 +210,7 @@ _duration_cache: dict[tuple[str, int, int], float | None] = {}
 _duration_cache_lock = threading.Lock()
 _pending_prune_videos: dict[str, str | None] = {}
 _pending_prune_lock = threading.Lock()
+_status_tracker: StatusTracker | None = None
 
 _episode_cache: dict[int, int] = {}
 _movie_cache: dict[int, int] = {}
@@ -219,6 +233,107 @@ class RepairJobResult:
 def dbg(msg: str) -> None:
     if DEBUG:
         print(f"[DEBUG] {msg}")
+
+
+def _status_transition(
+    item_type: str | None,
+    item_id: int | None,
+    target_lang: str,
+    state: str,
+    *,
+    repaired: bool = False,
+    reason: str | None = None,
+) -> bool:
+    if _status_tracker is None:
+        return False
+    try:
+        return _status_tracker.transition_for(
+            item_type,
+            item_id,
+            target_lang,
+            state,
+            repaired=repaired,
+            reason=reason,
+        )
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not persist job update: {exc}{RESET}")
+        return False
+
+
+def _status_set_phase(phase: str, *, next_cycle_at: float | None = None) -> None:
+    if _status_tracker is None:
+        return
+    try:
+        _status_tracker.set_phase(phase, next_cycle_at=next_cycle_at)
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not persist service phase: {exc}{RESET}")
+
+
+def _status_start_cycle(cycle_id: str, cycle_number: int, jobs: list[dict]) -> None:
+    if _status_tracker is None:
+        return
+    try:
+        _status_tracker.start_cycle(cycle_id, cycle_number, jobs)
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not persist cycle start: {exc}{RESET}")
+
+
+def _status_finish_cycle() -> None:
+    if _status_tracker is None:
+        return
+    try:
+        _status_tracker.finish_cycle()
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not persist cycle completion: {exc}{RESET}")
+
+
+def _status_record_maintenance(metrics: dict) -> None:
+    if _status_tracker is None:
+        return
+    try:
+        _status_tracker.record_maintenance(metrics)
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not persist maintenance status: {exc}{RESET}")
+
+
+def _status_compact_history() -> int:
+    if _status_tracker is None:
+        return 0
+    try:
+        return _status_tracker.compact_history()
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not compact status history: {exc}{RESET}")
+        return 0
+
+
+def _status_finish_validation(
+    item_type: str,
+    item_id: int,
+    target_lang: str,
+    action: str,
+) -> None:
+    if action in ("valid", "formatted", "repaired"):
+        _status_transition(
+            item_type,
+            item_id,
+            target_lang,
+            "accepted",
+            repaired=action in ("formatted", "repaired"),
+        )
+    elif action in ("repair-queued", "repair-duplicate"):
+        _status_transition(item_type, item_id, target_lang, "repairing")
+    elif action == "repair-deferred":
+        _status_transition(
+            item_type, item_id, target_lang, "deferred", reason="repair deferred"
+        )
+    elif action in ("quarantined", "deleted"):
+        _status_transition(
+            item_type, item_id, target_lang, "quarantined", reason=action
+        )
+    else:
+        _status_transition(
+            item_type, item_id, target_lang, "failed", reason=f"validation {action}"
+        )
 
 
 def _get_cleanup_detector():
@@ -1355,6 +1470,9 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             "key": repair_key,
             "report": report,
             "target_path": job_kwargs.get("target_path"),
+            "item_type": job_kwargs.get("item_type"),
+            "item_id": job_kwargs.get("item_id"),
+            "target_lang": job_kwargs.get("target_lang"),
         }
     for index in report.repairable_cue_indexes:
         print(f"[REPAIR] Queued {label} '{target_lang}' cue position {index + 1}")
@@ -1375,12 +1493,26 @@ def _drain_pending_repairs(stats: dict) -> list[RepairJobResult]:
         except Exception as exc:
             print(f"{RED}[ERROR] Repair worker failed: {exc}{RESET}")
             stats["cleanup_repair_failures"] = stats.get("cleanup_repair_failures", 0) + 1
+            _status_transition(
+                metadata.get("item_type"),
+                metadata.get("item_id"),
+                metadata.get("target_lang", ""),
+                "failed",
+                reason="repair worker failed",
+            )
             continue
         results.append(result)
         stats["cleanup_repair_attempts"] = stats.get("cleanup_repair_attempts", 0) + result.attempts
         stats["cleanup_second_attempts"] = stats.get("cleanup_second_attempts", 0) + result.second_attempts
         _record_cleanup_stats(stats, result.action, result.report)
         if result.action == "repaired":
+            _status_transition(
+                result.item_type,
+                result.item_id,
+                result.target_lang,
+                "accepted",
+                repaired=True,
+            )
             stats["completed"] += 1
             stats["translations"].append(f"{result.title}: repaired {result.target_lang}")
             if result.item_type:
@@ -1389,6 +1521,13 @@ def _drain_pending_repairs(stats: dict) -> list[RepairJobResult]:
                 stats["episode_activity"] = True
                 stats["movie_activity"] = True
         elif result.action in ("quarantined", "deleted"):
+            _status_transition(
+                result.item_type,
+                result.item_id,
+                result.target_lang,
+                "quarantined",
+                reason=result.action,
+            )
             stats["failed"] += 1
             stats["cleaned"] = stats.get("cleaned", 0) + 1
             if result.item_type:
@@ -1397,7 +1536,22 @@ def _drain_pending_repairs(stats: dict) -> list[RepairJobResult]:
                 stats["episode_activity"] = True
                 stats["movie_activity"] = True
         elif result.action == "repair-deferred":
+            _status_transition(
+                result.item_type,
+                result.item_id,
+                result.target_lang,
+                "deferred",
+                reason="repair deferred",
+            )
             stats["cleanup_repair_deferred"] = stats.get("cleanup_repair_deferred", 0) + 1
+        else:
+            _status_transition(
+                result.item_type,
+                result.item_id,
+                result.target_lang,
+                "failed",
+                reason=f"repair {result.action}",
+            )
     return results
 
 
@@ -1732,7 +1886,11 @@ def process_item(item: dict, item_type: str, id_field: str,
     title = _item_title(item, item_type)
     lingarr_media_type = "Episode" if item_type == "episodes" else "Movie"
 
-    missing_raw = {s.get("code2") for s in item.get("missing_subtitles", []) if s.get("code2")}
+    missing_raw = {
+        str(s.get("code2")).strip().lower()
+        for s in item.get("missing_subtitles", [])
+        if s.get("code2")
+    }
     missing = {l for l in LANGUAGES if l in missing_raw}
 
     if not missing:
@@ -1746,6 +1904,7 @@ def process_item(item: dict, item_type: str, id_field: str,
         code, path = s.get("code2"), s.get("path", "")
         if not code or not path:
             continue
+        code = str(code).strip().lower()
         if _truthy(s.get("forced")) or (
             video_path and _explicit_non_full_sidecar(video_path, path) is not None
         ):
@@ -1758,9 +1917,21 @@ def process_item(item: dict, item_type: str, id_field: str,
 
     target_langs = [l for l in LANGUAGES if l in missing and l not in available_by_lang]
     source_langs = [l for l in LANGUAGES if l in available_by_lang]
+    for already_available in missing - set(target_langs):
+        _status_transition(
+            item_type,
+            item_id,
+            already_available,
+            "deferred",
+            reason="subtitle already reported on disk",
+        )
 
     if not source_langs:
         print(f"[SKIP] {title}: no source subtitle available from {LANGUAGES}")
+        for target_lang in target_langs:
+            _status_transition(
+                item_type, item_id, target_lang, "deferred", reason="no source subtitle"
+            )
         return
     if not target_langs:
         return
@@ -1782,6 +1953,14 @@ def process_item(item: dict, item_type: str, id_field: str,
             break
     if not source_path:
         print(f"{YELLOW}[SKIP] {title}: no complete source subtitle available{RESET}")
+        for target_lang in target_langs:
+            _status_transition(
+                item_type,
+                item_id,
+                target_lang,
+                "deferred",
+                reason="no complete source subtitle",
+            )
         return
     if rejected_sources:
         with stats_lock:
@@ -1797,6 +1976,14 @@ def process_item(item: dict, item_type: str, id_field: str,
     media_id = lingarr_resolve_media_id(item_type, item_id)
     if media_id is None:
         print(f"{YELLOW}[SKIP] {title}: not found in Lingarr media cache (id={item_id}){RESET}")
+        for target_lang in target_langs:
+            _status_transition(
+                item_type,
+                item_id,
+                target_lang,
+                "deferred",
+                reason="media missing from Lingarr cache",
+            )
         return
 
     for target_lang in target_langs:
@@ -1808,6 +1995,13 @@ def process_item(item: dict, item_type: str, id_field: str,
             cooldown_remaining = RESUBMIT_COOLDOWN - age
             print(f"[SKIP] {title} '{target_lang}': submitted {age}s ago, "
                   f"cooldown {cooldown_remaining}s remaining")
+            _status_transition(
+                item_type,
+                item_id,
+                target_lang,
+                "deferred",
+                reason="resubmit cooldown",
+            )
             continue
 
         if video_path:
@@ -1816,6 +2010,13 @@ def process_item(item: dict, item_type: str, id_field: str,
             target_path = _derive_target_path(source_path, source_lang, target_lang)
         if not target_path:
             print(f"{YELLOW}[SKIP] {title} '{target_lang}': could not derive target path{RESET}")
+            _status_transition(
+                item_type,
+                item_id,
+                target_lang,
+                "deferred",
+                reason="target path unavailable",
+            )
             continue
 
         existing = _find_existing_target(video_path, target_lang) if video_path else (
@@ -1823,6 +2024,7 @@ def process_item(item: dict, item_type: str, id_field: str,
         )
         if existing:
             print(f"[DISK] {title} '{target_lang}': {os.path.basename(existing)} already on disk")
+            _status_transition(item_type, item_id, target_lang, "validating")
             validation_action, validation_report = _validate_translated_file(
                 source_path, existing, source_lang, target_lang, item_id, title=title,
                 defer_repair=True, item_type=item_type, media_duration=media_duration,
@@ -1849,6 +2051,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                     _record_cleanup_stats(stats, validation_action, validation_report)
                     if validation_action in ("quarantined", "deleted"):
                         _mark_activity(stats, item_type)
+            _status_finish_validation(item_type, item_id, target_lang, validation_action)
             continue
 
         while not shutdown_requested:
@@ -1863,6 +2066,7 @@ def process_item(item: dict, item_type: str, id_field: str,
 
         if os.path.exists(target_path):
             print(f"[DISK] {title} '{target_lang}': appeared during queue wait")
+            _status_transition(item_type, item_id, target_lang, "validating")
             validation_action, validation_report = _validate_translated_file(
                 source_path, target_path, source_lang, target_lang, item_id, title=title,
                 defer_repair=True, item_type=item_type, media_duration=media_duration,
@@ -1887,6 +2091,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                     _record_cleanup_stats(stats, validation_action, validation_report)
                     if validation_action in ("quarantined", "deleted"):
                         _mark_activity(stats, item_type)
+            _status_finish_validation(item_type, item_id, target_lang, validation_action)
             continue
 
         src_lines = _count_dialogue_lines(source_path)
@@ -1895,12 +2100,18 @@ def process_item(item: dict, item_type: str, id_field: str,
             with stats_lock:
                 stats.setdefault("deferred", 0)
                 stats["deferred"] += 1
+            _status_transition(
+                item_type, item_id, target_lang, "deferred", reason="source unreadable"
+            )
             continue
         if src_lines == 0:
             print(f"{YELLOW}[SKIP] {title} '{target_lang}': source has no dialogue lines{RESET}")
             with stats_lock:
                 stats.setdefault("deferred", 0)
                 stats["deferred"] += 1
+            _status_transition(
+                item_type, item_id, target_lang, "deferred", reason="source has no dialogue"
+            )
             continue
 
         print(f"[TRANSLATE] {title}: {source_lang} -> {target_lang} ({src_lines} lines)")
@@ -1908,9 +2119,13 @@ def process_item(item: dict, item_type: str, id_field: str,
         if job_id is None:
             with stats_lock:
                 stats["failed"] += 1
+            _status_transition(
+                item_type, item_id, target_lang, "failed", reason="Lingarr submission failed"
+            )
             continue
 
         _record_submission(item_id, target_lang, target_path)
+        _status_transition(item_type, item_id, target_lang, "translating")
         with stats_lock:
             stats["submitted"] += 1
             _mark_activity(stats, item_type)
@@ -1923,14 +2138,42 @@ def process_item(item: dict, item_type: str, id_field: str,
                     stats["timed_out"] += 1
                 else:
                     stats["failed"] += 1
+            if status is None and shutdown_requested:
+                _status_transition(
+                    item_type,
+                    item_id,
+                    target_lang,
+                    "deferred",
+                    reason="service shutdown",
+                )
+            elif status is None:
+                _status_transition(
+                    item_type, item_id, target_lang, "timed_out", reason="Lingarr timeout"
+                )
+            else:
+                _status_transition(
+                    item_type,
+                    item_id,
+                    target_lang,
+                    "failed",
+                    reason=f"Lingarr job {status.lower()}",
+                )
             continue
 
         if not os.path.exists(target_path):
             print(f"{YELLOW}[WARNING] {title} '{target_lang}': Lingarr completed but file missing at {target_path}{RESET}")
             with stats_lock:
                 stats["timed_out"] += 1
+            _status_transition(
+                item_type,
+                item_id,
+                target_lang,
+                "timed_out",
+                reason="completed output missing",
+            )
             continue
 
+        _status_transition(item_type, item_id, target_lang, "validating")
         validation_action, validation_report = _validate_translated_file(
             source_path, target_path, source_lang, target_lang, item_id, title=title,
             defer_repair=True, item_type=item_type, media_duration=media_duration,
@@ -1957,6 +2200,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                 stats.setdefault("cleaned", 0)
                 stats["cleaned"] += 1
                 _record_cleanup_stats(stats, validation_action, validation_report)
+        _status_finish_validation(item_type, item_id, target_lang, validation_action)
 
 # ---------------------------------------------------------------------------
 # Existing-library cleanup
@@ -2546,7 +2790,25 @@ def run_existing_cleanup_scan() -> dict:
 
 def _run_existing_cleanup_scan_safely() -> dict | None:
     try:
-        return run_existing_cleanup_scan()
+        stats = run_existing_cleanup_scan()
+        _status_record_maintenance({
+            "formatted": stats.get("formatted_files", 0),
+            "repaired": stats.get("repaired_files", 0),
+            "quarantined": (
+                stats.get("quarantined_files", 0)
+                + stats.get("undersized_quarantined", 0)
+                + stats.get("prune_quarantined", 0)
+            ),
+            "deleted": stats.get("deleted_files", 0) + stats.get("prune_deleted", 0),
+            "undersized": stats.get("undersized_detected", 0),
+            "pruned": stats.get("prune_quarantined", 0) + stats.get("prune_deleted", 0),
+            "failures": (
+                stats.get("repair_failures", 0)
+                + stats.get("action_failures", 0)
+                + stats.get("prune_failures", 0)
+            ),
+        })
+        return stats
     except Exception as e:
         print(f"{RED}[ERROR] Existing subtitle cleanup scan failed: {e}{RESET}")
         if DEBUG:
@@ -2570,11 +2832,12 @@ def run_retention_housekeeping() -> dict:
         "quarantine_files": len(quarantine_removed),
         "log_files": len(logs_removed),
         "state_entries": state_removed,
+        "status_events": _status_compact_history(),
     }
     print(
         f"[RETENTION] Removed {result['quarantine_files']} quarantine file(s), "
         f"{result['log_files']} log file(s), and {result['state_entries']} validation state record(s) "
-        f"older than {RETENTION_DAYS} days"
+        f"plus {result['status_events']} status event(s) beyond their retention window"
     )
     return result
 
@@ -2602,6 +2865,7 @@ def _drain_lingarr_queue() -> None:
 
 def run_cycle(cycle_num: int) -> None:
     print(f"\n{BOLD}{CYAN}===== Cycle #{cycle_num} ====={RESET}")
+    _status_set_phase("translating")
 
     lingarr_build_media_cache()
 
@@ -2625,6 +2889,10 @@ def run_cycle(cycle_num: int) -> None:
         work.append((ep, "episodes", "sonarrEpisodeId"))
     for mv in fetch_wanted("movies"):
         work.append((mv, "movies", "radarrId"))
+    if _status_tracker is not None:
+        cycle_id = f"{int(time.time())}-{cycle_num}"
+        jobs = build_cycle_jobs(work, LANGUAGES, cycle_id, _item_title)
+        _status_start_cycle(cycle_id, cycle_num, jobs)
 
     if not work:
         print("[INFO] No wanted items found.")
@@ -2632,7 +2900,8 @@ def run_cycle(cycle_num: int) -> None:
         print(f"[INFO] Processing {len(work)} item(s) with {PARALLEL_TRANSLATES} worker(s)...")
         with ThreadPoolExecutor(max_workers=PARALLEL_TRANSLATES) as executor:
             futures = {
-                executor.submit(process_item, item, itype, ifield, stats, stats_lock): (item, itype)
+                executor.submit(process_item, item, itype, ifield, stats, stats_lock):
+                (item, itype, ifield)
                 for item, itype, ifield in work
             }
             for future in as_completed(futures):
@@ -2643,6 +2912,22 @@ def run_cycle(cycle_num: int) -> None:
                     future.result()
                 except Exception as e:
                     print(f"{RED}[ERROR] Worker exception: {e}{RESET}")
+                    item, item_type, id_field = futures[future]
+                    item_id = item.get(id_field)
+                    missing = {
+                        str(entry.get("code2", "")).strip().lower()
+                        for entry in item.get("missing_subtitles", [])
+                        if isinstance(entry, dict)
+                    }
+                    for language in LANGUAGES:
+                        if language in missing:
+                            _status_transition(
+                                item_type,
+                                item_id,
+                                language,
+                                "failed",
+                                reason="translation worker exception",
+                            )
 
     repair_results: list[RepairJobResult] = []
     pending_count = len(_pending_repairs)
@@ -2703,6 +2988,7 @@ def run_cycle(cycle_num: int) -> None:
         or stats["movie_activity"]
     )
     if had_activity and not shutdown_requested:
+        _status_set_phase("synchronization")
         had_episodes = stats["episode_activity"]
         had_movies = stats["movie_activity"]
         trigger_bazarr_sync(had_episodes, had_movies)
@@ -2724,12 +3010,40 @@ def run_cycle(cycle_num: int) -> None:
                 print(f"{YELLOW}[WARNING] Bazarr still does not list repaired subtitle for {result.title} '{result.target_lang}'{RESET}")
 
     _drain_lingarr_queue()
+    _status_finish_cycle()
 
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    global _status_tracker
+    status_server = None
+    if STATUS_ENABLED:
+        try:
+            _status_tracker = StatusTracker(
+                STATUS_SNAPSHOT_FILE,
+                STATUS_HISTORY_FILE,
+                retention_days=STATUS_HISTORY_RETENTION_DAYS,
+                recent_limit=STATUS_RECENT_LIMIT,
+            )
+            try:
+                status_server, _ = start_status_server(
+                    _status_tracker, STATUS_BIND, STATUS_PORT
+                )
+                print(f"[STATUS] Dashboard listening on http://{STATUS_BIND}:{STATUS_PORT}")
+            except OSError as exc:
+                print(
+                    f"{YELLOW}[STATUS] Dashboard port unavailable "
+                    f"({STATUS_BIND}:{STATUS_PORT}): {exc}; translations will continue{RESET}"
+                )
+        except OSError as exc:
+            _status_tracker = None
+            print(
+                f"{YELLOW}[STATUS] Could not initialize persistent status state: "
+                f"{exc}; translations will continue{RESET}"
+            )
+
     print(f"\n{BOLD}Bazarr AutoTranslate starting{RESET}")
     print(f"  Bazarr URL        : {BAZARR_URL}")
     print(f"  Lingarr URL       : {LINGARR_URL}")
@@ -2751,6 +3065,9 @@ def main() -> int:
           f"{CLEANUP_MIN_BYTES_PER_MINUTE:g} bytes/min, "
           f"{CLEANUP_MIN_TIMELINE_COVERAGE:.0%} timeline")
     print(f"  Retention         : {RETENTION_DAYS} days (checked every {RETENTION_CHECK_INTERVAL}s)")
+    print(f"  Status dashboard  : {'ON' if STATUS_ENABLED else 'off'}"
+          + (f" on {STATUS_BIND}:{STATUS_PORT}" if STATUS_ENABLED else ""))
+    print(f"  Status retention  : {STATUS_HISTORY_RETENTION_DAYS} days")
     print(f"  Parallel workers  : {PARALLEL_TRANSLATES}")
     print(f"  Check interval    : {CHECK_INTERVAL}s (after Bazarr sync)")
     print(f"  Poll interval     : {POLL_INTERVAL}s  (floor {POLL_TIMEOUT}s per translation)")
@@ -2777,11 +3094,13 @@ def main() -> int:
 
     if not shutdown_requested:
         print("[INFO] Running initial Bazarr subtitle synchronization...")
+        _status_set_phase("synchronization")
         trigger_bazarr_sync(True, True)
         wait_for_bazarr_sync(True, True, SYNC_TIMEOUT)
 
     last_cleanup_scan = 0.0
     if not shutdown_requested and CLEANUP_SCAN_EXISTING:
+        _status_set_phase("cleanup")
         _run_existing_cleanup_scan_safely()
         last_cleanup_scan = time.monotonic()
 
@@ -2795,6 +3114,7 @@ def main() -> int:
             and last_cleanup_scan > 0
             and time.monotonic() - last_cleanup_scan >= CLEANUP_SCAN_INTERVAL
         ):
+            _status_set_phase("cleanup")
             _run_existing_cleanup_scan_safely()
             last_cleanup_scan = time.monotonic()
         run_cycle(cycle)
@@ -2802,12 +3122,17 @@ def main() -> int:
         if shutdown_requested:
             break
         print(f"[INFO] Next cycle in {CHECK_INTERVAL}s...")
+        _status_set_phase("sleeping", next_cycle_at=time.time() + CHECK_INTERVAL)
         for _ in range(CHECK_INTERVAL):
             if shutdown_requested:
                 break
             time.sleep(1)
 
     _shutdown_repair_executor()
+    _status_set_phase("shutdown")
+    if status_server is not None:
+        status_server.shutdown()
+        status_server.server_close()
     print("[INFO] Bazarr AutoTranslate stopped cleanly.")
     return 0
 

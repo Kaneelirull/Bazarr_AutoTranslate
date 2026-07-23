@@ -406,6 +406,89 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertTrue(swedish.exists())
             self.assertEqual(stats["cleanup_alternative_sources"], 1)
 
+    def test_status_accepts_only_after_lingarr_output_validates(self):
+        class Recorder:
+            def __init__(self):
+                self.states = []
+
+            def transition_for(
+                self, item_type, item_id, target_language, state, **kwargs
+            ):
+                self.states.append((state, kwargs))
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            source = root / "movie.en.srt"
+            target = root / "movie.et.srt"
+            video.write_bytes(b"video")
+            source.write_text(make_srt("English dialogue"), encoding="utf-8")
+            item = {
+                "radarrId": 7,
+                "title": "Movie",
+                "missing_subtitles": [{"code2": "et"}],
+            }
+            subtitles = [{"code2": "en", "path": str(source), "forced": False}]
+            recorder = Recorder()
+            stats = defaultdict(int)
+            stats["translations"] = []
+            stats["episode_activity"] = False
+            stats["movie_activity"] = False
+
+            def completed(*_args):
+                target.write_text(make_srt("Tere"), encoding="utf-8")
+                return "Completed"
+
+            report = SimpleNamespace(issues=[])
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et"],
+                    CLEANUP_UNDERSIZED_ENABLED=False,
+                    _status_tracker=recorder,
+                    fetch_subtitles=lambda *_args: (str(video), subtitles),
+                    lingarr_resolve_media_id=lambda *_args: 99,
+                    lingarr_active_count=lambda: 0,
+                    lingarr_submit_file=lambda *_args: 123,
+                    lingarr_poll_job=completed,
+                    _count_dialogue_lines=lambda _path: 1,
+                    _estimate_timeout=lambda _path: 60,
+                    _record_submission=lambda *_args: None,
+                    _validate_translated_file=lambda *_args, **_kwargs: ("valid", report),
+                ),
+            ):
+                app.process_item(item, "movies", "radarrId", stats, threading.Lock())
+
+            states = [state for state, _ in recorder.states]
+            self.assertEqual(states, ["translating", "validating", "accepted"])
+            self.assertEqual(stats["completed"], 1)
+
+    def test_status_marks_repaired_validation_as_accepted_subtype(self):
+        class Recorder:
+            def __init__(self):
+                self.calls = []
+
+            def transition_for(self, *_args, **kwargs):
+                self.calls.append((_args[-1], kwargs))
+                return True
+
+        recorder = Recorder()
+        with patch.object(app, "_status_tracker", recorder):
+            app._status_finish_validation("movies", 7, "et", "repaired")
+
+        self.assertEqual(recorder.calls, [("accepted", {"repaired": True, "reason": None})])
+
+    def test_status_persistence_failure_does_not_stop_translation_flow(self):
+        class BrokenTracker:
+            def transition_for(self, *_args, **_kwargs):
+                raise OSError("disk full")
+
+        with patch.object(app, "_status_tracker", BrokenTracker()):
+            updated = app._status_transition("movies", 7, "et", "translating")
+
+        self.assertFalse(updated)
+
     def test_ffprobe_failure_returns_safe_none(self):
         with tempfile.TemporaryDirectory() as directory:
             video = Path(directory) / "movie.mkv"

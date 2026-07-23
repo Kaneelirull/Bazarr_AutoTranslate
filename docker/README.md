@@ -2,6 +2,8 @@
 
 Continuously monitors Bazarr for missing subtitles and translates them through Lingarr's direct API. It also validates new and existing target-language subtitles, repairs isolated bad cues, and quarantines files that cannot be repaired safely.
 
+The container includes a read-only status dashboard at `http://<docker-host>:8765`. It is intentionally manual-refresh and intended for a trusted LAN.
+
 ## How it works
 
 1. Synchronizes Bazarr's subtitle inventory.
@@ -86,6 +88,32 @@ Existing-library cleanup runs after startup synchronization and then on its own 
 | `RETENTION_DAYS` | `30` | Maximum age for quarantine files, reports, application logs, and validation-state records |
 | `RETENTION_CHECK_INTERVAL` | `3600` | Seconds between retention checks; cleanup also runs at startup |
 | `LOG_DIR` | `/var/log/bazarr-autotranslate` | Daily application log directory |
+
+## Translation status dashboard
+
+The status page shows one queue entry per missing target language. Its initial count is fixed when the Bazarr wanted queue is read. A Lingarr submission is shown as `translating`; it becomes `accepted` only after the resulting subtitle passes local validation. `Done` includes accepted, failed, timed-out, deferred, and quarantined jobs, while `Remaining` contains queued, translating, validating, and repairing work.
+
+The page includes the current or most recently completed cycle, active jobs, the next ten jobs, the latest twenty outcomes, and exact rolling 1-hour, 6-hour, 12-hour, 24-hour, and 7-day totals. Existing-library repairs, quarantines, undersized detections, and sidecar pruning are reported separately as maintenance activity.
+
+| Variable | Default | Description |
+|---|---|---|
+| `STATUS_ENABLED` | `true` | Start the read-only status server |
+| `STATUS_BIND` | `0.0.0.0` | Container interface used by the status server |
+| `STATUS_PORT` | `8765` | Container and published host port |
+| `STATUS_HISTORY_RETENTION_DAYS` | `30` | Status-event retention; minimum 7 days |
+| `STATUS_RECENT_LIMIT` | `20` | Recent terminal jobs displayed and returned |
+
+Endpoints:
+
+- `/` — server-rendered dashboard with a manual Refresh button
+- `/api/status` — the same snapshot as JSON
+- `/healthz` — status-server health and current worker phase
+
+The stable JSON sections are `generatedAt`, `service`, `currentCycle`, `activeJobs`, `upNext`, `recentOutcomes`, `history`, and `maintenance`. No filesystem paths, subtitle text, or credentials are returned.
+
+Current state is atomically written to `/config/status.json`; terminal history is appended to `/config/status_history.jsonl`. Both survive container recreation through the existing `/config` volume. Active jobs found after a restart are finalized as deferred with an interruption reason. Status history is compacted during normal retention housekeeping.
+
+The dashboard has no authentication. Keep port `8765` restricted to a trusted LAN or protect it with your firewall/reverse proxy. Set `STATUS_ENABLED=false` to disable the listener. A port-binding or status-file failure is non-fatal and does not stop translations.
 
 Completeness scanning covers regular subtitles in every language, including HI, SDH, numbered, and language-less sidecars. Files explicitly labelled `forced`, `foreign`, `signs`, or `commentary` are exempt. A file is undersized only when at least three configured density/coverage signals fail; an unavailable duration is a safe skip.
 

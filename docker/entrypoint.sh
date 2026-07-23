@@ -10,5 +10,6 @@ echo "  - Parallel workers: ${PARALLEL_TRANSLATES:-1}"
 echo "  - Check Interval: ${CHECK_INTERVAL:-1200}s"
 echo "  - Cleanup languages: ${CLEANUP_LANGUAGES:-et}"
 echo "  - Prune extra SRT languages: ${CLEANUP_PRUNE_EXTRA_LANGUAGES:-true} (${CLEANUP_PRUNE_ACTION:-quarantine})"
+echo "  - Status dashboard: ${STATUS_ENABLED:-true} on ${STATUS_BIND:-0.0.0.0}:${STATUS_PORT:-8765}"
 
 exec python3 -u /app/Bazarr_AutoTranslate.py
