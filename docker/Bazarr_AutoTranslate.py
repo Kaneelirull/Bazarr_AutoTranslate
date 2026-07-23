@@ -2355,6 +2355,54 @@ def _get_repair_executor() -> ThreadPoolExecutor:
         return _repair_executor
 
 
+def _publish_repair_status(future: Future, metadata: dict) -> None:
+    """Publish a repair's terminal dashboard state without draining its future."""
+    try:
+        result = future.result()
+    except Exception:
+        _status_transition(
+            metadata.get("item_type"),
+            metadata.get("item_id"),
+            metadata.get("target_lang", ""),
+            "failed",
+            reason="repair worker failed",
+        )
+        return
+
+    if result.action == "repaired":
+        _status_transition(
+            result.item_type,
+            result.item_id,
+            result.target_lang,
+            "accepted",
+            repaired=True,
+        )
+    elif result.action in ("quarantined", "deleted"):
+        _status_transition(
+            result.item_type,
+            result.item_id,
+            result.target_lang,
+            "quarantined",
+            reason=result.action,
+        )
+    elif result.action == "repair-deferred":
+        _status_transition(
+            result.item_type,
+            result.item_id,
+            result.target_lang,
+            "deferred",
+            reason="repair deferred",
+        )
+    else:
+        _status_transition(
+            result.item_type,
+            result.item_id,
+            result.target_lang,
+            "failed",
+            reason=f"repair {result.action}",
+        )
+
+
 def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, target_lang: str) -> str:
     with _pending_repairs_lock:
         if repair_key in _repair_keys:
@@ -2370,7 +2418,7 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             _repair_keys.discard(repair_key)
             _repair_capacity.release()
             raise
-        _pending_repairs[future] = {
+        metadata = {
             "key": repair_key,
             "report": report,
             "target_path": job_kwargs.get("target_path"),
@@ -2378,6 +2426,12 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             "item_id": job_kwargs.get("item_id"),
             "target_lang": job_kwargs.get("target_lang"),
         }
+        _pending_repairs[future] = metadata
+    future.add_done_callback(
+        lambda completed, repair_metadata=metadata: _publish_repair_status(
+            completed, repair_metadata
+        )
+    )
     for index in report.repairable_cue_indexes:
         print(f"[REPAIR] Queued {label} '{target_lang}' cue position {index + 1}")
     return "repair-queued"
@@ -2397,26 +2451,14 @@ def _drain_pending_repairs(stats: dict) -> list[RepairJobResult]:
         except Exception as exc:
             print(f"{RED}[ERROR] Repair worker failed: {exc}{RESET}")
             stats["cleanup_repair_failures"] = stats.get("cleanup_repair_failures", 0) + 1
-            _status_transition(
-                metadata.get("item_type"),
-                metadata.get("item_id"),
-                metadata.get("target_lang", ""),
-                "failed",
-                reason="repair worker failed",
-            )
+            _publish_repair_status(future, metadata)
             continue
         results.append(result)
+        _publish_repair_status(future, metadata)
         stats["cleanup_repair_attempts"] = stats.get("cleanup_repair_attempts", 0) + result.attempts
         stats["cleanup_second_attempts"] = stats.get("cleanup_second_attempts", 0) + result.second_attempts
         _record_cleanup_stats(stats, result.action, result.report)
         if result.action == "repaired":
-            _status_transition(
-                result.item_type,
-                result.item_id,
-                result.target_lang,
-                "accepted",
-                repaired=True,
-            )
             stats["completed"] += 1
             stats["translations"].append(f"{result.title}: repaired {result.target_lang}")
             if result.item_type:
@@ -2425,13 +2467,6 @@ def _drain_pending_repairs(stats: dict) -> list[RepairJobResult]:
                 stats["episode_activity"] = True
                 stats["movie_activity"] = True
         elif result.action in ("quarantined", "deleted"):
-            _status_transition(
-                result.item_type,
-                result.item_id,
-                result.target_lang,
-                "quarantined",
-                reason=result.action,
-            )
             stats["failed"] += 1
             stats["cleaned"] = stats.get("cleaned", 0) + 1
             if result.item_type:
@@ -2440,22 +2475,7 @@ def _drain_pending_repairs(stats: dict) -> list[RepairJobResult]:
                 stats["episode_activity"] = True
                 stats["movie_activity"] = True
         elif result.action == "repair-deferred":
-            _status_transition(
-                result.item_type,
-                result.item_id,
-                result.target_lang,
-                "deferred",
-                reason="repair deferred",
-            )
             stats["cleanup_repair_deferred"] = stats.get("cleanup_repair_deferred", 0) + 1
-        else:
-            _status_transition(
-                result.item_type,
-                result.item_id,
-                result.target_lang,
-                "failed",
-                reason=f"repair {result.action}",
-            )
     return results
 
 

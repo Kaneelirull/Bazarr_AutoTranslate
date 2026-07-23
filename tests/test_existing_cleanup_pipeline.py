@@ -4,6 +4,7 @@ import io
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from collections import defaultdict
 from types import SimpleNamespace
@@ -1240,6 +1241,143 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(stats["completed"], 1)
         self.assertTrue(stats["episode_activity"])
+
+    def test_repair_completion_updates_status_before_cycle_drain(self):
+        started = threading.Event()
+        release = threading.Event()
+        report = SimpleNamespace(repairable_cue_indexes=[0], issues=[])
+
+        def worker(**kwargs):
+            started.set()
+            release.wait(2)
+            return app.RepairJobResult(
+                "repaired", report, "Repair Show", "et", "episodes", 42,
+                attempts=1, target_path="repair-show.et.srt",
+            )
+
+        work = [
+            ({
+                "sonarrEpisodeId": 42,
+                "seriesTitle": "Repair Show",
+                "missing_subtitles": [{"code2": "et"}],
+            }, "episodes", "sonarrEpisodeId"),
+            ({
+                "sonarrEpisodeId": 43,
+                "seriesTitle": "Still Translating",
+                "missing_subtitles": [{"code2": "et"}],
+            }, "episodes", "sonarrEpisodeId"),
+        ]
+        jobs = app.build_cycle_jobs(
+            work, ["et"], "cycle-repair", lambda item, _kind: item["seriesTitle"]
+        )
+        stats = {
+            "submitted": 0,
+            "completed": 0,
+            "failed": 0,
+            "translations": [],
+            "episode_activity": False,
+            "movie_activity": False,
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = app.StatusTracker(
+                Path(directory) / "status.json",
+                Path(directory) / "status_history.jsonl",
+            )
+            tracker.start_cycle("cycle-repair", 1, jobs)
+            tracker.transition_for("episodes", 42, "et", "repairing")
+            tracker.transition_for("episodes", 43, "et", "translating")
+
+            with (
+                patch.object(app, "_status_tracker", tracker),
+                patch.object(app, "_perform_repair", side_effect=worker),
+                patch.object(app, "_repair_capacity", threading.BoundedSemaphore(2)),
+            ):
+                queued = app._queue_repair(
+                    ("repair-show", "hash"), {}, report, "Repair Show", "et"
+                )
+                self.assertEqual(queued, "repair-queued")
+                self.assertTrue(started.wait(1))
+                release.set()
+
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    snapshot = tracker.snapshot()
+                    if snapshot["currentCycle"]["accepted"] == 1:
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail("repair status did not become terminal after worker completion")
+
+                self.assertEqual(snapshot["currentCycle"]["repairing"], 0)
+                self.assertEqual(snapshot["currentCycle"]["translating"], 1)
+                self.assertEqual(snapshot["currentCycle"]["accepted"], 1)
+                self.assertEqual(
+                    [(job["itemId"], job["state"]) for job in snapshot["activeJobs"]],
+                    [(43, "translating")],
+                )
+                self.assertTrue(snapshot["recentOutcomes"][0]["repaired"])
+                self.assertEqual(snapshot["history"]["1h"]["accepted"], 1)
+                self.assertEqual(snapshot["history"]["1h"]["repaired"], 1)
+                self.assertEqual(stats["completed"], 0)
+
+                results = app._drain_pending_repairs(stats)
+                drained_snapshot = tracker.snapshot()
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(stats["completed"], 1)
+            self.assertEqual(drained_snapshot["history"]["1h"]["accepted"], 1)
+            self.assertEqual(len(drained_snapshot["recentOutcomes"]), 1)
+
+    def test_repair_status_maps_terminal_outcomes_and_worker_errors(self):
+        class Recorder:
+            def __init__(self):
+                self.calls = []
+
+            def transition_for(self, *args, **kwargs):
+                self.calls.append((args[-1], kwargs))
+                return True
+
+        report = SimpleNamespace(repairable_cue_indexes=[], issues=[])
+        outcomes = [
+            ("repaired", "accepted", {"repaired": True, "reason": None}),
+            ("quarantined", "quarantined", {
+                "repaired": False, "reason": "quarantined",
+            }),
+            ("deleted", "quarantined", {
+                "repaired": False, "reason": "deleted",
+            }),
+            ("repair-deferred", "deferred", {
+                "repaired": False, "reason": "repair deferred",
+            }),
+            ("kept", "failed", {
+                "repaired": False, "reason": "repair kept",
+            }),
+        ]
+        metadata = {
+            "item_type": "episodes",
+            "item_id": 42,
+            "target_lang": "et",
+        }
+        recorder = Recorder()
+        with patch.object(app, "_status_tracker", recorder):
+            for action, _state, _kwargs in outcomes:
+                future = app.Future()
+                future.set_result(app.RepairJobResult(
+                    action, report, "show", "et", "episodes", 42
+                ))
+                app._publish_repair_status(future, metadata)
+
+            failed_future = app.Future()
+            failed_future.set_exception(RuntimeError("boom"))
+            app._publish_repair_status(failed_future, metadata)
+
+        expected = [(state, kwargs) for _action, state, kwargs in outcomes]
+        expected.append((
+            "failed",
+            {"repaired": False, "reason": "repair worker failed"},
+        ))
+        self.assertEqual(recorder.calls, expected)
 
     def test_repair_queue_overflow_is_deferred(self):
         started = threading.Event()
