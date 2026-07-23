@@ -17,6 +17,9 @@ sys.path.insert(0, str(REPO_ROOT / "docker"))
 os.environ.setdefault("BAZARR_URL", "http://bazarr:6767")
 os.environ.setdefault("BAZARR_API_KEY", "test")
 os.environ.setdefault("LINGARR_URL", "http://lingarr:8080")
+os.environ.setdefault(
+    "LOG_DIR", str(Path(tempfile.gettempdir()) / "bazarr-autotranslate-tests")
+)
 
 import Bazarr_AutoTranslate as app  # noqa: E402
 from clean_et_subs import ValidationStateStore  # noqa: E402
@@ -47,6 +50,7 @@ def make_timed_srt(cue_count: int, final_second: int, text: str = "Dialogue line
 class ExistingCleanupPipelineTests(unittest.TestCase):
     def tearDown(self):
         app._shutdown_repair_executor()
+        app._translation_capacity.reset()
         with app._pending_repairs_lock:
             app._pending_repairs.clear()
             app._repair_keys.clear()
@@ -542,7 +546,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                     _status_tracker=recorder,
                     fetch_subtitles=lambda *_args: (str(video), subtitles),
                     lingarr_resolve_media_id=lambda *_args: 99,
-                    lingarr_active_count=lambda: 0,
+                    lingarr_get_active_translations=lambda: [],
                     lingarr_submit_file=lambda *_args: 123,
                     lingarr_poll_job=completed,
                     _count_dialogue_lines=lambda _path: 1,
@@ -582,23 +586,28 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 return "Completed"
 
             report = SimpleNamespace(issues=[])
-            with patch.multiple(
-                app,
-                LANGUAGES=["en", "et"],
-                CLEANUP_UNDERSIZED_ENABLED=False,
-                SUBMIT_CACHE_FILE=str(root / "submitted_cache.json"),
-                _submitted_cache={},
-                _submitted_paths={},
-                _submitted_metadata={},
-                _validation_state=state,
-                fetch_subtitles=lambda *_args: (str(video), subtitles),
-                lingarr_resolve_media_id=lambda *_args: 99,
-                lingarr_active_count=lambda: 0,
-                lingarr_submit_file=lambda *_args: 123,
-                lingarr_poll_job=completed,
-                _count_dialogue_lines=lambda _path: 1,
-                _estimate_timeout=lambda _path: 60,
-                _validate_translated_file=lambda *_args, **_kwargs: ("valid", report),
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et"],
+                    CLEANUP_UNDERSIZED_ENABLED=False,
+                    SUBMIT_CACHE_FILE=str(root / "submitted_cache.json"),
+                    _submitted_cache={},
+                    _submitted_paths={},
+                    _submitted_metadata={},
+                    _validation_state=state,
+                    fetch_subtitles=lambda *_args: (str(video), subtitles),
+                    lingarr_resolve_media_id=lambda *_args: 99,
+                    lingarr_get_active_translations=lambda: [],
+                    lingarr_submit_file=lambda *_args: 123,
+                    lingarr_poll_job=completed,
+                    _count_dialogue_lines=lambda _path: 1,
+                    _estimate_timeout=lambda _path: 60,
+                    _validate_translated_file=lambda *_args, **_kwargs: ("valid", report),
+                ),
+                patch.object(
+                    app, "_normalize_managed_output", return_value=True
+                ) as normalize_output,
             ):
                 app.process_item(item, "movies", "radarrId", stats, threading.Lock())
                 metadata = dict(app._submitted_metadata[(7, "et")])
@@ -608,6 +617,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(metadata["expectedTargetPath"], str(target))
             self.assertEqual(metadata["actualTargetPath"], str(target))
             self.assertEqual(metadata["targetVariant"], ".hi")
+            normalize_output.assert_called_once_with(str(target), "Movie")
             self.assertEqual(state.matching_origin(target, app._file_hash_or_none(target)), "lingarr")
 
     def test_status_marks_repaired_validation_as_accepted_subtype(self):
@@ -773,6 +783,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                     "et",
                     None,
                     origin="lingarr",
+                    provenance_source_hash=app._file_hash_or_none(source),
                 )
 
             self.assertEqual(action, "reported")
@@ -803,11 +814,23 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             )
             with patch.multiple(app, **common):
                 first_action, first_report = app._validate_translated_file(
-                    str(source), str(target), "en", "et", 7, origin="lingarr"
+                    str(source),
+                    str(target),
+                    "en",
+                    "et",
+                    7,
+                    origin="lingarr",
+                    provenance_source_hash=app._file_hash_or_none(source),
                 )
                 target.write_text(invalid, encoding="utf-8")
                 second_action, second_report = app._validate_translated_file(
-                    str(source), str(target), "en", "et", 7, origin="lingarr"
+                    str(source),
+                    str(target),
+                    "en",
+                    "et",
+                    7,
+                    origin="lingarr",
+                    provenance_source_hash=app._file_hash_or_none(source),
                 )
 
             self.assertEqual(first_action, "quarantined")
@@ -960,6 +983,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                     None,
                     media_duration=3600.0,
                     origin="lingarr",
+                    provenance_source_hash=app._file_hash_or_none(source),
                 )
 
             self.assertEqual(action, "quarantined")
@@ -1019,7 +1043,14 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 patch.object(app, "lingarr_translate_line") as translate,
             ):
                 action, report = app._validate_translated_file(
-                    str(source), str(target), "en", "et", None, title="show", origin="lingarr"
+                    str(source),
+                    str(target),
+                    "en",
+                    "et",
+                    None,
+                    title="show",
+                    origin="lingarr",
+                    provenance_source_hash=app._file_hash_or_none(source),
                 )
 
             self.assertEqual(action, "formatted")
@@ -1062,7 +1093,14 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 redirect_stdout(output),
             ):
                 action, _ = app._validate_translated_file(
-                    str(source), str(target), "en", "et", None, title="show", origin="lingarr"
+                    str(source),
+                    str(target),
+                    "en",
+                    "et",
+                    None,
+                    title="show",
+                    origin="lingarr",
+                    provenance_source_hash=app._file_hash_or_none(source),
                 )
 
             logs = output.getvalue()

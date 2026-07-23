@@ -18,6 +18,20 @@ from typing import Callable, Iterable, Optional, Tuple
 
 from lingua import Language, LanguageDetectorBuilder
 
+MANAGED_FILE_UID = 568
+MANAGED_FILE_GID = 568
+MANAGED_FILE_MODE = 0o664
+
+
+def normalize_managed_file(path: Path | str) -> None:
+    """Apply the ownership contract for subtitle artifacts created by the service."""
+    managed_path = Path(path)
+    if os.name != "posix":
+        return
+    os.chown(managed_path, MANAGED_FILE_UID, MANAGED_FILE_GID)
+    os.chmod(managed_path, MANAGED_FILE_MODE)
+
+
 # Global flag for graceful shutdown (used by CLI only)
 shutdown_requested = False
 
@@ -1143,6 +1157,7 @@ def repair_subtitle_file(
                 False, repaired_numbers, final_report, final_report.summary(), attempt_count, attempt_history
             )
 
+        normalize_managed_file(temp_name)
         os.replace(temp_name, target)
         temp_name = None
         return RepairResult(
@@ -1584,13 +1599,35 @@ def quarantine_subtitle(
             f"{base_destination.stem}.{counter}{base_destination.suffix}"
         )
         counter += 1
+    normalize_managed_file(source)
     shutil.move(str(source), str(destination))
     return destination
 
 
 def write_validation_report(path: Path | str, payload: dict) -> Path:
     report_path = Path(f"{path}.validation.json")
-    report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            prefix=f".{report_path.name}.",
+            suffix=".tmp",
+            dir=report_path.parent,
+            delete=False,
+        ) as report_file:
+            json.dump(payload, report_file, ensure_ascii=False, indent=2)
+            temp_path = Path(report_file.name)
+        normalize_managed_file(temp_path)
+        os.replace(temp_path, report_path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
     return report_path
 
 

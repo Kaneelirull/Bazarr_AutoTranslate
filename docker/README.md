@@ -14,14 +14,18 @@ The container includes a read-only status dashboard at `http://<docker-host>:876
 6. Validates translated cues against the source, including structure, language, writing system, prompt leakage, character expansion, and physical line count.
 7. Sends only remaining invalid cues through a dedicated Lingarr line-repair worker. The first attempt uses bounded context; the second uses no context.
 8. Once every managed language is valid, quarantines recognized extra-language and unmanaged special-purpose SRT sidecars.
-9. Quarantines translations that remain invalid and triggers Bazarr subtitle rescans after repair, quarantine, or pruning.
+9. Normalizes managed subtitle artifacts to UID/GID `568:568` with mode `0664`.
+10. Quarantines translations that remain invalid and triggers Bazarr subtitle rescans after repair, quarantine, or pruning.
 
 Translation timeout is calculated dynamically from the source subtitle's dialogue line count.
 
 ## Requirements
 
 - Bazarr with readable subtitle paths under the shared media mount
-- Lingarr running and reachable through its direct API
+- Lingarr running and reachable through its direct API, with the same media
+  library mounted at the same `/media` path
+- A host filesystem that permits the application container to set subtitle
+  ownership to `568:568`
 - Docker Compose
 
 ## Setup
@@ -38,13 +42,13 @@ docker compose up -d
 |---|---|---|
 | `BAZARR_URL` | required | Bazarr URL, such as `http://192.168.1.100:6767` |
 | `BAZARR_API_KEY` | required | Bazarr API key |
-| `MEDIA_PATH` | required | Host media path mounted at `/media` |
+| `MEDIA_PATH` | required | Host media path mounted at `/media` in both containers |
 | `LINGARR_URL` | `http://lingarr:8080` | Lingarr URL |
 | `LINGARR_API_KEY` | empty | Optional Lingarr API key |
 | `LANGUAGES` | `en,et,sv` | Managed languages in source-priority order |
-| `PARALLEL_TRANSLATES` | `1` | Concurrent translation workers |
+| `PARALLEL_TRANSLATES` | `1` | Verified global active-translation limit |
 | `CHECK_INTERVAL` | `1200` | Seconds between wanted-subtitle cycles |
-| `POLL_TIMEOUT` | `600` | Minimum per-file translation timeout |
+| `POLL_TIMEOUT` | `900` | Minimum per-file translation timeout |
 | `RESUBMIT_COOLDOWN` | `3600` | Minimum delay before resubmitting an item/language pair |
 
 ## Subtitle validation, repair, and cleanup
