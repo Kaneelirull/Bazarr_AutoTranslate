@@ -22,6 +22,7 @@ os.environ.setdefault(
 )
 
 import Bazarr_AutoTranslate as app  # noqa: E402
+import clean_et_subs as cleanup  # noqa: E402
 from clean_et_subs import ValidationStateStore  # noqa: E402
 
 
@@ -48,12 +49,19 @@ def make_timed_srt(cue_count: int, final_second: int, text: str = "Dialogue line
 
 
 class ExistingCleanupPipelineTests(unittest.TestCase):
+    def setUp(self):
+        self._permissions_patcher = patch.object(
+            cleanup, "normalize_managed_file", lambda _path: None
+        )
+        self._permissions_patcher.start()
+
     def tearDown(self):
         app._shutdown_repair_executor()
         app._translation_capacity.reset()
         with app._pending_repairs_lock:
             app._pending_repairs.clear()
             app._repair_keys.clear()
+        self._permissions_patcher.stop()
 
     def test_cooldown_can_be_cleared_by_removed_target_path(self):
         with tempfile.TemporaryDirectory() as directory:

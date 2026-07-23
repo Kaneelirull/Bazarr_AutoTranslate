@@ -6,11 +6,13 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "docker"))
 
+import clean_et_subs as cleanup  # noqa: E402
 from clean_et_subs import (  # noqa: E402
     SubtitleCue,
     ValidationStateStore,
@@ -56,6 +58,15 @@ class SubtitleValidationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.detector = build_detector()
         cls.estonian = target_language_for_code("et")
+
+    def setUp(self):
+        self._permissions_patcher = patch.object(
+            cleanup, "normalize_managed_file", lambda _path: None
+        )
+        self._permissions_patcher.start()
+
+    def tearDown(self):
+        self._permissions_patcher.stop()
 
     def validate_pair(self, source: Path, target: Path):
         return validate_subtitle_pair(
