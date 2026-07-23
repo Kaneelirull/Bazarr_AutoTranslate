@@ -7,8 +7,10 @@ services:
       - "8080:8080"
     volumes:
       - lingarr_data:/app/config
+      - ${MEDIA_PATH}:/media
     environment:
       - TZ=${TZ:-Europe/Tallinn}
+      - MAX_CONCURRENT_JOBS=${PARALLEL_TRANSLATES:-1}
     # GPU passthrough (uncomment for NVIDIA):
     # deploy:
     #   resources:
@@ -43,7 +45,7 @@ services:
       - CHECK_INTERVAL=${CHECK_INTERVAL:-1200}
       - CONNECT_TIMEOUT=${CONNECT_TIMEOUT:-10}
       - POLL_INTERVAL=${POLL_INTERVAL:-20}
-      - POLL_TIMEOUT=${POLL_TIMEOUT:-600}
+      - POLL_TIMEOUT=${POLL_TIMEOUT:-900}
       - RESUBMIT_COOLDOWN=${RESUBMIT_COOLDOWN:-3600}
       - SYNC_TIMEOUT=${SYNC_TIMEOUT:-600}
       - SYNC_POLL_INTERVAL=${SYNC_POLL_INTERVAL:-15}

@@ -3,382 +3,181 @@
 [![Docker Hub](https://img.shields.io/docker/pulls/kaneelir0ll/bazarr-autotranslate.svg)](https://hub.docker.com/r/kaneelir0ll/bazarr-autotranslate)
 [![Docker Image Size](https://img.shields.io/docker/image-size/kaneelir0ll/bazarr-autotranslate/latest)](https://hub.docker.com/r/kaneelir0ll/bazarr-autotranslate)
 
-Automated subtitle translation service that continuously monitors your Bazarr instance, translates missing subtitles, and cleans up incorrectly detected subtitle files.
+Bazarr AutoTranslate watches Bazarr's wanted subtitle queues, submits translations
+to Lingarr, validates the resulting SRT files, and asks Bazarr to rescan changed
+media. It also performs scheduled validation and quarantine of malformed,
+contaminated, truncated, or unmanaged subtitle sidecars.
+
+This image is the current Lingarr-based application. It does not use the legacy
+`BAZARR_HOSTNAME`, `BAZARR_APIKEY`, `FIRST_LANG`, or
+`MAX_PARALLEL_TRANSLATIONS` settings.
 
 ## Features
 
-- **Completeness Validation**: Uses `ffprobe` plus cue, text, byte, and timeline density to quarantine forced/truncated fragments mislabeled as full subtitles
-- **Safe Provenance Rules**: Exact English cue alignment is enforced only for outputs recorded as created by Lingarr
-- **Variant-Aware Outputs**: Discovers actual HI, SDH, and numbered Lingarr outputs and recovers pending validation after restart
-- **Requeue Protection**: Warns on source-less line-only anomalies and holds repeated quarantined hashes for 30 days
-- **Managed Sidecar Pruning**: Once every `LANGUAGES` subtitle is validated, recognized extra-language SRTs are quarantined for 30 days while unknown files remain safe by default
-- **Status Dashboard**: Manual-refresh queue progress, active jobs, recent outcomes, and rolling 1-hour through 7-day throughput at port `8765`
+- Bazarr movie and episode wanted-queue monitoring
+- Lingarr file translation with a fail-closed concurrency limit
+- Source-provenance and target-language validation
+- Completeness checks using `ffprobe`, cue density, text density, and timeline coverage
+- Safe format recovery and targeted cue repair
+- Quarantine retention and repeat-invalid-output protection
+- Optional pruning of recognized unmanaged subtitle sidecars
+- Read-only translation status dashboard on port `8765`
+- Generated subtitle ownership normalized to UID/GID `568:568`, mode `0664`
 
-Key safety defaults:
+## Requirements
 
-```text
-CLEANUP_SOURCELESS_LINE_ONLY_ACTION=warn
-CLEANUP_QUARANTINE_HOLD_DAYS=30
+- A reachable Bazarr instance and API key
+- A reachable Lingarr instance
+- The same media library visible to Bazarr AutoTranslate and Lingarr at the same
+  in-container path, normally `/media`
+- A host filesystem that permits the container to set subtitle ownership to
+  `568:568`
+
+Path identity matters: if Bazarr reports `/media/movies/example.mkv`, both this
+container and Lingarr must see that file as `/media/movies/example.mkv`.
+
+## Docker Compose
+
+The repository includes a complete
+[`docker-compose.yml`](https://github.com/Kaneelirull/Bazarr_AutoTranslate/blob/main/docker/docker-compose.yml).
+Create a `.env` beside it:
+
+```env
+BAZARR_URL=http://192.168.1.100:6767
+BAZARR_API_KEY=replace-with-bazarr-api-key
+LINGARR_URL=http://lingarr:8080
+LINGARR_API_KEY=
+MEDIA_PATH=/mnt/tank/media
+
+LANGUAGES=en,et,sv
+PARALLEL_TRANSLATES=1
+TZ=Europe/Tallinn
 ```
 
-The first retains an independently segmented subtitle when excessive physical cue lines are its only issue. Strong contamination, structural, language, repetition, and completeness failures remain quarantine-worthy. The hold prevents the same invalid hash from repeatedly consuming AI repair and full-translation capacity; a changed replacement is validated immediately.
+Then start the stack:
 
-- 🔄 **Continuous Monitoring**: Automatically checks Bazarr API for missing subtitles every 5 minutes (configurable)
-- ⚡ **No Timeouts**: Processes all subtitles until complete, then checks again
-- 🧹 **Daily Cleanup**: Validates and removes incorrectly detected subtitle files
-- 🌍 **Multi-Language**: Supports translation from English to any target languages
-- ⚙️ **Fully Configurable**: All settings via environment variables
-- 🛡️ **Production Ready**: Graceful shutdown handling and automatic restart on failure
+```bash
+docker compose up -d
+docker compose logs -f bazarr-autotranslate
+```
 
-## Quick Start
+The bundled Compose file gives Lingarr and Bazarr AutoTranslate the same
+`MEDIA_PATH:/media` mount and sets Lingarr's `MAX_CONCURRENT_JOBS` to the same
+value as `PARALLEL_TRANSLATES`.
 
-### Using Docker Run
+## Docker Run
+
+Use this form when Bazarr and Lingarr already run elsewhere:
 
 ```bash
 docker run -d \
   --name bazarr-autotranslate \
   --restart unless-stopped \
-  -e BAZARR_HOSTNAME=192.168.1.100:6767 \
-  -e BAZARR_APIKEY=your_api_key_here \
-  -e FIRST_LANG=et \
-  -e SECOND_LANG=sv \
-  -v /path/to/your/media:/media \
+  -e BAZARR_URL=http://192.168.1.100:6767 \
+  -e BAZARR_API_KEY=replace-with-bazarr-api-key \
+  -e LINGARR_URL=http://192.168.1.100:8080 \
+  -e LINGARR_API_KEY= \
+  -e LANGUAGES=en,et,sv \
+  -e PARALLEL_TRANSLATES=1 \
+  -e TZ=Europe/Tallinn \
+  -v /mnt/tank/media:/media \
+  -v bazarr-autotranslate-data:/config \
+  -v /mnt/tank/app-logs/bazarr-autotranslate:/var/log/bazarr-autotranslate \
+  -p 8765:8765 \
   kaneelir0ll/bazarr-autotranslate:latest
 ```
 
-### Using Docker Compose
+## Core settings
 
-Create a `docker-compose.yml` file:
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `BAZARR_URL` | Yes | — | Bazarr base URL, including scheme and port |
+| `BAZARR_API_KEY` | Yes | — | Bazarr API key |
+| `LINGARR_URL` | Yes | — | Lingarr base URL, including scheme and port |
+| `LINGARR_API_KEY` | No | empty | Lingarr API key when authentication is enabled |
+| `LANGUAGES` | No | `en,et,sv` | Managed languages in source-priority order |
+| `PARALLEL_TRANSLATES` | No | `1` | Maximum verified active translations |
+| `CHECK_INTERVAL` | No | `1200` | Seconds between wanted-queue cycles |
+| `CONNECT_TIMEOUT` | No | `10` | External API timeout in seconds |
+| `POLL_INTERVAL` | No | `20` | Lingarr job polling interval |
+| `POLL_TIMEOUT` | No | `900` | Base translation timeout |
+| `RESUBMIT_COOLDOWN` | No | `3600` | Duplicate-submission cooldown |
 
-```yaml
-version: '3.8'
+API connection failures are retried with bounded backoff. Bazarr category
+failures are reported as degraded cycles instead of empty queues, and Lingarr
+capacity failures defer work instead of submitting without a verified slot.
 
-services:
-  bazarr-autotranslate:
-    image: kaneelir0ll/bazarr-autotranslate:latest
-    container_name: bazarr-autotranslate
-    restart: unless-stopped
-    environment:
-      # Required
-      - BAZARR_HOSTNAME=192.168.1.100:6767
-      - BAZARR_APIKEY=your_api_key_here
-      
-      # Optional (with defaults)
-      - FIRST_LANG=et
-      - SECOND_LANG=sv
-      - CHECK_INTERVAL=300
-      - CLEANUP_TIME=04:00
-    
-    volumes:
-      - /path/to/your/media:/media
+## Cleanup settings
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CLEANUP_LANGUAGES` | `et` | Languages receiving full content validation |
+| `CLEANUP_SCAN_EXISTING` | `true` | Enable scheduled existing-library scans |
+| `CLEANUP_SCAN_INTERVAL` | `21600` | Seconds between existing-library scans |
+| `CLEANUP_SCAN_DRY_RUN` | `false` | Report scan actions without changing files |
+| `CLEANUP_ROOT` | `/media` | Root path or path-separated roots to scan |
+| `CLEANUP_ACTION` | `quarantine` | `quarantine`, `delete`, or `report` |
+| `CLEANUP_QUARANTINE_DIR` | `/config/quarantine` | Quarantine destination |
+| `CLEANUP_QUARANTINE_HOLD_DAYS` | `30` | Repeat-invalid-output hold duration |
+| `CLEANUP_REPAIR_ENABLED` | `true` | Enable targeted Lingarr cue repair |
+| `CLEANUP_FORMAT_REPAIR_ENABLED` | `true` | Enable safe local SRT normalization |
+| `CLEANUP_UNDERSIZED_ENABLED` | `true` | Enable completeness validation |
+| `CLEANUP_PRUNE_EXTRA_LANGUAGES` | `true` | Prune recognized unmanaged languages once managed subtitles are valid |
+
+Additional validation thresholds are documented in the repository's
+[`docker/README.md`](https://github.com/Kaneelirull/Bazarr_AutoTranslate/blob/main/docker/README.md)
+and `.env.example`.
+
+## Status dashboard
+
+The dashboard is enabled by default:
+
+```text
+http://HOST:8765
 ```
 
-Then run:
+Relevant settings are `STATUS_ENABLED`, `STATUS_BIND`, `STATUS_PORT`,
+`STATUS_HISTORY_RETENTION_DAYS`, and `STATUS_RECENT_LIMIT`. The dashboard is
+read-only and requires manual refresh.
+
+## Persistent paths
+
+| Container path | Purpose |
+| --- | --- |
+| `/media` | Shared media and subtitle library |
+| `/config` | Submission cache, validation state, dashboard history, quarantine |
+| `/var/log/bazarr-autotranslate` | Daily application logs |
+
+Do not run the application container as an arbitrary non-root user. It must be
+able to correct Lingarr-created subtitle ownership to the managed
+`568:568/0664` contract.
+
+## Updating
 
 ```bash
-docker-compose up -d
+docker compose pull
+docker compose up -d
 ```
 
-## Environment Variables
-
-### Required Settings
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `BAZARR_HOSTNAME` | Bazarr server hostname and port | `localhost:6767` or `192.168.1.100:6767` |
-| `BAZARR_APIKEY` | Your Bazarr API key (found in Bazarr Settings → General) | `abc123def456...` |
-
-### Translation Settings (Optional)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `FIRST_LANG` | `et` | Primary target language code |
-| `SECOND_LANG` | `sv` | Secondary target language code (leave empty to disable) |
-| `MAX_PARALLEL_TRANSLATIONS` | `2` | Number of parallel translation jobs |
-| `TRANSLATE_DELAY` | `0.3` | Delay between translation API calls (seconds) |
-| `CHECK_INTERVAL` | `300` | Seconds to wait between checking for new missing subtitles |
-
-### API Settings (Optional)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `API_TIMEOUT` | `2400` | API request timeout in seconds |
-| `CONNECT_TIMEOUT` | `10` | Connection timeout in seconds |
-
-### Cleanup Settings (Optional)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CLEANUP_TIME` | `04:00` | Daily cleanup time in HH:MM format |
-| `CLEANUP_ROOT` | `/media` | Root directory to scan for subtitles |
-| `CLEANUP_MIN_CONFIDENCE` | `0.70` | Minimum language detection confidence |
-| `CLEANUP_MIN_CHARS` | `200` | Minimum subtitle text length for detection |
-
-## Volume Mounts
-
-Mount your media directory to `/media` in the container:
+For locally built deployments:
 
 ```bash
--v /path/to/your/movies:/media/movies
--v /path/to/your/tv:/media/tv
-```
-
-Or mount a parent directory:
-
-```bash
--v /mnt/storage:/media
-```
-
-The cleanup script will scan all subdirectories under the mounted path.
-
-## How It Works
-
-### Auto-Translate Loop
-
-1. Checks Bazarr API for movies/episodes with missing subtitles
-2. Downloads English subtitles if needed
-3. Translates to `FIRST_LANG`
-4. Translates to `SECOND_LANG` (if configured)
-5. Waits `CHECK_INTERVAL` seconds
-6. Repeats continuously
-
-### Daily Cleanup
-
-- Runs once daily at `CLEANUP_TIME` (default: 04:00)
-- Scans subtitle files with configured language extension (e.g., `.et.srt`)
-- Detects actual language using ML
-- Removes files that aren't actually in the target language
-- Also removes files containing HTTP error messages
-
-## Usage Examples
-
-### Basic Setup
-
-Minimal configuration with Estonian as target language:
-
-```bash
-docker run -d \
-  --name bazarr-autotranslate \
-  -e BAZARR_HOSTNAME=localhost:6767 \
-  -e BAZARR_APIKEY=your_key \
-  -e FIRST_LANG=et \
-  -v /mnt/media:/media \
-  kaneelir0ll/bazarr-autotranslate:latest
-```
-
-### Multiple Languages
-
-Translate to both Estonian and Swedish:
-
-```bash
-docker run -d \
-  --name bazarr-autotranslate \
-  -e BAZARR_HOSTNAME=localhost:6767 \
-  -e BAZARR_APIKEY=your_key \
-  -e FIRST_LANG=et \
-  -e SECOND_LANG=sv \
-  -v /mnt/media:/media \
-  kaneelir0ll/bazarr-autotranslate:latest
-```
-
-### Fast Processing
-
-For powerful servers with more resources:
-
-```bash
-docker run -d \
-  --name bazarr-autotranslate \
-  -e BAZARR_HOSTNAME=localhost:6767 \
-  -e BAZARR_APIKEY=your_key \
-  -e FIRST_LANG=et \
-  -e MAX_PARALLEL_TRANSLATIONS=5 \
-  -e CHECK_INTERVAL=60 \
-  -v /mnt/media:/media \
-  kaneelir0ll/bazarr-autotranslate:latest
-```
-
-### With Bazarr in Same Docker Network
-
-If Bazarr is running in Docker on the same network:
-
-```yaml
-version: '3.8'
-
-services:
-  bazarr:
-    image: lscr.io/linuxserver/bazarr:latest
-    container_name: bazarr
-    networks:
-      - media-network
-    # ... other bazarr config
-
-  bazarr-autotranslate:
-    image: kaneelir0ll/bazarr-autotranslate:latest
-    container_name: bazarr-autotranslate
-    environment:
-      - BAZARR_HOSTNAME=bazarr:6767  # Use container name
-      - BAZARR_APIKEY=${BAZARR_APIKEY}
-      - FIRST_LANG=et
-    volumes:
-      - /path/to/media:/media
-    networks:
-      - media-network
-    depends_on:
-      - bazarr
-
-networks:
-  media-network:
-    driver: bridge
-```
-
-## Monitoring
-
-### View Live Logs
-
-```bash
-# All logs
-docker logs -f bazarr-autotranslate
-
-# Last 100 lines
-docker logs --tail 100 bazarr-autotranslate
-```
-
-### Check Cleanup Logs
-
-```bash
-docker exec bazarr-autotranslate cat /var/log/bazarr-autotranslate/cleanup.log
-```
-
-### Check Cron Logs
-
-```bash
-docker exec bazarr-autotranslate cat /var/log/bazarr-autotranslate/cron.log
+git pull
+docker compose build --pull
+docker compose up -d
 ```
 
 ## Troubleshooting
 
-### Container won't start
+- **Bazarr queue is degraded:** verify `BAZARR_URL`, the API key, and container
+  network access. An outage is logged explicitly and is not treated as no work.
+- **Translations are deferred:** verify Lingarr's active endpoint and API key.
+  The application fails closed when capacity cannot be checked.
+- **Lingarr cannot read a subtitle:** verify both containers mount the same host
+  directory at the same `/media` path.
+- **Subtitle ownership remains root:** verify the media filesystem allows
+  `chown` from the application container and inspect the logged permission error.
+- **Bazarr does not detect output:** verify path identity, then trigger a Bazarr
+  subtitle scan and inspect the application logs.
 
-```bash
-# Check logs for errors
-docker logs bazarr-autotranslate
-
-# Verify environment variables
-docker inspect bazarr-autotranslate | grep -A 20 Env
-```
-
-### Can't connect to Bazarr
-
-- Verify `BAZARR_HOSTNAME` is correct
-- If Bazarr is on the same Docker network, use the container name
-- Check if API key is valid in Bazarr settings
-- Ensure Bazarr is accessible from the container:
-  ```bash
-  docker exec bazarr-autotranslate curl http://your-bazarr:6767/api
-  ```
-
-### Translations not working
-
-- Check Bazarr has translation providers configured
-- Verify API timeout settings are sufficient
-- Check container logs for specific errors
-- Ensure target languages are supported by Bazarr
-
-### Cleanup not running
-
-- Check cron logs: `docker exec bazarr-autotranslate cat /var/log/bazarr-autotranslate/cron.log`
-- Verify `CLEANUP_TIME` is in HH:MM format
-- Ensure media path is correctly mounted and accessible
-
-## Manual Operations
-
-### Run Cleanup Immediately
-
-```bash
-docker exec bazarr-autotranslate /app/run_cleanup.sh
-```
-
-### Restart Container
-
-```bash
-docker restart bazarr-autotranslate
-```
-
-### Update to Latest Version
-
-```bash
-docker pull kaneelir0ll/bazarr-autotranslate:latest
-docker stop bazarr-autotranslate
-docker rm bazarr-autotranslate
-# Then run your docker run or docker-compose up command again
-```
-
-## Performance Tuning
-
-### For Powerful Servers
-
-```yaml
-environment:
-  - MAX_PARALLEL_TRANSLATIONS=5
-  - TRANSLATE_DELAY=0.1
-  - CHECK_INTERVAL=60
-```
-
-### For Limited Resources
-
-```yaml
-environment:
-  - MAX_PARALLEL_TRANSLATIONS=1
-  - TRANSLATE_DELAY=1.0
-  - CHECK_INTERVAL=600
-```
-
-### Adjust Cleanup Timing
-
-```yaml
-environment:
-  - CLEANUP_TIME=02:30  # Run at 2:30 AM instead of 4:00 AM
-```
-
-## Supported Languages
-
-The container supports any language code that Bazarr supports. Common codes:
-
-- `en` - English
-- `et` - Estonian
-- `sv` - Swedish
-- `fi` - Finnish
-- `no` - Norwegian
-- `da` - Danish
-- `de` - German
-- `fr` - French
-- `es` - Spanish
-- `pt` - Portuguese
-- `ru` - Russian
-
-## Architecture
-
-- **Base Image**: Python 3.11 slim
-- **Size**: ~400MB (includes ML models for language detection)
-- **Platform**: linux/amd64
-
-## Source Code
-
-GitHub: [Kaneelirull/Bazarr_AutoTranslate](https://github.com/Kaneelirull/Bazarr_AutoTranslate)
-
-## License
-
-MIT License - See repository for details
-
-## Support
-
-For issues or questions:
-
-1. Check container logs: `docker logs bazarr-autotranslate`
-2. Verify all environment variables are set correctly
-3. Test Bazarr API connectivity manually
-4. Open an issue on [GitHub](https://github.com/Kaneelirull/Bazarr_AutoTranslate/issues)
-
----
-
-**Made with ❤️ for automated subtitle management**
+Source: [Kaneelirull/Bazarr_AutoTranslate](https://github.com/Kaneelirull/Bazarr_AutoTranslate)

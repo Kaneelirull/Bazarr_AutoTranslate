@@ -9,6 +9,7 @@ import time
 import threading
 import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -239,6 +240,99 @@ class RepairJobResult:
     attempts: int = 0
     second_attempts: int = 0
     target_path: str = ""
+
+
+@dataclass(frozen=True)
+class LingarrSourceLanguage:
+    name: str
+    code: str
+    targets: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LingarrActiveTranslation:
+    media_id: int | None
+    media_type: str
+    status: str
+
+    @property
+    def media_key(self) -> tuple[int, str] | None:
+        if self.media_id is None:
+            return None
+        return self.media_id, self.media_type.lower()
+
+
+class ServiceRequestError(RuntimeError):
+    def __init__(self, service: str, operation: str, message: str):
+        super().__init__(f"{service} {operation}: {message}")
+        self.service = service
+        self.operation = operation
+
+
+class TranslationCapacityGate:
+    def __init__(self, limit: int):
+        self.limit = max(1, limit)
+        self._condition = threading.Condition()
+        self._next_token = 1
+        self._reservations: dict[int, tuple[int, str]] = {}
+
+    def _effective_count(
+        self, active: list[LingarrActiveTranslation]
+    ) -> int:
+        active_keys = Counter(
+            entry.media_key for entry in active if entry.media_key is not None
+        )
+        reservation_keys = Counter(self._reservations.values())
+        visible_reservations = sum(
+            min(count, active_keys.get(key, 0))
+            for key, count in reservation_keys.items()
+        )
+        return len(active) + len(self._reservations) - visible_reservations
+
+    def acquire(self, media_id: int, media_type: str) -> int | None:
+        media_key = (int(media_id), media_type.lower())
+        while not shutdown_requested:
+            try:
+                active = lingarr_get_active_translations()
+            except ServiceRequestError as exc:
+                print(
+                    f"{YELLOW}[DEFER] Cannot verify Lingarr capacity: {exc}{RESET}"
+                )
+                return None
+
+            with self._condition:
+                effective = self._effective_count(active)
+                active_keys = {
+                    entry.media_key
+                    for entry in active
+                    if entry.media_key is not None
+                }
+                if effective < self.limit and media_key not in active_keys:
+                    token = self._next_token
+                    self._next_token += 1
+                    self._reservations[token] = media_key
+                    return token
+                print(
+                    f"[INFO] Lingarr queue full ({effective}/{self.limit}) "
+                    f"— waiting {POLL_INTERVAL}s..."
+                )
+                self._condition.wait(timeout=POLL_INTERVAL)
+        return None
+
+    def release(self, token: int | None) -> None:
+        if token is None:
+            return
+        with self._condition:
+            self._reservations.pop(token, None)
+            self._condition.notify_all()
+
+    def reset(self) -> None:
+        with self._condition:
+            self._reservations.clear()
+            self._condition.notify_all()
+
+
+_translation_capacity = TranslationCapacityGate(PARALLEL_TRANSLATES)
 
 
 def dbg(msg: str) -> None:
@@ -594,6 +688,43 @@ def bazarr_url(endpoint: str) -> str:
 def lingarr_url(endpoint: str) -> str:
     return f"{LINGARR_URL}/api/{endpoint}"
 
+
+def _request_json(
+    method: str,
+    url: str,
+    *,
+    service: str,
+    operation: str,
+    **kwargs,
+):
+    request = getattr(requests, method.lower())
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            response = request(url, **kwargs)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as exc:
+            last_error = exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            retryable = status is None or status == 429 or status >= 500
+            if not retryable or attempt == 3:
+                break
+        except ValueError as exc:
+            raise ServiceRequestError(
+                service, operation, f"invalid JSON response: {exc}"
+            ) from exc
+
+        delay = attempt
+        print(
+            f"{YELLOW}[WARNING] {service} {operation} failed "
+            f"(attempt {attempt}/3); retrying in {delay}s{RESET}"
+        )
+        time.sleep(delay)
+
+    raise ServiceRequestError(service, operation, str(last_error)) from last_error
+
+
 # ---------------------------------------------------------------------------
 # Bazarr API
 # ---------------------------------------------------------------------------
@@ -601,37 +732,64 @@ def lingarr_url(endpoint: str) -> str:
 def fetch_wanted(item_type: str) -> list:
     url = bazarr_url(f"{item_type}/wanted")
     dbg(f"fetch_wanted({item_type}): GET {url}")
-    try:
-        r = requests.get(url, headers=BAZARR_HEADERS,
-                         params={"start": 0, "length": -1},
-                         timeout=CONNECT_TIMEOUT)
-        r.raise_for_status()
-        result = r.json().get("data", [])
-        dbg(f"fetch_wanted({item_type}): {len(result)} item(s)")
-        return result
-    except Exception as e:
-        print(f"{RED}[ERROR] fetch_wanted({item_type}): {e}{RESET}")
-        return []
+    payload = _request_json(
+        "get",
+        url,
+        service="Bazarr",
+        operation=f"fetch {item_type} wanted queue",
+        headers=BAZARR_HEADERS,
+        params={"start": 0, "length": -1},
+        timeout=CONNECT_TIMEOUT,
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("data", []), list):
+        raise ServiceRequestError(
+            "Bazarr", f"fetch {item_type} wanted queue", "unexpected response schema"
+        )
+    result = payload.get("data", [])
+    dbg(f"fetch_wanted({item_type}): {len(result)} item(s)")
+    return result
 
 
-def fetch_subtitles(item_type: str, item_id: int, id_field: str) -> tuple[str, list]:
+def fetch_subtitles(item_type: str, item_id: int) -> tuple[str, list]:
     if item_type == "episodes":
         url = bazarr_url("episodes")
         params = {"episodeid[]": item_id}
     else:
         url = bazarr_url("movies")
         params = {"radarrid[]": item_id}
-    try:
-        r = requests.get(url, headers=BAZARR_HEADERS, params=params, timeout=CONNECT_TIMEOUT)
-        r.raise_for_status()
-        data = r.json().get("data", [])
-        if data:
-            vp = data[0].get("path", "")
-            subs = data[0].get("subtitles", [])
-            dbg(f"fetch_subtitles({item_type}, {item_id}): video_path={vp!r}")
-            return vp, subs
-    except Exception as e:
-        print(f"{RED}[ERROR] fetch_subtitles({item_type}, {item_id}): {e}{RESET}")
+    payload = _request_json(
+        "get",
+        url,
+        service="Bazarr",
+        operation=f"fetch {item_type} subtitles for {item_id}",
+        headers=BAZARR_HEADERS,
+        params=params,
+        timeout=CONNECT_TIMEOUT,
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("data", []), list):
+        raise ServiceRequestError(
+            "Bazarr",
+            f"fetch {item_type} subtitles for {item_id}",
+            "unexpected response schema",
+        )
+    data = payload.get("data", [])
+    if data:
+        if not isinstance(data[0], dict):
+            raise ServiceRequestError(
+                "Bazarr",
+                f"fetch {item_type} subtitles for {item_id}",
+                "unexpected item schema",
+            )
+        vp = data[0].get("path", "")
+        subs = data[0].get("subtitles", [])
+        if not isinstance(subs, list):
+            raise ServiceRequestError(
+                "Bazarr",
+                f"fetch {item_type} subtitles for {item_id}",
+                "unexpected subtitles schema",
+            )
+        dbg(f"fetch_subtitles({item_type}, {item_id}): video_path={vp!r}")
+        return vp, subs
     return "", []
 
 
@@ -730,16 +888,59 @@ def wait_for_bazarr_sync(had_episodes: bool, had_movies: bool, timeout: int) -> 
 # Lingarr API
 # ---------------------------------------------------------------------------
 
-def lingarr_get_languages() -> list[str]:
+def lingarr_get_languages() -> list[LingarrSourceLanguage]:
     try:
-        r = requests.get(lingarr_url("Translate/languages"), headers=LINGARR_HEADERS, timeout=CONNECT_TIMEOUT)
-        r.raise_for_status()
-        payload = r.json()
-        if isinstance(payload, list):
-            return [str(x) for x in payload]
-    except Exception as e:
-        print(f"{YELLOW}[WARNING] Could not fetch Lingarr languages: {e}{RESET}")
-    return []
+        payload = _request_json(
+            "get",
+            lingarr_url("Translate/languages"),
+            service="Lingarr",
+            operation="fetch languages",
+            headers=LINGARR_HEADERS,
+            timeout=CONNECT_TIMEOUT,
+        )
+    except ServiceRequestError as exc:
+        print(f"{YELLOW}[WARNING] Could not fetch Lingarr languages: {exc}{RESET}")
+        return []
+    if not isinstance(payload, list):
+        print(
+            f"{YELLOW}[WARNING] Lingarr languages response has an unexpected schema{RESET}"
+        )
+        return []
+
+    languages: list[LingarrSourceLanguage] = []
+    for index, entry in enumerate(payload):
+        if not isinstance(entry, dict):
+            print(
+                f"{YELLOW}[WARNING] Ignoring malformed Lingarr language entry "
+                f"at index {index}{RESET}"
+            )
+            continue
+        name = entry.get("name")
+        code = entry.get("code")
+        targets = entry.get("targets")
+        if targets is None:
+            targets = []
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(code, str)
+            or not code.strip()
+            or not isinstance(targets, list)
+            or not all(isinstance(target, str) and target.strip() for target in targets)
+        ):
+            print(
+                f"{YELLOW}[WARNING] Ignoring malformed Lingarr language entry "
+                f"at index {index}{RESET}"
+            )
+            continue
+        languages.append(
+            LingarrSourceLanguage(
+                name=name.strip(),
+                code=code.strip(),
+                targets=tuple(target.strip() for target in targets),
+            )
+        )
+    return languages
 
 
 def lingarr_build_media_cache() -> None:
@@ -817,20 +1018,44 @@ def lingarr_resolve_media_id(item_type: str, item_id: int) -> int | None:
         return _movie_cache.get(item_id)
 
 
-def lingarr_active_count() -> int | None:
+def lingarr_get_active_translations() -> list[LingarrActiveTranslation]:
     try:
-        r = requests.get(lingarr_url("TranslationRequest/active"), headers=LINGARR_HEADERS, timeout=CONNECT_TIMEOUT)
-        if r.status_code == 200:
-            payload = r.json()
-            if isinstance(payload, list):
-                return len(payload)
-            if isinstance(payload, int):
-                return payload
-            if isinstance(payload, dict) and "count" in payload:
-                return int(payload["count"])
-    except Exception as e:
-        dbg(f"lingarr_active_count: error {e}")
-    return None
+        payload = _request_json(
+            "get",
+            lingarr_url("TranslationRequest/active"),
+            service="Lingarr",
+            operation="fetch active translations",
+            headers=LINGARR_HEADERS,
+            timeout=CONNECT_TIMEOUT,
+        )
+    except ServiceRequestError:
+        raise
+    if not isinstance(payload, list):
+        raise ServiceRequestError(
+            "Lingarr", "fetch active translations", "unexpected response schema"
+        )
+
+    active: list[LingarrActiveTranslation] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            raise ServiceRequestError(
+                "Lingarr", "fetch active translations", "malformed active entry"
+            )
+        media_id = entry.get("mediaId")
+        media_type = entry.get("mediaType")
+        status = entry.get("status")
+        if (
+            (media_id is not None and not isinstance(media_id, int))
+            or not isinstance(media_type, str)
+            or not media_type
+            or not isinstance(status, str)
+            or not status
+        ):
+            raise ServiceRequestError(
+                "Lingarr", "fetch active translations", "malformed active entry"
+            )
+        active.append(LingarrActiveTranslation(media_id, media_type, status))
+    return active
 
 
 def lingarr_submit_file(
@@ -1638,6 +1863,34 @@ def _write_recovery_candidate(
         return Path(handle.name)
 
 
+def _normalize_managed_output(path: str | Path, label: str) -> bool:
+    from clean_et_subs import normalize_managed_file
+
+    try:
+        normalize_managed_file(path)
+        return True
+    except OSError as exc:
+        print(
+            f"{RED}[ERROR] Could not set managed ownership for {label}: {exc}{RESET}"
+        )
+        return False
+
+
+def _replace_managed_file(candidate: str | Path, target: str | Path) -> None:
+    from clean_et_subs import normalize_managed_file
+
+    candidate_path = Path(candidate)
+    try:
+        normalize_managed_file(candidate_path)
+        os.replace(candidate_path, target)
+    except OSError:
+        try:
+            candidate_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def _perform_repair(
     source_path: str,
     target_path: str,
@@ -1742,7 +1995,7 @@ def _perform_repair(
             )
             if repair.success:
                 if recovery_temp is not None:
-                    os.replace(recovery_temp, target_path)
+                    _replace_managed_file(recovery_temp, target_path)
                     recovery_temp = None
                 repaired = ", ".join(str(number) for number in repair.repaired_cues)
                 print(f"{GREEN}[REPAIR] Repaired and validated {label} '{target_lang}' cue(s): {repaired}{RESET}")
@@ -1933,6 +2186,7 @@ def _validate_translated_file(
     item_type: str | None = None,
     media_duration: float | None = None,
     origin: str | None = None,
+    provenance_source_hash: str | None = None,
 ) -> tuple[str, object]:
     if target_lang not in CLEANUP_LANGUAGES:
         from clean_et_subs import validate_srt_structure
@@ -1984,18 +2238,31 @@ def _validate_translated_file(
         if expected_target_hash is not None else None
     )
     recorded_origin = recorded.get("origin") if recorded is not None else None
-    if (
+    recorded_source_aligned = bool(
         recorded_origin == "lingarr"
-        and recorded.get("sourceHash") != source_hash
-    ):
+        and recorded.get("sourceHash") == source_hash
+    )
+    explicit_source_aligned = bool(
+        origin == "lingarr"
+        and provenance_source_hash is not None
+        and provenance_source_hash == source_hash
+    )
+    if recorded_origin == "lingarr" and not recorded_source_aligned:
         print(
             f"{YELLOW}[CLEANUP] Lingarr provenance source changed for "
             f"{os.path.basename(target_path)}; using conservative target-only "
             f"validation{RESET}"
         )
-        recorded_origin = None
-    effective_origin = origin or recorded_origin
-    source_aligned = effective_origin == "lingarr"
+    if origin == "lingarr" and not explicit_source_aligned:
+        print(
+            f"{YELLOW}[CLEANUP] Unverified Lingarr provenance for "
+            f"{os.path.basename(target_path)}; using conservative target-only "
+            f"validation{RESET}"
+        )
+    source_aligned = recorded_source_aligned or explicit_source_aligned
+    effective_origin = "lingarr" if source_aligned else (
+        origin if origin != "lingarr" else None
+    )
     if source_aligned:
         report = validate_subtitle_pair(
             Path(source_path), Path(target_path), detector, target_language,
@@ -2060,9 +2327,15 @@ def _validate_translated_file(
                 if dry_run:
                     print(f"[FORMAT] DRYRUN: would normalize {target_path}")
                     return "dry-run", report
-                with _target_repair_lock(target_path):
-                    temp = _write_recovery_candidate(target_path, recovery.raw)
-                    os.replace(temp, target_path)
+                try:
+                    with _target_repair_lock(target_path):
+                        temp = _write_recovery_candidate(target_path, recovery.raw)
+                        _replace_managed_file(temp, target_path)
+                except OSError as exc:
+                    print(
+                        f"{RED}[ERROR] Could not normalize {target_path}: {exc}{RESET}"
+                    )
+                    return "action-failed", report
                 print(
                     f"{GREEN}[FORMAT] Normalized {os.path.basename(target_path)} without AI: "
                     f"{', '.join(recovery.fixes) or 'canonicalized'}{RESET}"
@@ -2136,9 +2409,15 @@ def _validate_translated_file(
                 if dry_run:
                     print(f"[FORMAT] DRYRUN: would atomically repair {target_path}")
                     return "dry-run", report
-                with _target_repair_lock(target_path):
-                    temp = _write_recovery_candidate(target_path, recovery.raw)
-                    os.replace(temp, target_path)
+                try:
+                    with _target_repair_lock(target_path):
+                        temp = _write_recovery_candidate(target_path, recovery.raw)
+                        _replace_managed_file(temp, target_path)
+                except OSError as exc:
+                    print(
+                        f"{RED}[ERROR] Could not repair {target_path}: {exc}{RESET}"
+                    )
+                    return "action-failed", report
                 print(f"{GREEN}[FORMAT] Repaired and validated {label} '{target_lang}' without AI{RESET}")
                 _record_validation_result(
                     target_path, source_hash, _file_hash_or_none(target_path), "valid", recovered_report,
@@ -2223,8 +2502,11 @@ def _mark_activity(stats: dict, item_type: str) -> None:
 def _bazarr_has_repaired_path(result: RepairJobResult) -> bool:
     if result.item_id is None or result.item_type not in ("episodes", "movies"):
         return True
-    id_field = "sonarrEpisodeId" if result.item_type == "episodes" else "radarrId"
-    _, subtitles = fetch_subtitles(result.item_type, result.item_id, id_field)
+    try:
+        _, subtitles = fetch_subtitles(result.item_type, result.item_id)
+    except ServiceRequestError as exc:
+        print(f"{YELLOW}[WARNING] Could not verify repaired path: {exc}{RESET}")
+        return False
     expected = os.path.normcase(os.path.normpath(result.target_path))
     return any(
         os.path.normcase(os.path.normpath(str(subtitle.get("path", "")))) == expected
@@ -2240,7 +2522,8 @@ def _record_cleanup_stats(stats: dict, action: str, report) -> None:
     undersized = sum(issue.rule == "undersized_subtitle" for issue in report.issues)
     stats["cleanup_excessive_lines"] = stats.get("cleanup_excessive_lines", 0) + excessive
     stats["cleanup_undersized_targets"] = stats.get("cleanup_undersized_targets", 0) + undersized
-    stats["cleanup_other_issues"] = stats.get("cleanup_other_issues", 0) + len(report.issues) - excessive
+    other = max(0, len(report.issues) - excessive - undersized)
+    stats["cleanup_other_issues"] = stats.get("cleanup_other_issues", 0) + other
     stats["cleanup_repeat_quarantines"] = stats.get(
         "cleanup_repeat_quarantines", 0
     ) + int(bool(getattr(report, "repeat_offender", False)))
@@ -2318,7 +2601,22 @@ def process_item(item: dict, item_type: str, id_field: str,
     if not missing:
         return
 
-    video_path, subs = fetch_subtitles(item_type, item_id, id_field)
+    try:
+        video_path, subs = fetch_subtitles(item_type, item_id)
+    except ServiceRequestError as exc:
+        print(f"{YELLOW}[DEFER] {title}: {exc}{RESET}")
+        with stats_lock:
+            stats["api_errors"] = stats.get("api_errors", 0) + 1
+            stats["deferred"] = stats.get("deferred", 0) + len(missing)
+        for target_lang in missing:
+            _status_transition(
+                item_type,
+                item_id,
+                target_lang,
+                "deferred",
+                reason="Bazarr subtitle lookup unavailable",
+            )
+        return
     if video_path:
         _queue_video_for_pruning(video_path, item_type)
     available_by_lang: dict[str, list[str]] = {}
@@ -2452,11 +2750,25 @@ def process_item(item: dict, item_type: str, id_field: str,
                     f"[TRANSLATE] Recovered pending Lingarr output "
                     f"{os.path.basename(existing)}"
                 )
+                if not _normalize_managed_output(existing, title):
+                    with stats_lock:
+                        stats["deferred"] = stats.get("deferred", 0) + 1
+                    _status_transition(
+                        item_type,
+                        item_id,
+                        target_lang,
+                        "deferred",
+                        reason="managed file ownership failed",
+                    )
+                    continue
             _status_transition(item_type, item_id, target_lang, "validating")
             validation_action, validation_report = _validate_translated_file(
                 source_path, existing, source_lang, target_lang, item_id, title=title,
                 defer_repair=True, item_type=item_type, media_duration=media_duration,
                 origin=recovered_origin,
+                provenance_source_hash=(
+                    submission.get("sourceHash") if recovered_origin else None
+                ),
             )
             if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
                 with stats_lock:
@@ -2517,25 +2829,53 @@ def process_item(item: dict, item_type: str, id_field: str,
             )
             continue
 
-        while not shutdown_requested:
-            active = lingarr_active_count()
-            if active is None or active < PARALLEL_TRANSLATES:
-                break
-            print(f"[INFO] Lingarr queue full ({active}/{PARALLEL_TRANSLATES}) — waiting {POLL_INTERVAL}s...")
-            for _ in range(POLL_INTERVAL):
-                if shutdown_requested:
-                    return
-                time.sleep(1)
+        capacity_token = _translation_capacity.acquire(media_id, lingarr_media_type)
+        if capacity_token is None:
+            with stats_lock:
+                stats["api_errors"] = stats.get("api_errors", 0) + 1
+                stats["deferred"] = stats.get("deferred", 0) + 1
+            _status_transition(
+                item_type,
+                item_id,
+                target_lang,
+                "deferred",
+                reason="Lingarr capacity unavailable",
+            )
+            continue
 
         appeared = _find_existing_target(video_path, target_lang) if video_path else (
             target_path if os.path.exists(target_path) else None
         )
         if appeared:
+            _translation_capacity.release(capacity_token)
+            capacity_token = None
+            appeared_submission = _find_submission_for_target(appeared, target_lang)
+            appeared_origin = (
+                "lingarr"
+                if _submission_matches_source(appeared_submission, source_path)
+                else None
+            )
+            if appeared_origin and not _normalize_managed_output(appeared, title):
+                with stats_lock:
+                    stats["deferred"] = stats.get("deferred", 0) + 1
+                _status_transition(
+                    item_type,
+                    item_id,
+                    target_lang,
+                    "deferred",
+                    reason="managed file ownership failed",
+                )
+                continue
             print(f"[DISK] {title} '{target_lang}': appeared during queue wait")
             _status_transition(item_type, item_id, target_lang, "validating")
             validation_action, validation_report = _validate_translated_file(
                 source_path, appeared, source_lang, target_lang, item_id, title=title,
                 defer_repair=True, item_type=item_type, media_duration=media_duration,
+                origin=appeared_origin,
+                provenance_source_hash=(
+                    appeared_submission.get("sourceHash")
+                    if appeared_origin else None
+                ),
             )
             if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
                 with stats_lock:
@@ -2562,6 +2902,7 @@ def process_item(item: dict, item_type: str, id_field: str,
 
         src_lines = _count_dialogue_lines(source_path)
         if src_lines is None:
+            _translation_capacity.release(capacity_token)
             print(f"{YELLOW}[SKIP] {title} '{target_lang}': source not readable — deferring{RESET}")
             with stats_lock:
                 stats.setdefault("deferred", 0)
@@ -2571,6 +2912,7 @@ def process_item(item: dict, item_type: str, id_field: str,
             )
             continue
         if src_lines == 0:
+            _translation_capacity.release(capacity_token)
             print(f"{YELLOW}[SKIP] {title} '{target_lang}': source has no dialogue lines{RESET}")
             with stats_lock:
                 stats.setdefault("deferred", 0)
@@ -2586,34 +2928,49 @@ def process_item(item: dict, item_type: str, id_field: str,
         )
         source_hash = _file_hash_or_none(source_path)
         print(f"[TRANSLATE] {title}: {source_lang} -> {target_lang} ({src_lines} lines)")
-        job_id = lingarr_submit_file(media_id, source_path, source_lang, target_lang, lingarr_media_type)
-        if job_id is None:
-            with stats_lock:
-                stats["failed"] += 1
-            _status_transition(
-                item_type, item_id, target_lang, "failed", reason="Lingarr submission failed"
+        status: str | None = None
+        try:
+            job_id = lingarr_submit_file(
+                media_id,
+                source_path,
+                source_lang,
+                target_lang,
+                lingarr_media_type,
             )
-            continue
+            if job_id is None:
+                with stats_lock:
+                    stats["failed"] += 1
+                _status_transition(
+                    item_type,
+                    item_id,
+                    target_lang,
+                    "failed",
+                    reason="Lingarr submission failed",
+                )
+                continue
 
-        _record_submission(
-            item_id,
-            target_lang,
-            target_path,
-            expected_target_path=target_path,
-            video_path=video_path or None,
-            source_path=source_path,
-            source_hash=source_hash,
-            source_language=source_lang,
-            item_type=item_type,
-            target_variant=target_variant,
-        )
-        _status_transition(item_type, item_id, target_lang, "translating")
-        with stats_lock:
-            stats["submitted"] += 1
-            _mark_activity(stats, item_type)
+            _record_submission(
+                item_id,
+                target_lang,
+                target_path,
+                expected_target_path=target_path,
+                video_path=video_path or None,
+                source_path=source_path,
+                source_hash=source_hash,
+                source_language=source_lang,
+                item_type=item_type,
+                target_variant=target_variant,
+            )
+            _status_transition(item_type, item_id, target_lang, "translating")
+            with stats_lock:
+                stats["submitted"] += 1
+                _mark_activity(stats, item_type)
 
-        deadline = time.time() + item_timeout
-        status = lingarr_poll_job(job_id, deadline, title)
+            deadline = time.time() + item_timeout
+            status = lingarr_poll_job(job_id, deadline, title)
+        finally:
+            _translation_capacity.release(capacity_token)
+
         if status != "Completed":
             with stats_lock:
                 if status is None:
@@ -2668,6 +3025,17 @@ def process_item(item: dict, item_type: str, id_field: str,
                 reason="completed output missing",
             )
             continue
+        if not _normalize_managed_output(actual_target_path, title):
+            with stats_lock:
+                stats["deferred"] = stats.get("deferred", 0) + 1
+            _status_transition(
+                item_type,
+                item_id,
+                target_lang,
+                "deferred",
+                reason="managed file ownership failed",
+            )
+            continue
         actual_suffix = _target_suffix(actual_target_path, target_lang)
         actual_variant = actual_suffix[1] if actual_suffix is not None else ""
         _update_submission_actual_path(
@@ -2694,6 +3062,7 @@ def process_item(item: dict, item_type: str, id_field: str,
             source_path, actual_target_path, source_lang, target_lang, item_id, title=title,
             defer_repair=True, item_type=item_type, media_duration=media_duration,
             origin="lingarr",
+            provenance_source_hash=source_hash,
         )
         if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
             print(
@@ -3194,6 +3563,7 @@ def run_existing_cleanup_scan() -> dict:
                 print(f"{YELLOW}[SCAN] Could not hash {candidate.path}: {e}{RESET}")
                 continue
             validation_origin = None
+            validation_source_hash = None
             submission = _find_submission_for_target(
                 candidate.path, candidate.target_lang
             )
@@ -3225,6 +3595,7 @@ def run_existing_cleanup_scan() -> dict:
                         source_path = Path(pending_source)
                         source_lang = pending_language
                         validation_origin = "lingarr"
+                        validation_source_hash = pending_hash
                         stats["recovered_pending_outputs"] += 1
                         print(
                             f"[SCAN] Recovered pending Lingarr output "
@@ -3259,6 +3630,7 @@ def run_existing_cleanup_scan() -> dict:
                     media_duration=_probe_media_duration(candidate_video)
                     if candidate_video is not None else None,
                     origin=validation_origin,
+                    provenance_source_hash=validation_source_hash,
                 )
             else:
                 stats["without_source"] += 1
@@ -3453,32 +3825,34 @@ def run_retention_housekeeping() -> dict:
 # Cycle orchestrator
 # ---------------------------------------------------------------------------
 
-def _drain_lingarr_queue() -> None:
+def _drain_lingarr_queue() -> bool:
     drain_deadline = time.time() + 2 * CHECK_INTERVAL
     while not shutdown_requested:
-        active = lingarr_active_count()
-        if active is None or active == 0:
-            break
+        try:
+            active = len(lingarr_get_active_translations())
+        except ServiceRequestError as exc:
+            print(
+                f"{YELLOW}[WARNING] Lingarr queue state is unverifiable; "
+                f"cycle remains degraded: {exc}{RESET}"
+            )
+            return False
+        if active == 0:
+            return True
         if time.time() >= drain_deadline:
             print(f"{YELLOW}[WARNING] Lingarr still has {active} active job(s) after "
                   f"{2 * CHECK_INTERVAL}s — continuing anyway{RESET}")
-            break
+            return False
         print(f"[INFO] Lingarr has {active} active job(s) — waiting before next cycle...")
         for _ in range(POLL_INTERVAL):
             if shutdown_requested:
-                return
+                return False
             time.sleep(1)
+    return False
 
 
 def run_cycle(cycle_num: int) -> None:
     print(f"\n{BOLD}{CYAN}===== Cycle #{cycle_num} ====={RESET}")
     _status_set_phase("translating")
-
-    lingarr_build_media_cache()
-
-    active_before = lingarr_active_count()
-    if active_before is not None:
-        print(f"[INFO] Lingarr active queue at cycle start: {active_before}")
 
     stats: dict = {
         "submitted": 0,
@@ -3486,6 +3860,8 @@ def run_cycle(cycle_num: int) -> None:
         "timed_out": 0,
         "failed": 0,
         "deferred": 0,
+        "api_errors": 0,
+        "degraded": False,
         "quarantine_holds": 0,
         "variant_outputs_discovered": 0,
         "recovered_pending_outputs": 0,
@@ -3495,17 +3871,42 @@ def run_cycle(cycle_num: int) -> None:
     }
     stats_lock = threading.Lock()
 
+    lingarr_build_media_cache()
+
+    try:
+        active_before = len(lingarr_get_active_translations())
+        print(f"[INFO] Lingarr active queue at cycle start: {active_before}")
+    except ServiceRequestError as exc:
+        stats["api_errors"] += 1
+        stats["degraded"] = True
+        print(f"{YELLOW}[WARNING] Cycle starts degraded: {exc}{RESET}")
+
     work: list[tuple] = []
-    for ep in fetch_wanted("episodes"):
-        work.append((ep, "episodes", "sonarrEpisodeId"))
-    for mv in fetch_wanted("movies"):
-        work.append((mv, "movies", "radarrId"))
+    queue_errors: list[str] = []
+    for item_type, id_field in (
+        ("episodes", "sonarrEpisodeId"),
+        ("movies", "radarrId"),
+    ):
+        try:
+            wanted = fetch_wanted(item_type)
+        except ServiceRequestError as exc:
+            stats["api_errors"] += 1
+            stats["degraded"] = True
+            queue_errors.append(item_type)
+            print(f"{YELLOW}[WARNING] Deferring {item_type} queue: {exc}{RESET}")
+            continue
+        work.extend((item, item_type, id_field) for item in wanted)
     if _status_tracker is not None:
         cycle_id = f"{int(time.time())}-{cycle_num}"
         jobs = build_cycle_jobs(work, LANGUAGES, cycle_id, _item_title)
         _status_start_cycle(cycle_id, cycle_num, jobs)
 
-    if not work:
+    if not work and queue_errors:
+        print(
+            f"{YELLOW}[WARNING] No processable work; unavailable queue(s): "
+            f"{', '.join(queue_errors)}{RESET}"
+        )
+    elif not work:
         print("[INFO] No wanted items found.")
     else:
         print(f"[INFO] Processing {len(work)} item(s) with {PARALLEL_TRANSLATES} worker(s)...")
@@ -3555,12 +3956,26 @@ def run_cycle(cycle_num: int) -> None:
         stats["episode_activity"] = stats["episode_activity"] or prune_episodes
         stats["movie_activity"] = stats["movie_activity"] or prune_movies
 
+    active_after: int | None = None
+    active_after_error: ServiceRequestError | None = None
+    try:
+        active_after = len(lingarr_get_active_translations())
+    except ServiceRequestError as exc:
+        stats["degraded"] = True
+        stats["api_errors"] += 1
+        active_after_error = exc
+
     print(f"\n{BOLD}===== Cycle #{cycle_num} Summary ====={RESET}")
     print(f"  Submitted  : {stats['submitted']}")
     print(f"  Completed  : {stats['completed']}")
     print(f"  Timed out  : {stats['timed_out']}")
     print(f"  Failed     : {stats['failed']}")
     print(f"  Deferred   : {stats.get('deferred', 0)}")
+    print(
+        f"  Cycle state: {'degraded' if stats.get('degraded') or stats.get('api_errors') else 'healthy'}"
+    )
+    if stats.get("api_errors"):
+        print(f"  API errors : {stats['api_errors']}")
     print(f"  Variant outputs found : {stats.get('variant_outputs_discovered', 0)}")
     print(f"  Pending outputs found : {stats.get('recovered_pending_outputs', 0)}")
     print(f"  Quarantine holds      : {stats.get('quarantine_holds', 0)}")
@@ -3594,9 +4009,13 @@ def run_cycle(cycle_num: int) -> None:
         print("  Completed translations:")
         for t in stats["translations"]:
             print(f"    {GREEN}- {t}{RESET}")
-    active_after = lingarr_active_count()
     if active_after is not None:
         print(f"  Lingarr active queue now: {active_after}")
+    elif active_after_error is not None:
+        print(
+            f"{YELLOW}  Lingarr active queue unavailable: "
+            f"{active_after_error}{RESET}"
+        )
     sys.stdout.flush()
 
     had_activity = (
@@ -3699,7 +4118,11 @@ def main() -> int:
 
     langs = lingarr_get_languages()
     if langs:
-        print(f"[INFO] Lingarr supports languages: {', '.join(langs)}")
+        mappings = []
+        for language in langs:
+            targets = ", ".join(language.targets) if language.targets else "none"
+            mappings.append(f"{language.name} ({language.code} -> {targets})")
+        print(f"[INFO] Lingarr supports languages: {'; '.join(mappings)}")
 
     _load_submit_cache()
     run_retention_housekeeping()
