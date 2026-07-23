@@ -120,9 +120,16 @@ capacity failures defer work instead of submitting without a verified slot.
 | `CLEANUP_QUARANTINE_DIR` | `/config/quarantine` | Quarantine destination |
 | `CLEANUP_QUARANTINE_HOLD_DAYS` | `30` | Repeat-invalid-output hold duration |
 | `CLEANUP_REPAIR_ENABLED` | `true` | Enable targeted Lingarr cue repair |
+| `CLEANUP_MAX_REPAIR_ATTEMPTS` | `5` | Attempts per invalid cue; attempt one uses context and attempts 2–5 do not |
+| `CLEANUP_REPAIR_CONTEXT_LINES` | `5` | Surrounding source cues supplied on the first attempt |
 | `CLEANUP_FORMAT_REPAIR_ENABLED` | `true` | Enable safe local SRT normalization |
 | `CLEANUP_UNDERSIZED_ENABLED` | `true` | Enable completeness validation |
 | `CLEANUP_PRUNE_EXTRA_LANGUAGES` | `true` | Prune recognized unmanaged languages once managed subtitles are valid |
+
+Every repairable cue is attempted before the file is declared unrepairable.
+Attempt one includes source context; attempts two through five run without
+context. If any cue still fails, the untouched original subtitle is handled by
+`CLEANUP_ACTION` rather than installing a partially repaired candidate.
 
 Additional validation thresholds are documented in the repository's
 [`docker/README.md`](https://github.com/Kaneelirull/Bazarr_AutoTranslate/blob/main/docker/README.md)

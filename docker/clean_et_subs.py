@@ -975,7 +975,7 @@ def repair_subtitle_file(
     translator: Callable[[str, list[str], list[str]], Optional[str]],
     *,
     target_lang: str,
-    max_attempts: int = 2,
+    max_attempts: int = 5,
     context_lines: int = 5,
     attempt_logger: Optional[Callable[[dict], None]] = None,
     **validation_kwargs,
@@ -1007,6 +1007,7 @@ def repair_subtitle_file(
 
     candidate_cues = [SubtitleCue(cue.number, cue.timestamp, list(cue.lines)) for cue in target_cues]
     repaired_numbers: list[int] = []
+    unresolved_cues: list[tuple[int, str]] = []
     attempt_count = 0
     attempt_history: list[dict] = []
 
@@ -1118,14 +1119,24 @@ def repair_subtitle_file(
             break
 
         if not accepted:
-            return RepairResult(
-                False,
-                repaired_numbers,
-                initial_report,
-                f"cue {source_cue.number} could not be repaired: {last_reason}",
-                attempt_count,
-                attempt_history,
-            )
+            unresolved_cues.append((source_cue.number, last_reason))
+
+    if unresolved_cues:
+        unresolved_summary = "; ".join(
+            f"cue {cue_number}: {reason}"
+            for cue_number, reason in unresolved_cues
+        )
+        return RepairResult(
+            False,
+            repaired_numbers,
+            initial_report,
+            (
+                f"{len(unresolved_cues)} cue(s) could not be repaired: "
+                f"{unresolved_summary}"
+            ),
+            attempt_count,
+            attempt_history,
+        )
 
     newline = "\r\n" if "\r\n" in target_raw else "\n"
     target = Path(target_path)

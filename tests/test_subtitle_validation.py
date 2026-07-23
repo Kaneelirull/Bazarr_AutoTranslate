@@ -352,6 +352,109 @@ class SubtitleValidationTests(unittest.TestCase):
             self.assertEqual([entry["outcome"] for entry in result.attempt_history], ["rejected", "accepted"])
             self.assertTrue(result.attempt_history[1]["withoutContext"])
 
+    def test_repair_can_succeed_on_fifth_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "episode.eng.srt"
+            target = root / "episode.et.srt"
+            source.write_text(
+                make_srt("Before context", "Target dialogue", "After context"),
+                encoding="utf-8",
+            )
+            target.write_text(
+                make_srt(
+                    "Eelnev lause",
+                    "[SOURCE] leaked dialogue [/SOURCE]",
+                    "Järgnev lause",
+                ),
+                encoding="utf-8",
+            )
+            calls = []
+
+            def translator(line, before, after):
+                calls.append((before, after))
+                if len(calls) < 5:
+                    return "[SOURCE] still leaked [/SOURCE]"
+                return "Parandatud dialoog"
+
+            result = repair_subtitle_file(
+                source,
+                target,
+                self.detector,
+                self.estonian,
+                translator,
+                target_lang="et",
+                context_lines=1,
+            )
+
+            self.assertTrue(result.success, result.reason)
+            self.assertEqual(result.attempts, 5)
+            self.assertEqual(calls[0], (["Before context"], ["After context"]))
+            self.assertEqual(calls[1:], [([], [])] * 4)
+            self.assertEqual(
+                [entry["attempt"] for entry in result.attempt_history],
+                [1, 2, 3, 4, 5],
+            )
+            self.assertTrue(
+                all(
+                    entry["maxAttempts"] == 5
+                    for entry in result.attempt_history
+                )
+            )
+
+    def test_repair_attempts_later_cues_after_one_is_exhausted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "episode.eng.srt"
+            target = root / "episode.et.srt"
+            source.write_text(
+                make_srt(
+                    "First source dialogue",
+                    "Second source dialogue",
+                    "Third source dialogue",
+                ),
+                encoding="utf-8",
+            )
+            original = make_srt(
+                "[SOURCE] first leak [/SOURCE]",
+                "[SOURCE] second leak [/SOURCE]",
+                "[SOURCE] third leak [/SOURCE]",
+            )
+            target.write_text(original, encoding="utf-8")
+            calls = []
+
+            def translator(line, before, after):
+                calls.append(line)
+                if line != "Second source dialogue":
+                    return line
+                return "Teine parandatud dialoog"
+
+            result = repair_subtitle_file(
+                source,
+                target,
+                self.detector,
+                self.estonian,
+                translator,
+                target_lang="et",
+                max_attempts=5,
+                context_lines=1,
+            )
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.attempts, 11)
+            self.assertEqual(calls.count("First source dialogue"), 5)
+            self.assertEqual(calls.count("Second source dialogue"), 1)
+            self.assertEqual(calls.count("Third source dialogue"), 5)
+            self.assertEqual(result.repaired_cues, [2])
+            self.assertIn("2 cue(s) could not be repaired", result.reason)
+            self.assertIn("cue 1:", result.reason)
+            self.assertIn("cue 3:", result.reason)
+            self.assertEqual(
+                [entry["cueNumber"] for entry in result.attempt_history],
+                [1, 1, 1, 1, 1, 2, 3, 3, 3, 3, 3],
+            )
+            self.assertEqual(target.read_text(encoding="utf-8"), original)
+
     def test_attempt_logger_contains_metadata_not_subtitle_text(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

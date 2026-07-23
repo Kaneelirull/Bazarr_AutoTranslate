@@ -77,8 +77,8 @@ Existing-library cleanup runs after startup synchronization and then on its own 
 | `CLEANUP_MAX_EXPANSION_RATIO` | `4.0` | Maximum target/source character expansion ratio |
 | `CLEANUP_MAX_EXPANSION_CHARS` | `300` | Absolute allowance before expansion rejection |
 | `CLEANUP_REPAIR_ENABLED` | `true` | Retry aligned invalid cues through `/api/Translate/line` |
-| `CLEANUP_MAX_REPAIR_ATTEMPTS` | `2` | Maximum attempts per invalid cue |
-| `CLEANUP_REPAIR_CONTEXT_LINES` | `5` | Context cues on attempt one; attempt two always uses none |
+| `CLEANUP_MAX_REPAIR_ATTEMPTS` | `5` | Maximum attempts per invalid cue; every repairable cue is tried before file-level failure |
+| `CLEANUP_REPAIR_CONTEXT_LINES` | `5` | Context cues on attempt one; later attempts use no context |
 | `CLEANUP_FORMAT_REPAIR_ENABLED` | `true` | Repair source-anchored SRT formatting damage without AI |
 | `CLEANUP_REPAIR_WORKERS` | `1` | Dedicated line-repair workers in addition to `PARALLEL_TRANSLATES` |
 | `CLEANUP_REPAIR_QUEUE_MAX` | `100` | Maximum queued cue-repair files; overflow is deferred |
