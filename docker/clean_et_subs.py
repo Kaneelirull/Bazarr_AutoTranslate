@@ -37,6 +37,21 @@ TARGET_LANGUAGE_MAP: dict[str, Language] = {
     "uk": Language.UKRAINIAN,
 }
 
+TARGET_CODE_ALIASES: dict[str, set[str]] = {
+    "en": {"en", "eng"}, "et": {"et", "est"}, "sv": {"sv", "swe"},
+    "de": {"de", "deu", "ger"}, "fr": {"fr", "fra", "fre"},
+    "es": {"es", "spa"}, "nl": {"nl", "nld", "dut"},
+    "no": {"no", "nor", "nob"}, "fi": {"fi", "fin"},
+    "da": {"da", "dan"}, "pl": {"pl", "pol"}, "pt": {"pt", "por"},
+    "ru": {"ru", "rus"}, "lv": {"lv", "lav"}, "lt": {"lt", "lit"},
+    "uk": {"uk", "ukr"}, "tr": {"tr", "tur"}, "it": {"it", "ita"},
+    "cs": {"cs", "ces", "cze"}, "sk": {"sk", "slk", "slo"},
+    "hu": {"hu", "hun"}, "ro": {"ro", "ron", "rum"},
+    "el": {"el", "ell", "gre"}, "ar": {"ar", "ara"},
+    "he": {"he", "heb"}, "ja": {"ja", "jpn"}, "ko": {"ko", "kor"},
+    "zh": {"zh", "zho", "chi"},
+}
+
 DETECTOR_LANGUAGES = [
     Language.ESTONIAN,
     Language.ENGLISH,
@@ -218,6 +233,7 @@ class DiscoveredSubtitle:
     path: Path
     target_lang: str
     variant: str
+    language_token: str = ""
 
 
 @dataclass(frozen=True)
@@ -1245,10 +1261,18 @@ def discover_target_subtitles(
     roots: Iterable[Path],
     target_languages: Iterable[str],
 ) -> list[DiscoveredSubtitle]:
-    languages = sorted({lang.strip().lower() for lang in target_languages if lang.strip()}, key=len, reverse=True)
-    if not languages:
+    canonical_languages = {
+        lang.strip().lower() for lang in target_languages if lang.strip()
+    }
+    alias_to_language = {
+        alias: language
+        for language in canonical_languages
+        for alias in TARGET_CODE_ALIASES.get(language, {language})
+    }
+    aliases = sorted(alias_to_language, key=len, reverse=True)
+    if not aliases:
         return []
-    language_pattern = "|".join(re.escape(lang) for lang in languages)
+    language_pattern = "|".join(re.escape(alias) for alias in aliases)
     pattern = re.compile(
         rf"\.(?P<lang>{language_pattern})(?P<variant>\.(?:hi|sdh|\d+))?\.srt$",
         re.IGNORECASE,
@@ -1263,11 +1287,13 @@ def discover_target_subtitles(
                 continue
             match = pattern.search(path.name)
             if match:
+                language_token = match.group("lang").lower()
                 seen.add(path)
                 discovered.append(DiscoveredSubtitle(
                     path=path,
-                    target_lang=match.group("lang").lower(),
+                    target_lang=alias_to_language[language_token],
                     variant=(match.group("variant") or "").lower(),
+                    language_token=language_token,
                 ))
     return sorted(discovered, key=lambda item: str(item.path).casefold())
 
@@ -1276,7 +1302,8 @@ def find_preferred_source(
     candidate: DiscoveredSubtitle,
     source_codes: tuple[str, ...] = ("eng", "en"),
 ) -> tuple[Optional[Path], Optional[str]]:
-    suffix = f".{candidate.target_lang}{candidate.variant}.srt"
+    language_token = candidate.language_token or candidate.target_lang
+    suffix = f".{language_token}{candidate.variant}.srt"
     if not candidate.path.name.lower().endswith(suffix):
         return None, None
     base_name = candidate.path.name[:-len(suffix)]
@@ -1285,10 +1312,12 @@ def find_preferred_source(
         for path in candidate.path.parent.iterdir()
         if path.is_file()
     }
-    for code in source_codes:
-        source = files_by_name.get(f"{base_name}.{code}.srt".casefold())
-        if source is not None:
-            return source, "en" if code in ("en", "eng") else code
+    variants = (candidate.variant, "") if candidate.variant else ("",)
+    for variant in variants:
+        for code in source_codes:
+            source = files_by_name.get(f"{base_name}.{code}{variant}.srt".casefold())
+            if source is not None:
+                return source, "en" if code in ("en", "eng") else code
     return None, None
 
 
@@ -1304,7 +1333,11 @@ class ValidationStateStore:
     def __init__(self, path: Path | str):
         self.path = Path(path)
         self._lock = threading.RLock()
-        self._data: dict = {"validatorVersion": VALIDATOR_VERSION, "files": {}}
+        self._data: dict = {
+            "validatorVersion": VALIDATOR_VERSION,
+            "files": {},
+            "quarantineTombstones": {},
+        }
         self.load()
 
     @staticmethod
@@ -1321,6 +1354,7 @@ class ValidationStateStore:
                 return
             if isinstance(payload, dict) and isinstance(payload.get("files"), dict):
                 self._data = payload
+                self._data.setdefault("quarantineTombstones", {})
 
     def is_unchanged_valid(
         self,
@@ -1332,19 +1366,28 @@ class ValidationStateStore:
             entry = self._data.get("files", {}).get(self._key(target_path), {})
             return (
                 entry.get("validatorVersion") == VALIDATOR_VERSION
-                and entry.get("result") == "valid"
+                and entry.get("result") in ("valid", "valid_with_warnings")
                 and entry.get("sourceHash") == source_hash
                 and entry.get("targetHash") == target_hash
             )
 
     def matching_origin(self, target_path: Path | str, target_hash: str) -> Optional[str]:
         """Return provenance only while the on-disk content still matches the recorded hash."""
+        entry = self.matching_record(target_path, target_hash)
+        if entry is None:
+            return None
+        origin = entry.get("origin")
+        return origin if isinstance(origin, str) and origin else None
+
+    def matching_record(
+        self, target_path: Path | str, target_hash: str
+    ) -> Optional[dict]:
+        """Return a copy of the provenance record while target content is unchanged."""
         with self._lock:
             entry = self._data.get("files", {}).get(self._key(target_path), {})
             if entry.get("targetHash") != target_hash:
                 return None
-            origin = entry.get("origin")
-            return origin if isinstance(origin, str) and origin else None
+            return dict(entry)
 
     def current_valid_details(self, target_path: Path | str, target_hash: str) -> Optional[dict]:
         """Return cached validation details only for unchanged content and this validator version."""
@@ -1352,7 +1395,7 @@ class ValidationStateStore:
             entry = self._data.get("files", {}).get(self._key(target_path), {})
             if (
                 entry.get("validatorVersion") != VALIDATOR_VERSION
-                or entry.get("result") != "valid"
+                or entry.get("result") not in ("valid", "valid_with_warnings")
                 or entry.get("targetHash") != target_hash
             ):
                 return None
@@ -1385,6 +1428,103 @@ class ValidationStateStore:
             self._data["validatorVersion"] = VALIDATOR_VERSION
             self._save_locked()
 
+    def record_quarantine_tombstone(
+        self,
+        identity: str,
+        *,
+        target_path: Path | str,
+        target_hash: str,
+        target_language: str,
+        rules: Iterable[str],
+        origin: Optional[str],
+        hold_days: int,
+        now: Optional[datetime] = None,
+    ) -> tuple[dict, bool]:
+        timestamp = now or datetime.now(timezone.utc)
+        identity_key = str(identity)
+        key = f"{identity_key}|{target_hash}"
+        with self._lock:
+            tombstones = self._data.setdefault("quarantineTombstones", {})
+            previous = tombstones.get(key, {})
+            if not previous:
+                legacy = tombstones.get(identity_key, {})
+                if legacy.get("targetHash") == target_hash:
+                    previous = legacy
+                    tombstones.pop(identity_key, None)
+            repeated = previous.get("targetHash") == target_hash
+            first_seen = (
+                previous.get("firstSeen")
+                if repeated and isinstance(previous.get("firstSeen"), str)
+                else timestamp.isoformat()
+            )
+            occurrences = int(previous.get("occurrences", 0)) + 1 if repeated else 1
+            entry = {
+                "identity": identity_key,
+                "targetPath": str(target_path),
+                "targetHash": target_hash,
+                "targetLanguage": target_language,
+                "rules": sorted({str(rule) for rule in rules if rule}),
+                "origin": origin or "unknown",
+                "firstSeen": first_seen,
+                "lastSeen": timestamp.isoformat(),
+                "holdUntil": datetime.fromtimestamp(
+                    timestamp.timestamp() + max(1, hold_days) * 86400,
+                    timezone.utc,
+                ).isoformat(),
+                "occurrences": occurrences,
+            }
+            tombstones[key] = entry
+            self._save_locked()
+            return dict(entry), repeated
+
+    def active_quarantine_tombstone(
+        self,
+        identity: str,
+        *,
+        target_hash: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> Optional[dict]:
+        timestamp = now or datetime.now(timezone.utc)
+        with self._lock:
+            matches: list[tuple[datetime, dict]] = []
+            for key, entry in self._data.setdefault(
+                "quarantineTombstones", {}
+            ).items():
+                if not isinstance(entry, dict):
+                    continue
+                entry_identity = entry.get("identity")
+                if entry_identity != str(identity) and key != str(identity):
+                    continue
+                if target_hash is not None and entry.get("targetHash") != target_hash:
+                    continue
+                try:
+                    hold_until = datetime.fromisoformat(entry["holdUntil"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if hold_until > timestamp:
+                    matches.append((hold_until, entry))
+            if not matches:
+                return None
+            return dict(max(matches, key=lambda item: item[0])[1])
+
+    def clear_quarantine_tombstone(self, identity: str) -> bool:
+        with self._lock:
+            tombstones = self._data.setdefault("quarantineTombstones", {})
+            removed = [
+                key
+                for key, entry in tombstones.items()
+                if key == str(identity)
+                or (
+                    isinstance(entry, dict)
+                    and entry.get("identity") == str(identity)
+                )
+            ]
+            for key in removed:
+                tombstones.pop(key, None)
+            if removed:
+                self._save_locked()
+            return bool(removed)
+
     def prune_older_than(self, retention_days: int, now: Optional[datetime] = None) -> int:
         cutoff = (now or datetime.now(timezone.utc)).timestamp() - retention_days * 86400
         removed = 0
@@ -1397,6 +1537,15 @@ class ValidationStateStore:
                     continue
                 if validated_at < cutoff:
                     del files[key]
+                    removed += 1
+            tombstones = self._data.setdefault("quarantineTombstones", {})
+            for key, entry in list(tombstones.items()):
+                try:
+                    hold_until = datetime.fromisoformat(entry["holdUntil"]).timestamp()
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if hold_until < (now or datetime.now(timezone.utc)).timestamp():
+                    del tombstones[key]
                     removed += 1
             if removed:
                 self._save_locked()

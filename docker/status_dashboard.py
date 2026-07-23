@@ -29,6 +29,10 @@ MAINTENANCE_KEYS = (
     "deleted",
     "undersized",
     "pruned",
+    "source_less_warnings",
+    "repeat_quarantines",
+    "quarantine_holds",
+    "variant_outputs",
     "failures",
 )
 

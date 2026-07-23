@@ -148,6 +148,12 @@ CLEANUP_PRUNE_EXTRA_LANGUAGES = os.getenv("CLEANUP_PRUNE_EXTRA_LANGUAGES", "true
 CLEANUP_PRUNE_ACTION = os.getenv("CLEANUP_PRUNE_ACTION", "quarantine").strip().lower()
 CLEANUP_PRUNE_SPECIAL_SIDECARS = os.getenv("CLEANUP_PRUNE_SPECIAL_SIDECARS", "true").lower() in ("1", "true", "yes")
 CLEANUP_PRUNE_UNKNOWN_SIDECARS = os.getenv("CLEANUP_PRUNE_UNKNOWN_SIDECARS", "false").lower() in ("1", "true", "yes")
+CLEANUP_SOURCELESS_LINE_ONLY_ACTION = os.getenv(
+    "CLEANUP_SOURCELESS_LINE_ONLY_ACTION", "warn"
+).strip().lower()
+CLEANUP_QUARANTINE_HOLD_DAYS = max(
+    1, int(os.getenv("CLEANUP_QUARANTINE_HOLD_DAYS", "30"))
+)
 CLEANUP_ROOT_RAW = os.getenv("CLEANUP_ROOT", "/media").strip() or "/media"
 CLEANUP_ROOTS = [Path(value.strip()) for value in CLEANUP_ROOT_RAW.split(os.pathsep) if value.strip()]
 CLEANUP_ACTION = os.getenv("CLEANUP_ACTION", "quarantine").strip().lower()
@@ -179,6 +185,11 @@ if CLEANUP_ACTION not in ("quarantine", "delete", "report"):
     sys.exit(1)
 if CLEANUP_PRUNE_ACTION not in ("quarantine", "delete", "report"):
     print(f"{RED}[ERROR] CLEANUP_PRUNE_ACTION must be quarantine, delete, or report{RESET}")
+    sys.exit(1)
+if CLEANUP_SOURCELESS_LINE_ONLY_ACTION not in ("warn", "quarantine"):
+    print(
+        f"{RED}[ERROR] CLEANUP_SOURCELESS_LINE_ONLY_ACTION must be warn or quarantine{RESET}"
+    )
     sys.exit(1)
 if not 1 <= STATUS_PORT <= 65535:
     print(f"{RED}[ERROR] STATUS_PORT must be between 1 and 65535{RESET}")
@@ -312,7 +323,7 @@ def _status_finish_validation(
     target_lang: str,
     action: str,
 ) -> None:
-    if action in ("valid", "formatted", "repaired"):
+    if action in ("valid", "valid-warning", "formatted", "repaired"):
         _status_transition(
             item_type,
             item_id,
@@ -380,6 +391,7 @@ signal.signal(signal.SIGINT, _handle_signal)
 
 _submitted_cache: dict[tuple, float] = {}
 _submitted_paths: dict[tuple, str] = {}
+_submitted_metadata: dict[tuple, dict] = {}
 _cache_lock = threading.Lock()
 
 
@@ -398,6 +410,10 @@ def _load_submit_cache() -> None:
         print(f"{YELLOW}[WARNING] Could not read submit cache ({e}) — starting fresh{RESET}")
         return
 
+    if not isinstance(raw, dict):
+        print(f"{YELLOW}[WARNING] Submit cache is not an object; starting fresh{RESET}")
+        return
+
     now = time.time()
     loaded = 0
     pruned = 0
@@ -405,21 +421,40 @@ def _load_submit_cache() -> None:
         for key, submitted_at in raw.items():
             try:
                 item_id_s, lang = key.rsplit(":", 1)
+                item_id = int(item_id_s)
                 if isinstance(submitted_at, dict):
                     ts = float(submitted_at.get("submittedAt"))
                     target_path = submitted_at.get("targetPath")
+                    metadata = {
+                        field: submitted_at.get(field)
+                        for field in (
+                            "targetPath",
+                            "expectedTargetPath",
+                            "actualTargetPath",
+                            "videoPath",
+                            "sourcePath",
+                            "sourceHash",
+                            "sourceLanguage",
+                            "itemType",
+                            "targetVariant",
+                        )
+                        if submitted_at.get(field) is not None
+                    }
                 else:
                     ts = float(submitted_at)
                     target_path = None
+                    metadata = {}
             except (TypeError, ValueError, AttributeError):
                 continue
             if now - ts >= RESUBMIT_COOLDOWN:
                 pruned += 1
                 continue
-            cache_key = (int(item_id_s), lang)
+            cache_key = (item_id, lang)
             _submitted_cache[cache_key] = ts
             if isinstance(target_path, str) and target_path:
                 _submitted_paths[cache_key] = os.path.normcase(os.path.abspath(target_path))
+            if metadata:
+                _submitted_metadata[cache_key] = metadata
             loaded += 1
     print(f"[INFO] Loaded {loaded} active cooldown entr{'y' if loaded == 1 else 'ies'} "
           f"from cache ({pruned} expired pruned)")
@@ -431,6 +466,7 @@ def _save_submit_cache() -> None:
         with _cache_lock:
             serializable = {
                 _cache_key_str(item_id, lang): {
+                    **_submitted_metadata.get((item_id, lang), {}),
                     "submittedAt": ts,
                     "targetPath": _submitted_paths.get((item_id, lang)),
                 }
@@ -455,12 +491,57 @@ def _check_cooldown(item_id: int, target_lang: str) -> int | None:
     return age if age < RESUBMIT_COOLDOWN else None
 
 
-def _record_submission(item_id: int, target_lang: str, target_path: str | None = None) -> None:
+def _record_submission(
+    item_id: int,
+    target_lang: str,
+    target_path: str | None = None,
+    *,
+    expected_target_path: str | None = None,
+    actual_target_path: str | None = None,
+    video_path: str | None = None,
+    source_path: str | None = None,
+    source_hash: str | None = None,
+    source_language: str | None = None,
+    item_type: str | None = None,
+    target_variant: str | None = None,
+) -> None:
     with _cache_lock:
         key = (item_id, target_lang)
         _submitted_cache[key] = time.time()
         if target_path:
             _submitted_paths[key] = os.path.normcase(os.path.abspath(target_path))
+        _submitted_metadata[key] = {
+            field: value
+            for field, value in {
+                "targetPath": target_path,
+                "expectedTargetPath": expected_target_path or target_path,
+                "actualTargetPath": actual_target_path,
+                "videoPath": video_path,
+                "sourcePath": source_path,
+                "sourceHash": source_hash,
+                "sourceLanguage": source_language,
+                "itemType": item_type,
+                "targetVariant": target_variant,
+            }.items()
+            if value is not None
+        }
+    _save_submit_cache()
+
+
+def _update_submission_actual_path(
+    item_id: int,
+    target_lang: str,
+    actual_target_path: str,
+    target_variant: str,
+) -> None:
+    with _cache_lock:
+        key = (item_id, target_lang)
+        if key not in _submitted_cache:
+            return
+        metadata = _submitted_metadata.setdefault(key, {})
+        metadata["actualTargetPath"] = actual_target_path
+        metadata["targetVariant"] = target_variant
+        _submitted_paths[key] = os.path.normcase(os.path.abspath(actual_target_path))
     _save_submit_cache()
 
 
@@ -470,6 +551,7 @@ def _clear_submission(item_id: int, target_lang: str) -> None:
         key = (item_id, target_lang)
         removed = _submitted_cache.pop(key, None)
         _submitted_paths.pop(key, None)
+        _submitted_metadata.pop(key, None)
     if removed is not None:
         _save_submit_cache()
         dbg(f"_clear_submission({item_id}, {target_lang!r}): cleared")
@@ -477,15 +559,25 @@ def _clear_submission(item_id: int, target_lang: str) -> None:
 
 def _clear_submission_for_path(target_path: str | Path, target_lang: str) -> int:
     normalized = os.path.normcase(os.path.abspath(str(target_path)))
+    identity = _target_identity_from_sidecar(target_path, target_lang)
     with _cache_lock:
         keys = [
             key
             for key, path in _submitted_paths.items()
-            if key[1] == target_lang and path == normalized
+            if key[1] == target_lang
+            and (
+                path == normalized
+                or (
+                    identity is not None
+                    and _submission_identity(_submitted_metadata.get(key, {}), key[1])
+                    == identity
+                )
+            )
         ]
         for key in keys:
             _submitted_cache.pop(key, None)
             _submitted_paths.pop(key, None)
+            _submitted_metadata.pop(key, None)
     if keys:
         _save_submit_cache()
         dbg(f"Cleared {len(keys)} cooldown entr{'y' if len(keys) == 1 else 'ies'} for {target_path}")
@@ -911,7 +1003,11 @@ class SidecarClassification:
 
 def _sub_priority(path: str, lang_code2: str) -> int:
     stem = os.path.basename(path).lower().removesuffix(".srt")
-    for code in sorted(_LANGUAGE_ALIASES.get(lang_code2, {lang_code2}), key=len):
+    for code in sorted(
+        _LANGUAGE_ALIASES.get(lang_code2, {lang_code2}),
+        key=len,
+        reverse=True,
+    ):
         idx = stem.rfind(f".{code}")
         if idx == -1:
             continue
@@ -926,12 +1022,107 @@ def _sub_priority(path: str, lang_code2: str) -> int:
     return 99
 
 
+def _target_suffix(path: str | Path, target_lang: str) -> tuple[str, str] | None:
+    name = Path(path).name
+    aliases = sorted(
+        _LANGUAGE_ALIASES.get(target_lang, {target_lang}),
+        key=len,
+        reverse=True,
+    )
+    for alias in aliases:
+        match = _re.search(
+            rf"\.{_re.escape(alias)}(?P<variant>\.(?:hi|sdh|\d+))?\.srt$",
+            name,
+            _re.IGNORECASE,
+        )
+        if match:
+            return name[:match.start()], (match.group("variant") or "").lower()
+    return None
+
+
+def _target_identity_from_sidecar(
+    target_path: str | Path,
+    target_lang: str,
+) -> str | None:
+    suffix = _target_suffix(target_path, target_lang)
+    if suffix is None:
+        return None
+    base_name, _ = suffix
+    return os.path.normcase(
+        os.path.abspath(os.path.join(os.path.dirname(str(target_path)), base_name))
+    )
+
+
+def _submission_identity(metadata: dict, target_lang: str) -> str | None:
+    video_path = metadata.get("videoPath")
+    if isinstance(video_path, str) and video_path:
+        return os.path.normcase(os.path.abspath(os.path.splitext(video_path)[0]))
+    for field in ("actualTargetPath", "expectedTargetPath", "targetPath"):
+        value = metadata.get(field)
+        if isinstance(value, str) and value:
+            identity = _target_identity_from_sidecar(value, target_lang)
+            if identity is not None:
+                return identity
+    return None
+
+
+def _find_target_sidecars(video_path: str, target_lang: str) -> list[str]:
+    video = Path(video_path)
+    matches: list[str] = []
+    try:
+        entries = video.parent.iterdir()
+    except OSError:
+        return matches
+    for candidate in entries:
+        if not candidate.is_file() or candidate.suffix.casefold() != ".srt":
+            continue
+        suffix = _target_suffix(candidate, target_lang)
+        if suffix is None or suffix[0].casefold() != video.stem.casefold():
+            continue
+        matches.append(str(candidate))
+    return sorted(matches, key=lambda path: (_sub_priority(path, target_lang), path.casefold()))
+
+
 def _find_existing_target(video_path: str, target_lang: str) -> str | None:
-    base = os.path.splitext(video_path)[0]
-    for variant in ("", ".hi", ".2", ".3", ".4"):
-        p = f"{base}.{target_lang}{variant}.srt"
-        if os.path.exists(p):
-            return p
+    return next(iter(_find_target_sidecars(video_path, target_lang)), None)
+
+
+def _snapshot_target_sidecars(video_path: str, target_lang: str) -> dict[str, str | None]:
+    return {
+        os.path.normcase(os.path.abspath(path)): _file_hash_or_none(path)
+        for path in _find_target_sidecars(video_path, target_lang)
+    }
+
+
+def _discover_completed_target(
+    video_path: str,
+    target_lang: str,
+    expected_target_path: str,
+    before: dict[str, str | None],
+) -> str | None:
+    expected = os.path.normcase(os.path.abspath(expected_target_path))
+    changed: list[str] = []
+    for path in _find_target_sidecars(video_path, target_lang):
+        normalized = os.path.normcase(os.path.abspath(path))
+        current_hash = _file_hash_or_none(path)
+        if normalized not in before or before[normalized] != current_hash:
+            changed.append(path)
+    if changed:
+        selected = next(
+            (
+                path
+                for path in changed
+                if os.path.normcase(os.path.abspath(path)) == expected
+            ),
+            changed[0],
+        )
+        print(
+            f"[TRANSLATE] Discovered Lingarr output {os.path.basename(selected)} "
+            f"(expected {os.path.basename(expected_target_path)})"
+        )
+        return selected
+    if os.path.exists(expected_target_path):
+        return expected_target_path
     return None
 
 
@@ -990,6 +1181,45 @@ def _find_sidecar_video(subtitle_path: str | Path) -> Path | None:
     except OSError:
         return None
     return max(candidates, key=lambda path: len(path.stem), default=None)
+
+
+def _quarantine_identity(
+    target_lang: str,
+    *,
+    video_path: str | Path | None = None,
+    target_path: str | Path | None = None,
+) -> str | None:
+    if video_path is not None:
+        base = os.path.normcase(os.path.abspath(os.path.splitext(str(video_path))[0]))
+    elif target_path is not None:
+        base = _target_identity_from_sidecar(target_path, target_lang)
+    else:
+        return None
+    return f"{base}|{target_lang.casefold()}" if base is not None else None
+
+
+def _active_quarantine_hold(
+    video_path: str | Path,
+    target_lang: str,
+) -> dict | None:
+    identity = _quarantine_identity(target_lang, video_path=video_path)
+    if identity is None:
+        return None
+    return _get_validation_state().active_quarantine_tombstone(identity)
+
+
+def _clear_quarantine_hold(
+    target_lang: str,
+    *,
+    video_path: str | Path | None = None,
+    target_path: str | Path | None = None,
+) -> bool:
+    identity = _quarantine_identity(
+        target_lang, video_path=video_path, target_path=target_path
+    )
+    if identity is None:
+        return False
+    return _get_validation_state().clear_quarantine_tombstone(identity)
 
 
 def _probe_media_duration(video_path: str | Path) -> float | None:
@@ -1088,13 +1318,24 @@ def _estimate_timeout(source_path: str) -> int:
 
 
 def _derive_target_path(source_path: str, source_lang: str, target_lang: str) -> str | None:
-    basename = os.path.basename(source_path)
-    marker = f".{source_lang}."
-    idx = basename.rfind(marker)
-    if idx == -1:
+    path = Path(source_path)
+    stem_tokens = path.stem.split(".")
+    aliases = {
+        alias.casefold()
+        for alias in _LANGUAGE_ALIASES.get(source_lang, {source_lang})
+    }
+    language_index = next(
+        (
+            index
+            for index in range(len(stem_tokens) - 1, -1, -1)
+            if stem_tokens[index].casefold() in aliases
+        ),
+        None,
+    )
+    if language_index is None:
         return None
-    new_basename = basename[:idx] + f".{target_lang}." + basename[idx + len(marker):]
-    return os.path.join(os.path.dirname(source_path), new_basename)
+    stem_tokens[language_index] = target_lang
+    return str(path.with_name(".".join(stem_tokens) + path.suffix))
 
 
 def _validation_kwargs() -> dict:
@@ -1112,6 +1353,14 @@ def _validation_kwargs() -> dict:
         "max_expansion_chars": CLEANUP_MAX_EXPANSION_CHARS,
         "max_source_similarity": CLEANUP_MAX_SOURCE_SIMILARITY,
     }
+
+
+def _source_less_line_only_warning(report) -> bool:
+    return (
+        CLEANUP_SOURCELESS_LINE_ONLY_ACTION == "warn"
+        and bool(report.issues)
+        and all(issue.rule == "excessive_lines" for issue in report.issues)
+    )
 
 
 def _file_hash_or_none(path: str | Path | None) -> str | None:
@@ -1146,8 +1395,106 @@ def _record_validation_result(
             origin=origin,
             details=details,
         )
+        if result in ("valid", "valid_with_warnings"):
+            for language in LANGUAGES:
+                if _target_suffix(target_path, language) is not None:
+                    _clear_quarantine_hold(language, target_path=target_path)
+                    break
     except OSError as e:
         print(f"{YELLOW}[WARNING] Could not persist validation state: {e}{RESET}")
+
+
+def _record_pending_lingarr_output(
+    source_path: str,
+    target_path: str,
+    source_lang: str,
+    target_lang: str,
+    item_type: str,
+    item_id: int,
+) -> None:
+    source_hash = _file_hash_or_none(source_path)
+    target_hash = _file_hash_or_none(target_path)
+    if target_hash is None:
+        return
+    try:
+        _get_validation_state().record(
+            target_path,
+            source_hash=source_hash,
+            target_hash=target_hash,
+            result="pending_validation",
+            origin="lingarr",
+            details={
+                "sourcePath": source_path,
+                "sourceLanguage": source_lang,
+                "targetLanguage": target_lang,
+                "itemType": item_type,
+                "itemId": item_id,
+            },
+        )
+    except OSError as exc:
+        print(
+            f"{YELLOW}[WARNING] Could not persist pending Lingarr provenance: "
+            f"{exc}{RESET}"
+        )
+
+
+def _find_submission_for_target(
+    target_path: str | Path,
+    target_lang: str,
+) -> dict | None:
+    identity = _target_identity_from_sidecar(target_path, target_lang)
+    if identity is None:
+        return None
+    with _cache_lock:
+        for key, metadata in _submitted_metadata.items():
+            if key[1] != target_lang:
+                continue
+            if _submission_identity(metadata, target_lang) == identity:
+                return {"itemId": key[0], **metadata}
+    return None
+
+
+def _submission_matches_source(metadata: dict | None, source_path: str) -> bool:
+    if metadata is None:
+        return False
+    recorded_source = metadata.get("sourcePath")
+    if not isinstance(recorded_source, str) or not recorded_source:
+        return False
+    if os.path.normcase(os.path.abspath(recorded_source)) != os.path.normcase(
+        os.path.abspath(source_path)
+    ):
+        return False
+    recorded_hash = metadata.get("sourceHash")
+    return not recorded_hash or recorded_hash == _file_hash_or_none(source_path)
+
+
+def _record_quarantine_hold(
+    target_path: str | Path,
+    target_lang: str,
+    target_hash: str | None,
+    report,
+    origin: str | None,
+) -> tuple[dict | None, bool]:
+    if target_hash is None:
+        return None, False
+    identity = _quarantine_identity(target_lang, target_path=target_path)
+    if identity is None:
+        return None, False
+    entry, repeated = _get_validation_state().record_quarantine_tombstone(
+        identity,
+        target_path=target_path,
+        target_hash=target_hash,
+        target_language=target_lang,
+        rules=(issue.rule for issue in report.issues),
+        origin=origin,
+        hold_days=CLEANUP_QUARANTINE_HOLD_DAYS,
+    )
+    if repeated:
+        print(
+            f"[CLEANUP] Repeat offender hash for {os.path.basename(str(target_path))}; "
+            f"occurrence {entry['occurrences']}, translation held until {entry['holdUntil']}"
+        )
+    return entry, repeated
 
 
 def _apply_cleanup_action(
@@ -1209,6 +1556,13 @@ def _apply_cleanup_action(
     if CLEANUP_ACTION == "quarantine":
         try:
             destination = quarantine_subtitle(target, CLEANUP_ROOTS, CLEANUP_QUARANTINE_DIR)
+            hold, repeated = _record_quarantine_hold(
+                target, target_lang, target_hash, report, origin
+            )
+            setattr(report, "repeat_offender", repeated)
+            if hold is not None:
+                audit["quarantineHold"] = hold
+                audit["repeatOffender"] = repeated
             try:
                 write_validation_report(destination, audit)
             except OSError as e:
@@ -1236,6 +1590,7 @@ def _apply_cleanup_action(
 
     try:
         target.unlink()
+        _record_quarantine_hold(target, target_lang, target_hash, report, origin)
         _record_validation_result(
             target,
             source_hash,
@@ -1624,10 +1979,21 @@ def _validate_translated_file(
 
     source_hash = _file_hash_or_none(source_path)
     expected_target_hash = _file_hash_or_none(target_path)
-    recorded_origin = (
-        _get_validation_state().matching_origin(target_path, expected_target_hash)
+    recorded = (
+        _get_validation_state().matching_record(target_path, expected_target_hash)
         if expected_target_hash is not None else None
     )
+    recorded_origin = recorded.get("origin") if recorded is not None else None
+    if (
+        recorded_origin == "lingarr"
+        and recorded.get("sourceHash") != source_hash
+    ):
+        print(
+            f"{YELLOW}[CLEANUP] Lingarr provenance source changed for "
+            f"{os.path.basename(target_path)}; using conservative target-only "
+            f"validation{RESET}"
+        )
+        recorded_origin = None
     effective_origin = origin or recorded_origin
     source_aligned = effective_origin == "lingarr"
     if source_aligned:
@@ -1642,6 +2008,25 @@ def _validate_translated_file(
         )
     completeness = _evaluate_completeness(target_path, media_duration)
     _add_completeness_issue(report, completeness)
+    if (
+        not source_aligned
+        and _source_less_line_only_warning(report)
+    ):
+        print(
+            f"{YELLOW}[CLEANUP] Retained {os.path.basename(target_path)} with "
+            f"source-less line-count warning: {report.summary()}{RESET}"
+        )
+        _record_validation_result(
+            target_path,
+            source_hash,
+            expected_target_hash,
+            "valid_with_warnings",
+            report,
+            origin=effective_origin,
+            warningRules=["excessive_lines"],
+            completeness=completeness.to_dict() if completeness is not None else None,
+        )
+        return "valid-warning", report
     if report.valid:
         if CLEANUP_FORMAT_REPAIR_ENABLED and source_aligned:
             recovery = recover_subtitle_pair(source_path, target_path)
@@ -1705,6 +2090,24 @@ def _validate_translated_file(
 
     label = title or os.path.basename(target_path)
     print(f"{YELLOW}[CLEANUP] Invalid translation {label} '{target_lang}': {report.summary()}{RESET}")
+    quarantine_identity = _quarantine_identity(target_lang, target_path=target_path)
+    active_tombstone = (
+        _get_validation_state().active_quarantine_tombstone(
+            quarantine_identity, target_hash=expected_target_hash
+        )
+        if quarantine_identity is not None else None
+    )
+    repeat_invalid_hash = bool(
+        active_tombstone
+        and expected_target_hash
+        and active_tombstone.get("targetHash") == expected_target_hash
+    )
+    if repeat_invalid_hash:
+        setattr(report, "ai_repair_suppressed", True)
+        print(
+            f"[CLEANUP] Known invalid hash reappeared for {label}; "
+            "skipping duplicate AI repair"
+        )
     recovery_raw = None
     format_fixes: list[str] = []
     format_recovered_cues: list[int] = []
@@ -1749,7 +2152,13 @@ def _validate_translated_file(
         elif not recovery.safe:
             dbg(f"Format recovery unsafe for {label}: {recovery.reason}")
 
-    if source_aligned and CLEANUP_REPAIR_ENABLED and report.repairable_cue_indexes and not dry_run:
+    if (
+        source_aligned
+        and CLEANUP_REPAIR_ENABLED
+        and report.repairable_cue_indexes
+        and not dry_run
+        and not repeat_invalid_hash
+    ):
         job_kwargs = {
             "source_path": source_path,
             "target_path": target_path,
@@ -1788,7 +2197,10 @@ def _validate_translated_file(
     )
     if action in ("quarantined", "deleted") and item_id is not None:
         _clear_submission(item_id, target_lang)
-        print(f"[CLEANUP] Cleared cooldown for retry: {label} '{target_lang}'")
+        print(
+            f"[CLEANUP] Cleared submission cooldown for {label} '{target_lang}'; "
+            f"quarantine hold remains active"
+        )
     return action, report
 
 # ---------------------------------------------------------------------------
@@ -1829,7 +2241,17 @@ def _record_cleanup_stats(stats: dict, action: str, report) -> None:
     stats["cleanup_excessive_lines"] = stats.get("cleanup_excessive_lines", 0) + excessive
     stats["cleanup_undersized_targets"] = stats.get("cleanup_undersized_targets", 0) + undersized
     stats["cleanup_other_issues"] = stats.get("cleanup_other_issues", 0) + len(report.issues) - excessive
-    if action == "formatted":
+    stats["cleanup_repeat_quarantines"] = stats.get(
+        "cleanup_repeat_quarantines", 0
+    ) + int(bool(getattr(report, "repeat_offender", False)))
+    stats["cleanup_ai_repairs_suppressed"] = stats.get(
+        "cleanup_ai_repairs_suppressed", 0
+    ) + int(bool(getattr(report, "ai_repair_suppressed", False)))
+    if action == "valid-warning":
+        stats["cleanup_source_less_warnings"] = stats.get(
+            "cleanup_source_less_warnings", 0
+        ) + 1
+    elif action == "formatted":
         stats["cleanup_formatted"] = stats.get("cleanup_formatted", 0) + 1
     elif action == "repaired":
         stats["cleanup_repaired"] = stats.get("cleanup_repaired", 0) + 1
@@ -1990,24 +2412,9 @@ def process_item(item: dict, item_type: str, id_field: str,
         if shutdown_requested:
             break
 
-        age = _check_cooldown(item_id, target_lang)
-        if age is not None:
-            cooldown_remaining = RESUBMIT_COOLDOWN - age
-            print(f"[SKIP] {title} '{target_lang}': submitted {age}s ago, "
-                  f"cooldown {cooldown_remaining}s remaining")
-            _status_transition(
-                item_type,
-                item_id,
-                target_lang,
-                "deferred",
-                reason="resubmit cooldown",
-            )
-            continue
-
-        if video_path:
+        target_path = _derive_target_path(source_path, source_lang, target_lang)
+        if not target_path and video_path:
             target_path = os.path.splitext(video_path)[0] + f".{target_lang}.srt"
-        else:
-            target_path = _derive_target_path(source_path, source_lang, target_lang)
         if not target_path:
             print(f"{YELLOW}[SKIP] {title} '{target_lang}': could not derive target path{RESET}")
             _status_transition(
@@ -2018,18 +2425,40 @@ def process_item(item: dict, item_type: str, id_field: str,
                 reason="target path unavailable",
             )
             continue
+        target_suffix = _target_suffix(target_path, target_lang)
+        target_variant = target_suffix[1] if target_suffix is not None else ""
+        print(
+            f"[TRANSLATE] Expected target for {title} '{target_lang}': "
+            f"{os.path.basename(target_path)}"
+        )
 
         existing = _find_existing_target(video_path, target_lang) if video_path else (
             target_path if os.path.exists(target_path) else None
         )
         if existing:
             print(f"[DISK] {title} '{target_lang}': {os.path.basename(existing)} already on disk")
+            submission = _find_submission_for_target(existing, target_lang)
+            recovered_origin = (
+                "lingarr"
+                if _submission_matches_source(submission, source_path)
+                else None
+            )
+            if recovered_origin:
+                with stats_lock:
+                    stats["recovered_pending_outputs"] = (
+                        stats.get("recovered_pending_outputs", 0) + 1
+                    )
+                print(
+                    f"[TRANSLATE] Recovered pending Lingarr output "
+                    f"{os.path.basename(existing)}"
+                )
             _status_transition(item_type, item_id, target_lang, "validating")
             validation_action, validation_report = _validate_translated_file(
                 source_path, existing, source_lang, target_lang, item_id, title=title,
                 defer_repair=True, item_type=item_type, media_duration=media_duration,
+                origin=recovered_origin,
             )
-            if validation_action in ("valid", "formatted", "repaired"):
+            if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
                 with stats_lock:
                     stats["completed"] += 1
                     stats["translations"].append(f"{title}: {source_lang} -> {target_lang} (on disk)")
@@ -2054,6 +2483,40 @@ def process_item(item: dict, item_type: str, id_field: str,
             _status_finish_validation(item_type, item_id, target_lang, validation_action)
             continue
 
+        if video_path:
+            hold = _active_quarantine_hold(video_path, target_lang)
+            if hold is not None:
+                with stats_lock:
+                    stats["quarantine_holds"] = stats.get("quarantine_holds", 0) + 1
+                    stats["deferred"] = stats.get("deferred", 0) + 1
+                print(
+                    f"[SKIP] {title} '{target_lang}': quarantine hold until "
+                    f"{hold.get('holdUntil')} after {hold.get('occurrences', 1)} "
+                    "invalid occurrence(s)"
+                )
+                _status_transition(
+                    item_type,
+                    item_id,
+                    target_lang,
+                    "deferred",
+                    reason="quarantine hold",
+                )
+                continue
+
+        age = _check_cooldown(item_id, target_lang)
+        if age is not None:
+            cooldown_remaining = RESUBMIT_COOLDOWN - age
+            print(f"[SKIP] {title} '{target_lang}': submitted {age}s ago, "
+                  f"cooldown {cooldown_remaining}s remaining")
+            _status_transition(
+                item_type,
+                item_id,
+                target_lang,
+                "deferred",
+                reason="resubmit cooldown",
+            )
+            continue
+
         while not shutdown_requested:
             active = lingarr_active_count()
             if active is None or active < PARALLEL_TRANSLATES:
@@ -2064,14 +2527,17 @@ def process_item(item: dict, item_type: str, id_field: str,
                     return
                 time.sleep(1)
 
-        if os.path.exists(target_path):
+        appeared = _find_existing_target(video_path, target_lang) if video_path else (
+            target_path if os.path.exists(target_path) else None
+        )
+        if appeared:
             print(f"[DISK] {title} '{target_lang}': appeared during queue wait")
             _status_transition(item_type, item_id, target_lang, "validating")
             validation_action, validation_report = _validate_translated_file(
-                source_path, target_path, source_lang, target_lang, item_id, title=title,
+                source_path, appeared, source_lang, target_lang, item_id, title=title,
                 defer_repair=True, item_type=item_type, media_duration=media_duration,
             )
-            if validation_action in ("valid", "formatted", "repaired"):
+            if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
                 with stats_lock:
                     stats["completed"] += 1
                     stats["translations"].append(f"{title}: {source_lang} -> {target_lang} (on disk)")
@@ -2114,6 +2580,11 @@ def process_item(item: dict, item_type: str, id_field: str,
             )
             continue
 
+        target_snapshot = (
+            _snapshot_target_sidecars(video_path, target_lang)
+            if video_path else {}
+        )
+        source_hash = _file_hash_or_none(source_path)
         print(f"[TRANSLATE] {title}: {source_lang} -> {target_lang} ({src_lines} lines)")
         job_id = lingarr_submit_file(media_id, source_path, source_lang, target_lang, lingarr_media_type)
         if job_id is None:
@@ -2124,7 +2595,18 @@ def process_item(item: dict, item_type: str, id_field: str,
             )
             continue
 
-        _record_submission(item_id, target_lang, target_path)
+        _record_submission(
+            item_id,
+            target_lang,
+            target_path,
+            expected_target_path=target_path,
+            video_path=video_path or None,
+            source_path=source_path,
+            source_hash=source_hash,
+            source_language=source_lang,
+            item_type=item_type,
+            target_variant=target_variant,
+        )
         _status_transition(item_type, item_id, target_lang, "translating")
         with stats_lock:
             stats["submitted"] += 1
@@ -2160,8 +2642,22 @@ def process_item(item: dict, item_type: str, id_field: str,
                 )
             continue
 
-        if not os.path.exists(target_path):
-            print(f"{YELLOW}[WARNING] {title} '{target_lang}': Lingarr completed but file missing at {target_path}{RESET}")
+        actual_target_path = (
+            _discover_completed_target(
+                video_path,
+                target_lang,
+                target_path,
+                target_snapshot,
+            )
+            if video_path
+            else (target_path if os.path.exists(target_path) else None)
+        )
+        if actual_target_path is None:
+            print(
+                f"{YELLOW}[WARNING] {title} '{target_lang}': Lingarr completed "
+                f"but no new target-language sidecar was found "
+                f"(expected {target_path}){RESET}"
+            )
             with stats_lock:
                 stats["timed_out"] += 1
             _status_transition(
@@ -2172,15 +2668,38 @@ def process_item(item: dict, item_type: str, id_field: str,
                 reason="completed output missing",
             )
             continue
+        actual_suffix = _target_suffix(actual_target_path, target_lang)
+        actual_variant = actual_suffix[1] if actual_suffix is not None else ""
+        _update_submission_actual_path(
+            item_id, target_lang, actual_target_path, actual_variant
+        )
+        if os.path.normcase(os.path.abspath(actual_target_path)) != os.path.normcase(
+            os.path.abspath(target_path)
+        ):
+            with stats_lock:
+                stats["variant_outputs_discovered"] = (
+                    stats.get("variant_outputs_discovered", 0) + 1
+                )
+        _record_pending_lingarr_output(
+            source_path,
+            actual_target_path,
+            source_lang,
+            target_lang,
+            item_type,
+            item_id,
+        )
 
         _status_transition(item_type, item_id, target_lang, "validating")
         validation_action, validation_report = _validate_translated_file(
-            source_path, target_path, source_lang, target_lang, item_id, title=title,
+            source_path, actual_target_path, source_lang, target_lang, item_id, title=title,
             defer_repair=True, item_type=item_type, media_duration=media_duration,
             origin="lingarr",
         )
-        if validation_action in ("valid", "formatted", "repaired"):
-            print(f"{GREEN}[OK] {title} '{target_lang}' translated to {os.path.basename(target_path)}{RESET}")
+        if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
+            print(
+                f"{GREEN}[OK] {title} '{target_lang}' translated to "
+                f"{os.path.basename(actual_target_path)}{RESET}"
+            )
             with stats_lock:
                 stats["completed"] += 1
                 stats["translations"].append(f"{title}: {source_lang} -> {target_lang}")
@@ -2613,6 +3132,10 @@ def run_existing_cleanup_scan() -> dict:
         "reported_files": 0,
         "dry_run_files": 0,
         "without_source": 0,
+        "source_less_warnings": 0,
+        "recovered_pending_outputs": 0,
+        "repeat_quarantines": 0,
+        "ai_repairs_suppressed": 0,
         "action_failures": 0,
         "undersized_checked": 0,
         "undersized_forced_exempt": 0,
@@ -2660,12 +3183,62 @@ def run_existing_cleanup_scan() -> dict:
                 continue
 
             source_path, source_lang = find_preferred_source(candidate)
+            if source_path is not None and candidate.variant:
+                print(
+                    f"[SCAN] Paired {candidate.path.name} with variant-aware source "
+                    f"{source_path.name}"
+                )
             try:
                 target_hash = file_sha256(candidate.path)
-                source_hash = file_sha256(source_path) if source_path is not None else None
             except OSError as e:
                 print(f"{YELLOW}[SCAN] Could not hash {candidate.path}: {e}{RESET}")
                 continue
+            validation_origin = None
+            submission = _find_submission_for_target(
+                candidate.path, candidate.target_lang
+            )
+            if source_path is None and submission is not None:
+                pending_source = submission.get("sourcePath")
+                pending_language = submission.get("sourceLanguage")
+                if (
+                    isinstance(pending_source, str)
+                    and pending_source
+                    and os.path.exists(pending_source)
+                    and isinstance(pending_language, str)
+                    and pending_language
+                ):
+                    try:
+                        pending_hash = file_sha256(pending_source)
+                    except OSError as e:
+                        print(
+                            f"{YELLOW}[SCAN] Could not hash pending source "
+                            f"{pending_source}: {e}{RESET}"
+                        )
+                        pending_hash = None
+                    if (
+                        pending_hash is not None
+                        and (
+                        not submission.get("sourceHash")
+                        or submission.get("sourceHash") == pending_hash
+                        )
+                    ):
+                        source_path = Path(pending_source)
+                        source_lang = pending_language
+                        validation_origin = "lingarr"
+                        stats["recovered_pending_outputs"] += 1
+                        print(
+                            f"[SCAN] Recovered pending Lingarr output "
+                            f"{candidate.path.name} with source {source_path.name}"
+                        )
+            try:
+                source_hash = (
+                    file_sha256(source_path) if source_path is not None else None
+                )
+            except OSError as e:
+                print(f"{YELLOW}[SCAN] Could not hash {source_path}: {e}{RESET}")
+                source_path = None
+                source_lang = None
+                source_hash = None
 
             if state.is_unchanged_valid(candidate.path, source_hash, target_hash):
                 stats["skipped_unchanged"] += 1
@@ -2685,6 +3258,7 @@ def run_existing_cleanup_scan() -> dict:
                     defer_repair=not CLEANUP_SCAN_DRY_RUN,
                     media_duration=_probe_media_duration(candidate_video)
                     if candidate_video is not None else None,
+                    origin=validation_origin,
                 )
             else:
                 stats["without_source"] += 1
@@ -2701,6 +3275,22 @@ def run_existing_cleanup_scan() -> dict:
                         candidate.path, None, target_hash, "valid", report, sourceAvailable=False
                     )
                     action = "valid"
+                elif _source_less_line_only_warning(report):
+                    print(
+                        f"{YELLOW}[SCAN] Retained {candidate.path.name} with "
+                        f"source-less line-count warning: {report.summary()}{RESET}"
+                    )
+                    _record_validation_result(
+                        candidate.path,
+                        None,
+                        target_hash,
+                        "valid_with_warnings",
+                        report,
+                        sourceAvailable=False,
+                        warningRules=["excessive_lines"],
+                    )
+                    stats["source_less_warnings"] += 1
+                    action = "valid-warning"
                 else:
                     print(
                         f"{YELLOW}[SCAN] Invalid target without source {candidate.path.name}: "
@@ -2719,8 +3309,14 @@ def run_existing_cleanup_scan() -> dict:
                 excessive = sum(issue.rule == "excessive_lines" for issue in report.issues)
                 stats["excessive_line_cues"] += excessive
                 stats["other_invalid_cues"] += len(report.issues) - excessive
+                stats["repeat_quarantines"] += int(
+                    bool(getattr(report, "repeat_offender", False))
+                )
+                stats["ai_repairs_suppressed"] += int(
+                    bool(getattr(report, "ai_repair_suppressed", False))
+                )
                 if (
-                    action not in ("valid", "formatted", "repaired", "repair-queued", "repair-duplicate", "repair-deferred")
+                    action not in ("valid", "valid-warning", "formatted", "repaired", "repair-queued", "repair-duplicate", "repair-deferred")
                     and source_path is not None
                     and CLEANUP_REPAIR_ENABLED
                     and report.repairable_cue_indexes
@@ -2763,6 +3359,10 @@ def run_existing_cleanup_scan() -> dict:
         print(f"  Skipped unchanged   : {stats['skipped_unchanged']}")
         print(f"  Excessive-line cues : {stats['excessive_line_cues']}")
         print(f"  Other invalid cues  : {stats['other_invalid_cues']}")
+        print(f"  Source-less warnings: {stats['source_less_warnings']}")
+        print(f"  Pending recovered   : {stats['recovered_pending_outputs']}")
+        print(f"  Repeat quarantines  : {stats['repeat_quarantines']}")
+        print(f"  AI repairs skipped  : {stats['ai_repairs_suppressed']}")
         print(f"  Format-only repairs : {stats['formatted_files']}")
         print(f"  Repaired files      : {stats['repaired_files']}")
         print(f"  AI repairs queued   : {stats['repair_queued']}")
@@ -2802,6 +3402,13 @@ def _run_existing_cleanup_scan_safely() -> dict | None:
             "deleted": stats.get("deleted_files", 0) + stats.get("prune_deleted", 0),
             "undersized": stats.get("undersized_detected", 0),
             "pruned": stats.get("prune_quarantined", 0) + stats.get("prune_deleted", 0),
+            "source_less_warnings": stats.get("source_less_warnings", 0),
+            "repeat_quarantines": stats.get("repeat_quarantines", 0),
+            "quarantine_holds": stats.get("quarantine_holds", 0),
+            "variant_outputs": (
+                stats.get("variant_outputs_discovered", 0)
+                + stats.get("recovered_pending_outputs", 0)
+            ),
             "failures": (
                 stats.get("repair_failures", 0)
                 + stats.get("action_failures", 0)
@@ -2878,6 +3485,10 @@ def run_cycle(cycle_num: int) -> None:
         "completed": 0,
         "timed_out": 0,
         "failed": 0,
+        "deferred": 0,
+        "quarantine_holds": 0,
+        "variant_outputs_discovered": 0,
+        "recovered_pending_outputs": 0,
         "translations": [],
         "episode_activity": False,
         "movie_activity": False,
@@ -2949,6 +3560,10 @@ def run_cycle(cycle_num: int) -> None:
     print(f"  Completed  : {stats['completed']}")
     print(f"  Timed out  : {stats['timed_out']}")
     print(f"  Failed     : {stats['failed']}")
+    print(f"  Deferred   : {stats.get('deferred', 0)}")
+    print(f"  Variant outputs found : {stats.get('variant_outputs_discovered', 0)}")
+    print(f"  Pending outputs found : {stats.get('recovered_pending_outputs', 0)}")
+    print(f"  Quarantine holds      : {stats.get('quarantine_holds', 0)}")
     if stats.get("cleaned"):
         print(f"  Cleaned    : {stats['cleaned']}")
     if stats.get("cleanup_checked"):
@@ -2966,6 +3581,9 @@ def run_cycle(cycle_num: int) -> None:
         print(f"  Undersized targets    : {stats.get('cleanup_undersized_targets', 0)}")
         print(f"  Forced sources skipped: {stats.get('cleanup_forced_sources_skipped', 0)}")
         print(f"  Alternative sources  : {stats.get('cleanup_alternative_sources', 0)}")
+        print(f"  Source-less warnings : {stats.get('cleanup_source_less_warnings', 0)}")
+        print(f"  Repeat quarantines   : {stats.get('cleanup_repeat_quarantines', 0)}")
+        print(f"  AI repairs suppressed: {stats.get('cleanup_ai_repairs_suppressed', 0)}")
     if stats.get("prune_videos_checked"):
         print(f"  Prune videos checked : {stats['prune_videos_checked']}")
         print(f"  Prune ready/deferred : {stats.get('prune_ready', 0)}/{stats.get('prune_deferred', 0)}")
@@ -3052,6 +3670,8 @@ def main() -> int:
     print(f"  Existing scan     : {'ON' if CLEANUP_SCAN_EXISTING else 'off'} every {CLEANUP_SCAN_INTERVAL}s")
     print(f"  Cleanup roots     : {', '.join(str(root) for root in CLEANUP_ROOTS)}")
     print(f"  Cleanup action    : {CLEANUP_ACTION}{' (scan dry-run)' if CLEANUP_SCAN_DRY_RUN else ''}")
+    print(f"  Source-less lines : {CLEANUP_SOURCELESS_LINE_ONLY_ACTION}")
+    print(f"  Quarantine hold   : {CLEANUP_QUARANTINE_HOLD_DAYS} days")
     print(f"  Sidecar pruning   : {'ON' if CLEANUP_PRUNE_EXTRA_LANGUAGES else 'off'} "
           f"({CLEANUP_PRUNE_ACTION}, unknown={'remove' if CLEANUP_PRUNE_UNKNOWN_SIDECARS else 'retain'})")
     print(f"  Max cue lines     : {CLEANUP_MAX_CUE_LINES}")

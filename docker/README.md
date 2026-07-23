@@ -61,6 +61,8 @@ Existing-library cleanup runs after startup synchronization and then on its own 
 | `CLEANUP_PRUNE_ACTION` | `quarantine` | Prune action: `quarantine`, `delete`, or `report` |
 | `CLEANUP_PRUNE_SPECIAL_SIDECARS` | `true` | Remove unmanaged forced, foreign, signs, and commentary sidecars |
 | `CLEANUP_PRUNE_UNKNOWN_SIDECARS` | `false` | Also remove language-less, numeric-only, or unclassifiable sidecars |
+| `CLEANUP_SOURCELESS_LINE_ONLY_ACTION` | `warn` | Retain source-less subtitles whose only issue is excessive physical cue lines; use `quarantine` for the previous behavior |
+| `CLEANUP_QUARANTINE_HOLD_DAYS` | `30` | Defer retranslating the same media/language after an invalid subtitle is quarantined |
 | `CLEANUP_ROOT` | `/media` | Scan root; separate multiple Linux paths with `:` |
 | `CLEANUP_ACTION` | `quarantine` | Failure action: `quarantine`, `delete`, or `report` |
 | `CLEANUP_QUARANTINE_DIR` | `/config/quarantine` | Persistent quarantine directory |
@@ -121,7 +123,13 @@ Sidecar pruning runs after queued cue repairs and during each existing-library s
 
 The default prune action moves candidates out of the media directory immediately into `/config/quarantine`, so Bazarr no longer sees them. They remain recoverable until retention housekeeping permanently purges the subtitle and its audit report after 30 days by default. Use `CLEANUP_SCAN_DRY_RUN=true` to preview candidates without moving files or triggering Bazarr.
 
-Target variants `.et.srt`, `.et.hi.srt`, `.et.sdh.srt`, and numbered forms such as `.et.2.srt` receive language/content validation. Exact source cue alignment, source-anchored formatting recovery, and AI cue repair apply only to unchanged outputs recorded as created by Lingarr. Bazarr/manual subtitles are treated as independently segmented and are not rejected merely for differing English cue counts or timestamps.
+Target variants `.et.srt`, `.et.hi.srt`, `.et.sdh.srt`, and arbitrary numbered forms such as `.et.12.srt` receive language/content validation. Lingarr output names are discovered from the files that actually changed: for example, an `.en.hi.srt` source expects and accepts `.et.hi.srt` rather than incorrectly waiting for `.et.srt`. Existing target variants prefer a matching source variant, then fall back to a plain source.
+
+Lingarr provenance is persisted before validation, including the source and actual output hashes and paths. If the container restarts between Lingarr completion and local validation, the next scan recovers that relationship and can still use source-aware format or cue repair. Exact source cue alignment, source-anchored formatting recovery, and AI cue repair apply only to outputs positively identified as Lingarr-created. Bazarr/manual subtitles are treated as independently segmented and are not rejected merely for differing English cue counts or timestamps.
+
+A source-less subtitle whose only validation issue is `excessive_lines` is retained as `valid_with_warnings` by default and skipped on later scans while its hash is unchanged. Prompt leakage, malformed structure, wrong language/script, repetition, undersized content, or any other strong rule still makes it eligible for the configured cleanup action. No dialogue lines are joined automatically.
+
+When a subtitle is quarantined or deleted, a media/language tombstone records the invalid hash for `CLEANUP_QUARANTINE_HOLD_DAYS`. If that exact hash reappears, duplicate AI repair is suppressed and the occurrence is recorded; a new Lingarr job for that media/language is deferred until the hold expires. A different replacement hash is validated immediately, and accepting a valid replacement clears the hold. Dry-run scans never create or change holds.
 
 Source-anchored recovery normalizes BOMs, newlines, trailing whitespace, timestamp spacing, repeated separators, and blank lines inside cues. Orphan text is folded into its preceding cue only when every numbered timestamp anchor still matches the source in order. Missing, duplicate, reordered, or mismatched anchors are never guessed.
 
@@ -135,7 +143,7 @@ Each quarantined subtitle has a companion `.validation.json` report containing i
 2. Correct the subtitle or adjust settings only for a confirmed false positive.
 3. Move the subtitle back to `targetPath` and trigger a Bazarr subtitle scan.
 
-The `/config` volume persists quarantine files, validation state, and cooldown state across container recreation. Quarantine files, companion reports, daily application logs, and old validation-state records are removed after `RETENTION_DAYS`. Cleanup runs at startup and hourly by default.
+The `/config` volume persists quarantine files, validation state, provenance, cooldown state, and quarantine holds across container recreation. Quarantine files, companion reports, daily application logs, old validation-state records, and expired holds are removed after their configured retention period. Cleanup runs at startup and hourly by default.
 
 Docker console logs use the `local` logging driver with five 10 MB rotated files. Docker supports size-based rather than age-based console-log rotation; the daily files under `./logs` are the age-controlled 30-day log history.
 

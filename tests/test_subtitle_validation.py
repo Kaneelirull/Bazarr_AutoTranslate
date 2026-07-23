@@ -394,6 +394,50 @@ class SubtitleValidationTests(unittest.TestCase):
                 self.assertEqual(source, root / "show.eng.srt")
                 self.assertEqual(source_lang, "en")
 
+    def test_variant_target_prefers_matching_source_before_plain_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in (
+                "show.et.hi.srt",
+                "show.et.sdh.srt",
+                "show.et.12.srt",
+                "show.eng.srt",
+                "show.en.hi.srt",
+                "show.eng.sdh.srt",
+                "show.en.12.srt",
+            ):
+                (root / name).write_text(make_srt("Text"), encoding="utf-8")
+
+            pairings = {}
+            for candidate in discover_target_subtitles([root], ["et"]):
+                source, source_lang = find_preferred_source(candidate)
+                pairings[candidate.variant] = source.name
+                self.assertEqual(source_lang, "en")
+
+            self.assertEqual(
+                pairings,
+                {
+                    ".hi": "show.en.hi.srt",
+                    ".sdh": "show.eng.sdh.srt",
+                    ".12": "show.en.12.srt",
+                },
+            )
+
+    def test_discovers_three_letter_target_alias_as_configured_language(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "show.est.hi.srt").write_text(make_srt("Tere"), encoding="utf-8")
+            (root / "show.eng.hi.srt").write_text(make_srt("Hello"), encoding="utf-8")
+
+            candidates = discover_target_subtitles([root], ["et"])
+            source, source_lang = find_preferred_source(candidates[0])
+
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0].target_lang, "et")
+            self.assertEqual(candidates[0].language_token, "est")
+            self.assertEqual(source, root / "show.eng.hi.srt")
+            self.assertEqual(source_lang, "en")
+
     def test_validation_state_skips_only_unchanged_valid_pair(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -434,6 +478,84 @@ class SubtitleValidationTests(unittest.TestCase):
             self.assertEqual(details["completeness"]["mediaDurationSeconds"], 3600.0)
             target.write_text(make_srt("Muudetud"), encoding="utf-8")
             self.assertIsNone(state.current_valid_details(target, file_sha256(target)))
+
+    def test_validation_state_reuses_warning_and_tracks_quarantine_hold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "show.et.hi.srt"
+            target.write_text(make_srt("Tere"), encoding="utf-8")
+            target_hash = file_sha256(target)
+            state = ValidationStateStore(root / "validation_state.json")
+            state.record(
+                target,
+                source_hash=None,
+                target_hash=target_hash,
+                result="valid_with_warnings",
+                details={"warningRules": ["excessive_lines"]},
+            )
+            self.assertTrue(state.is_unchanged_valid(target, None, target_hash))
+
+            now = datetime.now(timezone.utc)
+            first, repeated = state.record_quarantine_tombstone(
+                "show|et",
+                target_path=target,
+                target_hash=target_hash,
+                target_language="et",
+                rules=["excessive_lines"],
+                origin="unknown",
+                hold_days=30,
+                now=now,
+            )
+            second, repeated_again = state.record_quarantine_tombstone(
+                "show|et",
+                target_path=target,
+                target_hash=target_hash,
+                target_language="et",
+                rules=["excessive_lines"],
+                origin="unknown",
+                hold_days=30,
+                now=now + timedelta(hours=1),
+            )
+
+            self.assertFalse(repeated)
+            self.assertTrue(repeated_again)
+            self.assertEqual(first["occurrences"], 1)
+            self.assertEqual(second["occurrences"], 2)
+            self.assertIsNotNone(
+                state.active_quarantine_tombstone(
+                    "show|et", now=now + timedelta(days=29)
+                )
+            )
+            self.assertIsNone(
+                state.active_quarantine_tombstone(
+                    "show|et", now=now + timedelta(days=31)
+                )
+            )
+
+            changed, changed_repeat = state.record_quarantine_tombstone(
+                "show|et",
+                target_path=target,
+                target_hash="different-hash",
+                target_language="et",
+                rules=["prompt_marker"],
+                origin="unknown",
+                hold_days=30,
+                now=now + timedelta(hours=2),
+            )
+            third, original_repeats_again = state.record_quarantine_tombstone(
+                "show|et",
+                target_path=target,
+                target_hash=target_hash,
+                target_language="et",
+                rules=["excessive_lines"],
+                origin="unknown",
+                hold_days=30,
+                now=now + timedelta(hours=3),
+            )
+            self.assertFalse(changed_repeat)
+            self.assertEqual(changed["occurrences"], 1)
+            self.assertTrue(original_repeats_again)
+            self.assertEqual(third["occurrences"], 3)
 
     def test_quarantine_preserves_relative_path_and_writes_report(self):
         with tempfile.TemporaryDirectory() as directory:

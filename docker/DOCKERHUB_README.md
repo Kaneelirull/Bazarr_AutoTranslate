@@ -9,8 +9,19 @@ Automated subtitle translation service that continuously monitors your Bazarr in
 
 - **Completeness Validation**: Uses `ffprobe` plus cue, text, byte, and timeline density to quarantine forced/truncated fragments mislabeled as full subtitles
 - **Safe Provenance Rules**: Exact English cue alignment is enforced only for outputs recorded as created by Lingarr
+- **Variant-Aware Outputs**: Discovers actual HI, SDH, and numbered Lingarr outputs and recovers pending validation after restart
+- **Requeue Protection**: Warns on source-less line-only anomalies and holds repeated quarantined hashes for 30 days
 - **Managed Sidecar Pruning**: Once every `LANGUAGES` subtitle is validated, recognized extra-language SRTs are quarantined for 30 days while unknown files remain safe by default
 - **Status Dashboard**: Manual-refresh queue progress, active jobs, recent outcomes, and rolling 1-hour through 7-day throughput at port `8765`
+
+Key safety defaults:
+
+```text
+CLEANUP_SOURCELESS_LINE_ONLY_ACTION=warn
+CLEANUP_QUARANTINE_HOLD_DAYS=30
+```
+
+The first retains an independently segmented subtitle when excessive physical cue lines are its only issue. Strong contamination, structural, language, repetition, and completeness failures remain quarantine-worthy. The hold prevents the same invalid hash from repeatedly consuming AI repair and full-translation capacity; a changed replacement is validated immediately.
 
 - 🔄 **Continuous Monitoring**: Automatically checks Bazarr API for missing subtitles every 5 minutes (configurable)
 - ⚡ **No Timeouts**: Processes all subtitles until complete, then checks again
