@@ -15,6 +15,7 @@ from pathlib import Path
 
 import requests
 from status_dashboard import StatusTracker, build_cycle_jobs, start_status_server
+from state_store import StateStore, StateStoreError
 
 # Unbuffered output
 sys.stdout = os.fdopen(sys.stdout.fileno(), "w", buffering=1)
@@ -164,6 +165,7 @@ STATE_DIR = os.getenv("STATE_DIR", "/config").strip() or "/config"
 SUBMIT_CACHE_FILE = os.path.join(STATE_DIR, "submitted_cache.json")
 CLEANUP_QUARANTINE_DIR = Path(os.getenv("CLEANUP_QUARANTINE_DIR", f"{STATE_DIR}/quarantine"))
 VALIDATION_STATE_FILE = Path(STATE_DIR) / "validation_state.json"
+STATE_DB_FILE = Path(STATE_DIR) / "bazarr-autotranslate.sqlite3"
 LOG_DIR = Path(os.getenv("LOG_DIR", "/var/log/bazarr-autotranslate"))
 RETENTION_DAYS = max(1, int(os.getenv("RETENTION_DAYS", "30")))
 RETENTION_CHECK_INTERVAL = max(300, int(os.getenv("RETENTION_CHECK_INTERVAL", "3600")))
@@ -457,9 +459,45 @@ def _get_validation_state():
     global _validation_state
     with _validation_state_lock:
         if _validation_state is None:
-            from clean_et_subs import ValidationStateStore
-            _validation_state = ValidationStateStore(VALIDATION_STATE_FILE)
+            from clean_et_subs import VALIDATOR_VERSION
+            _validation_state = StateStore(
+                STATE_DB_FILE, validator_version=VALIDATOR_VERSION
+            )
         return _validation_state
+
+
+def _initialize_state_store() -> StateStore:
+    global _validation_state
+    with _validation_state_lock:
+        if _validation_state is not None:
+            return _validation_state
+        from clean_et_subs import VALIDATOR_VERSION
+        store = StateStore(
+            STATE_DB_FILE,
+            acquire_process_lock=True,
+            validator_version=VALIDATOR_VERSION,
+        )
+        migration = store.migrate_legacy(
+            SUBMIT_CACHE_FILE,
+            VALIDATION_STATE_FILE,
+            cooldown_seconds=RESUBMIT_COOLDOWN,
+        )
+        reconciliation = store.reconcile_pending_operations()
+        _validation_state = store
+    imported = sum(migration[key] for key in ("submissions", "artifacts", "holds"))
+    if imported or migration["skipped"]:
+        print(
+            f"[STATE] Migrated {migration['submissions']} cooldown(s), "
+            f"{migration['artifacts']} artifact(s), {migration['holds']} hold(s); "
+            f"skipped {migration['skipped']} malformed record(s)"
+        )
+    print(f"[STATE] SQLite state ready at {STATE_DB_FILE}")
+    if reconciliation["completed"] or reconciliation["abandoned"]:
+        print(
+            f"[STATE] Reconciled {reconciliation['completed']} pending "
+            f"operation(s); abandoned {reconciliation['abandoned']}"
+        )
+    return store
 
 
 # ---------------------------------------------------------------------------
@@ -480,109 +518,25 @@ signal.signal(signal.SIGTERM, _handle_signal)
 signal.signal(signal.SIGINT, _handle_signal)
 
 # ---------------------------------------------------------------------------
-# Resubmit cooldown cache
+# Transactional submission state
 # ---------------------------------------------------------------------------
 
-_submitted_cache: dict[tuple, float] = {}
-_submitted_paths: dict[tuple, str] = {}
-_submitted_metadata: dict[tuple, dict] = {}
-_cache_lock = threading.Lock()
-
-
-def _cache_key_str(item_id: int, target_lang: str) -> str:
-    return f"{item_id}:{target_lang}"
-
-
 def _load_submit_cache() -> None:
-    try:
-        with open(SUBMIT_CACHE_FILE, encoding="utf-8") as f:
-            raw = json.load(f)
-    except FileNotFoundError:
-        dbg(f"_load_submit_cache: no cache file at {SUBMIT_CACHE_FILE}")
-        return
-    except (OSError, ValueError) as e:
-        print(f"{YELLOW}[WARNING] Could not read submit cache ({e}) — starting fresh{RESET}")
-        return
-
-    if not isinstance(raw, dict):
-        print(f"{YELLOW}[WARNING] Submit cache is not an object; starting fresh{RESET}")
-        return
-
-    now = time.time()
-    loaded = 0
-    pruned = 0
-    with _cache_lock:
-        for key, submitted_at in raw.items():
-            try:
-                item_id_s, lang = key.rsplit(":", 1)
-                item_id = int(item_id_s)
-                if isinstance(submitted_at, dict):
-                    ts = float(submitted_at.get("submittedAt"))
-                    target_path = submitted_at.get("targetPath")
-                    metadata = {
-                        field: submitted_at.get(field)
-                        for field in (
-                            "targetPath",
-                            "expectedTargetPath",
-                            "actualTargetPath",
-                            "videoPath",
-                            "sourcePath",
-                            "sourceHash",
-                            "sourceLanguage",
-                            "itemType",
-                            "targetVariant",
-                        )
-                        if submitted_at.get(field) is not None
-                    }
-                else:
-                    ts = float(submitted_at)
-                    target_path = None
-                    metadata = {}
-            except (TypeError, ValueError, AttributeError):
-                continue
-            if now - ts >= RESUBMIT_COOLDOWN:
-                pruned += 1
-                continue
-            cache_key = (item_id, lang)
-            _submitted_cache[cache_key] = ts
-            if isinstance(target_path, str) and target_path:
-                _submitted_paths[cache_key] = os.path.normcase(os.path.abspath(target_path))
-            if metadata:
-                _submitted_metadata[cache_key] = metadata
-            loaded += 1
-    print(f"[INFO] Loaded {loaded} active cooldown entr{'y' if loaded == 1 else 'ies'} "
-          f"from cache ({pruned} expired pruned)")
+    """Compatibility entry point; initialization performs legacy migration."""
+    _get_validation_state()
 
 
 def _save_submit_cache() -> None:
-    try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with _cache_lock:
-            serializable = {
-                _cache_key_str(item_id, lang): {
-                    **_submitted_metadata.get((item_id, lang), {}),
-                    "submittedAt": ts,
-                    "targetPath": _submitted_paths.get((item_id, lang)),
-                }
-                for (item_id, lang), ts in _submitted_cache.items()
-            }
-        tmp = f"{SUBMIT_CACHE_FILE}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(serializable, f)
-        os.replace(tmp, SUBMIT_CACHE_FILE)
-        dbg(f"_save_submit_cache: wrote {len(serializable)} entries")
-    except OSError as e:
-        print(f"{YELLOW}[WARNING] Could not persist submit cache: {e}{RESET}")
+    """Deprecated compatibility shim; SQLite commits each mutation."""
+    return None
 
 
-def _check_cooldown(item_id: int, target_lang: str) -> int | None:
-    key = (item_id, target_lang)
-    with _cache_lock:
-        submitted_at = _submitted_cache.get(key)
-    if submitted_at is None:
-        return None
-    age = int(time.time() - submitted_at)
-    return age if age < RESUBMIT_COOLDOWN else None
+def _check_cooldown(
+    item_id: int, target_lang: str, item_type: str = "legacy"
+) -> int | None:
+    return _get_validation_state().check_cooldown(
+        item_type, item_id, target_lang
+    )
 
 
 def _record_submission(
@@ -598,28 +552,38 @@ def _record_submission(
     source_language: str | None = None,
     item_type: str | None = None,
     target_variant: str | None = None,
-) -> None:
-    with _cache_lock:
-        key = (item_id, target_lang)
-        _submitted_cache[key] = time.time()
-        if target_path:
-            _submitted_paths[key] = os.path.normcase(os.path.abspath(target_path))
-        _submitted_metadata[key] = {
-            field: value
-            for field, value in {
-                "targetPath": target_path,
-                "expectedTargetPath": expected_target_path or target_path,
-                "actualTargetPath": actual_target_path,
-                "videoPath": video_path,
-                "sourcePath": source_path,
-                "sourceHash": source_hash,
-                "sourceLanguage": source_language,
-                "itemType": item_type,
-                "targetVariant": target_variant,
-            }.items()
-            if value is not None
-        }
-    _save_submit_cache()
+    lingarr_job_id: int | None = None,
+    status: str = "submitted",
+) -> int:
+    identity = (
+        _target_identity_from_sidecar(target_path, target_lang)
+        if target_path else None
+    )
+    return _get_validation_state().record_submission(
+        item_type or "legacy",
+        item_id,
+        target_lang,
+        cooldown_seconds=RESUBMIT_COOLDOWN,
+        target_identity=identity,
+        target_path=target_path,
+        expected_target_path=expected_target_path or target_path,
+        actual_target_path=actual_target_path,
+        video_path=video_path,
+        source_path=source_path,
+        source_hash=source_hash,
+        source_language=source_language,
+        target_variant=target_variant,
+        lingarr_job_id=lingarr_job_id,
+        status=status,
+    )
+
+
+def _mark_submission_submitted(attempt_id: int, job_id: int) -> None:
+    _get_validation_state().mark_submission_submitted(attempt_id, job_id)
+
+
+def _mark_submission_failed(attempt_id: int) -> None:
+    _get_validation_state().mark_submission_failed(attempt_id)
 
 
 def _update_submission_actual_path(
@@ -627,55 +591,35 @@ def _update_submission_actual_path(
     target_lang: str,
     actual_target_path: str,
     target_variant: str,
+    item_type: str = "legacy",
 ) -> None:
-    with _cache_lock:
-        key = (item_id, target_lang)
-        if key not in _submitted_cache:
-            return
-        metadata = _submitted_metadata.setdefault(key, {})
-        metadata["actualTargetPath"] = actual_target_path
-        metadata["targetVariant"] = target_variant
-        _submitted_paths[key] = os.path.normcase(os.path.abspath(actual_target_path))
-    _save_submit_cache()
+    _get_validation_state().update_submission_actual_path(
+        item_type, item_id, target_lang, actual_target_path, target_variant
+    )
 
 
-def _clear_submission(item_id: int, target_lang: str) -> None:
+def _clear_submission(
+    item_id: int, target_lang: str, item_type: str | None = None
+) -> None:
     """Remove cooldown entry so a cleaned (deleted) file can be re-translated next cycle."""
-    with _cache_lock:
-        key = (item_id, target_lang)
-        removed = _submitted_cache.pop(key, None)
-        _submitted_paths.pop(key, None)
-        _submitted_metadata.pop(key, None)
-    if removed is not None:
-        _save_submit_cache()
+    removed = _get_validation_state().clear_submission(
+        item_type, item_id, target_lang
+    )
+    if removed:
         dbg(f"_clear_submission({item_id}, {target_lang!r}): cleared")
 
 
 def _clear_submission_for_path(target_path: str | Path, target_lang: str) -> int:
-    normalized = os.path.normcase(os.path.abspath(str(target_path)))
     identity = _target_identity_from_sidecar(target_path, target_lang)
-    with _cache_lock:
-        keys = [
-            key
-            for key, path in _submitted_paths.items()
-            if key[1] == target_lang
-            and (
-                path == normalized
-                or (
-                    identity is not None
-                    and _submission_identity(_submitted_metadata.get(key, {}), key[1])
-                    == identity
-                )
-            )
-        ]
-        for key in keys:
-            _submitted_cache.pop(key, None)
-            _submitted_paths.pop(key, None)
-            _submitted_metadata.pop(key, None)
-    if keys:
-        _save_submit_cache()
-        dbg(f"Cleared {len(keys)} cooldown entr{'y' if len(keys) == 1 else 'ies'} for {target_path}")
-    return len(keys)
+    removed = _get_validation_state().clear_submissions_for_identity(
+        identity, target_path, target_lang
+    )
+    if removed:
+        dbg(
+            f"Cleared {removed} cooldown entr{'y' if removed == 1 else 'ies'} "
+            f"for {target_path}"
+        )
+    return removed
 
 # ---------------------------------------------------------------------------
 # URL helpers
@@ -1451,7 +1395,7 @@ def _probe_media_duration(video_path: str | Path) -> float | None:
     video = Path(video_path)
     try:
         stat = video.stat()
-    except OSError as e:
+    except (OSError, StateStoreError) as e:
         dbg(f"Could not stat media for duration {video}: {e}")
         return None
     key = (os.path.normcase(os.path.abspath(str(video))), stat.st_size, stat.st_mtime_ns)
@@ -1607,26 +1551,71 @@ def _record_validation_result(
     report,
     origin: str | None = None,
     **extra,
-) -> None:
+) -> bool:
     try:
+        from clean_et_subs import VALIDATOR_VERSION
+
         details = {"validation": report.to_dict(), **extra}
         if details.get("completeness") is not None:
             details.setdefault("filenameClassification", "regular")
+        target_language = extra.get("targetLanguage")
+        if target_language is None:
+            target_language = next(
+                (
+                    language
+                    for language in LANGUAGES
+                    if _target_suffix(target_path, language) is not None
+                ),
+                None,
+            )
+        target_suffix = (
+            _target_suffix(target_path, target_language)
+            if target_language is not None else None
+        )
+        trusted_source_hash = source_hash if origin == "lingarr" else None
         _get_validation_state().record(
             target_path,
-            source_hash=source_hash,
+            source_hash=trusted_source_hash,
             target_hash=target_hash,
             result=result,
             origin=origin,
             details=details,
+            source_path=extra.get("sourcePath"),
+            source_language=extra.get("sourceLanguage"),
+            target_language=target_language,
+            target_identity=(
+                extra.get("targetIdentity")
+                or (
+                    _target_identity_from_sidecar(target_path, target_language)
+                    if target_language is not None else None
+                )
+            ),
+            target_variant=(
+                extra.get("targetVariant")
+                if extra.get("targetVariant") is not None
+                else (target_suffix[1] if target_suffix is not None else None)
+            ),
+            operation=extra.get("operation", "validation"),
+            parent_artifact_id=extra.get("parentArtifactId"),
+            attempt_id=extra.get("attemptId"),
+            validation_mode=(
+                "source-aware"
+                if origin == "lingarr" and trusted_source_hash
+                else "target-only"
+            ),
+            validator_version=VALIDATOR_VERSION,
+            item_type=extra.get("itemType"),
+            item_id=extra.get("itemId"),
         )
         if result in ("valid", "valid_with_warnings"):
             for language in LANGUAGES:
                 if _target_suffix(target_path, language) is not None:
                     _clear_quarantine_hold(language, target_path=target_path)
                     break
-    except OSError as e:
+        return True
+    except (OSError, StateStoreError) as e:
         print(f"{YELLOW}[WARNING] Could not persist validation state: {e}{RESET}")
+        return False
 
 
 def _record_pending_lingarr_output(
@@ -1636,12 +1625,18 @@ def _record_pending_lingarr_output(
     target_lang: str,
     item_type: str,
     item_id: int,
-) -> None:
+) -> bool:
     source_hash = _file_hash_or_none(source_path)
     target_hash = _file_hash_or_none(target_path)
     if target_hash is None:
-        return
+        return False
     try:
+        identity = _target_identity_from_sidecar(target_path, target_lang)
+        suffix = _target_suffix(target_path, target_lang)
+        submission = (
+            _get_validation_state().find_submission(identity, target_lang)
+            if identity is not None else None
+        )
         _get_validation_state().record(
             target_path,
             source_hash=source_hash,
@@ -1655,12 +1650,24 @@ def _record_pending_lingarr_output(
                 "itemType": item_type,
                 "itemId": item_id,
             },
+            source_path=source_path,
+            source_language=source_lang,
+            target_language=target_lang,
+            target_identity=identity,
+            target_variant=suffix[1] if suffix is not None else "",
+            operation="translation",
+            attempt_id=(
+                submission.get("attemptId") if submission is not None else None
+            ),
+            validation_mode="source-aware",
         )
-    except OSError as exc:
+        return True
+    except (OSError, StateStoreError) as exc:
         print(
             f"{YELLOW}[WARNING] Could not persist pending Lingarr provenance: "
             f"{exc}{RESET}"
         )
+        return False
 
 
 def _find_submission_for_target(
@@ -1670,27 +1677,71 @@ def _find_submission_for_target(
     identity = _target_identity_from_sidecar(target_path, target_lang)
     if identity is None:
         return None
-    with _cache_lock:
-        for key, metadata in _submitted_metadata.items():
-            if key[1] != target_lang:
-                continue
-            if _submission_identity(metadata, target_lang) == identity:
-                return {"itemId": key[0], **metadata}
-    return None
+    return _get_validation_state().find_submission(identity, target_lang)
 
 
-def _submission_matches_source(metadata: dict | None, source_path: str) -> bool:
+def _submission_matches_source(
+    metadata: dict | None,
+    source_path: str,
+    source_language: str | None = None,
+    target_path: str | Path | None = None,
+    target_language: str | None = None,
+) -> bool:
     if metadata is None:
         return False
     recorded_source = metadata.get("sourcePath")
     if not isinstance(recorded_source, str) or not recorded_source:
         return False
-    if os.path.normcase(os.path.abspath(recorded_source)) != os.path.normcase(
-        os.path.abspath(source_path)
+    recorded_language = metadata.get("sourceLanguage")
+    if (
+        recorded_language
+        and source_language
+        and str(recorded_language).casefold() != source_language.casefold()
     ):
         return False
     recorded_hash = metadata.get("sourceHash")
-    return not recorded_hash or recorded_hash == _file_hash_or_none(source_path)
+    if not recorded_hash:
+        return False
+    current_hash = _file_hash_or_none(source_path)
+    if recorded_hash != current_hash:
+        return False
+    same_path = os.path.normcase(os.path.abspath(recorded_source)) == os.path.normcase(
+        os.path.abspath(source_path)
+    )
+    return same_path or (
+        target_path is not None
+        and target_language is not None
+        and _is_variant_aware_adjacent_source(
+            source_path, source_language, target_path, target_language
+        )
+    )
+
+
+def _is_variant_aware_adjacent_source(
+    source_path: str | Path,
+    source_language: str | None,
+    target_path: str | Path,
+    target_language: str,
+) -> bool:
+    if not source_language:
+        return False
+    source = Path(source_path)
+    target = Path(target_path)
+    if os.path.normcase(os.path.abspath(source.parent)) != os.path.normcase(
+        os.path.abspath(target.parent)
+    ):
+        return False
+    suffix = _target_suffix(target, target_language)
+    if suffix is None:
+        return False
+    base_name, target_variant = suffix
+    aliases = _LANGUAGE_ALIASES.get(source_language, {source_language})
+    acceptable = {
+        f"{base_name}.{alias}{variant}.srt".casefold()
+        for alias in aliases
+        for variant in ({target_variant, ""} if target_variant else {""})
+    }
+    return source.name.casefold() in acceptable
 
 
 def _record_quarantine_hold(
@@ -1737,7 +1788,11 @@ def _apply_cleanup_action(
     origin: str | None = None,
     dry_run: bool = False,
 ) -> str:
-    from clean_et_subs import quarantine_subtitle, write_validation_report
+    from clean_et_subs import (
+        quarantine_destination,
+        quarantine_subtitle,
+        write_validation_report,
+    )
 
     target = Path(target_path)
     source_hash = _file_hash_or_none(source_path)
@@ -1780,7 +1835,58 @@ def _apply_cleanup_action(
 
     if CLEANUP_ACTION == "quarantine":
         try:
-            destination = quarantine_subtitle(target, CLEANUP_ROOTS, CLEANUP_QUARANTINE_DIR)
+            if target_hash is None:
+                raise StateStoreError("target hash unavailable before quarantine")
+            destination = quarantine_destination(
+                target, CLEANUP_ROOTS, CLEANUP_QUARANTINE_DIR
+            )
+            artifact = _get_validation_state().latest_artifact(target, target_hash)
+            if artifact is None:
+                artifact_id = _get_validation_state().record_artifact_version(
+                    target,
+                    target_hash=target_hash,
+                    source_path=source_path,
+                    source_hash=source_hash if origin == "lingarr" else None,
+                    source_language=None,
+                    target_language=target_lang,
+                    origin=origin or "external",
+                    operation="quarantine",
+                    target_identity=_target_identity_from_sidecar(
+                        target, target_lang
+                    ),
+                    disposition="quarantine_pending",
+                    pending_destination=destination,
+                    pending_metadata={
+                        "rules": [issue.rule for issue in report.issues],
+                        "holdDays": CLEANUP_QUARANTINE_HOLD_DAYS,
+                        "holdIdentity": _quarantine_identity(
+                            target_lang, target_path=target
+                        ),
+                    },
+                )
+            else:
+                artifact_id = int(artifact["id"])
+                _get_validation_state().set_artifact_disposition(
+                    artifact_id,
+                    "quarantine_pending",
+                    pending_destination=destination,
+                    pending_metadata={
+                        "rules": [issue.rule for issue in report.issues],
+                        "holdDays": CLEANUP_QUARANTINE_HOLD_DAYS,
+                        "holdIdentity": _quarantine_identity(
+                            target_lang, target_path=target
+                        ),
+                    },
+                )
+            destination = quarantine_subtitle(
+                target,
+                CLEANUP_ROOTS,
+                CLEANUP_QUARANTINE_DIR,
+                destination=destination,
+            )
+            _get_validation_state().set_artifact_disposition(
+                artifact_id, "quarantined"
+            )
             hold, repeated = _record_quarantine_hold(
                 target, target_lang, target_hash, report, origin
             )
@@ -1809,12 +1915,51 @@ def _apply_cleanup_action(
             )
             print(f"[CLEANUP] Quarantined {target} -> {destination}")
             return "quarantined"
-        except OSError as e:
+        except (OSError, StateStoreError) as e:
             print(f"{RED}[ERROR] Could not quarantine {target}: {e}{RESET}")
             return "action-failed"
 
     try:
+        if target_hash is None:
+            raise StateStoreError("target hash unavailable before deletion")
+        artifact = _get_validation_state().latest_artifact(target, target_hash)
+        if artifact is None:
+            artifact_id = _get_validation_state().record_artifact_version(
+                target,
+                target_hash=target_hash,
+                source_path=source_path,
+                source_hash=source_hash if origin == "lingarr" else None,
+                source_language=None,
+                target_language=target_lang,
+                origin=origin or "external",
+                operation="delete",
+                target_identity=_target_identity_from_sidecar(
+                    target, target_lang
+                ),
+                disposition="deletion_pending",
+                pending_metadata={
+                    "rules": [issue.rule for issue in report.issues],
+                    "holdDays": CLEANUP_QUARANTINE_HOLD_DAYS,
+                    "holdIdentity": _quarantine_identity(
+                        target_lang, target_path=target
+                    ),
+                },
+            )
+        else:
+            artifact_id = int(artifact["id"])
+            _get_validation_state().set_artifact_disposition(
+                artifact_id,
+                "deletion_pending",
+                pending_metadata={
+                    "rules": [issue.rule for issue in report.issues],
+                    "holdDays": CLEANUP_QUARANTINE_HOLD_DAYS,
+                    "holdIdentity": _quarantine_identity(
+                        target_lang, target_path=target
+                    ),
+                },
+            )
         target.unlink()
+        _get_validation_state().set_artifact_disposition(artifact_id, "deleted")
         _record_quarantine_hold(target, target_lang, target_hash, report, origin)
         _record_validation_result(
             target,
@@ -1832,7 +1977,7 @@ def _apply_cleanup_action(
         )
         print(f"[CLEANUP] Deleted {target}")
         return "deleted"
-    except OSError as e:
+    except (OSError, StateStoreError) as e:
         print(f"{RED}[ERROR] Could not delete {target}: {e}{RESET}")
         return "action-failed"
 
@@ -1891,6 +2036,57 @@ def _replace_managed_file(candidate: str | Path, target: str | Path) -> None:
         raise
 
 
+def _replace_managed_file_if_current(
+    candidate: str | Path,
+    target: str | Path,
+    *,
+    source_path: str | Path | None,
+    expected_source_hash: str | None,
+    expected_target_hash: str | None,
+    source_language: str | None,
+    target_language: str,
+    origin: str | None,
+    operation: str,
+    parent_artifact_id: int | None,
+) -> bool:
+    if (
+        expected_source_hash is not None
+        and _file_hash_or_none(source_path) != expected_source_hash
+    ) or (
+        expected_target_hash is not None
+        and _file_hash_or_none(target) != expected_target_hash
+    ):
+        try:
+            Path(candidate).unlink()
+        except OSError:
+            pass
+        return False
+    candidate_hash = _file_hash_or_none(candidate)
+    if candidate_hash is None:
+        raise OSError(f"could not hash replacement candidate {candidate}")
+    suffix = _target_suffix(target, target_language)
+    pending_artifact_id = _get_validation_state().record_artifact_version(
+        target,
+        target_hash=candidate_hash,
+        source_path=source_path,
+        source_hash=expected_source_hash,
+        source_language=source_language,
+        target_language=target_language,
+        origin=origin or "external",
+        operation=operation,
+        parent_artifact_id=parent_artifact_id,
+        target_identity=_target_identity_from_sidecar(target, target_language),
+        target_variant=suffix[1] if suffix is not None else "",
+        disposition="replacement_pending",
+        pending_destination=target,
+    )
+    _replace_managed_file(candidate, target)
+    _get_validation_state().set_artifact_disposition(
+        pending_artifact_id, "active"
+    )
+    return True
+
+
 def _perform_repair(
     source_path: str,
     target_path: str,
@@ -1901,6 +2097,7 @@ def _perform_repair(
     item_type: str | None,
     initial_report,
     expected_target_hash: str | None,
+    expected_source_hash: str | None = None,
     recovery_raw: str | None = None,
     format_fixes: list[str] | None = None,
     format_recovered_cues: list[int] | None = None,
@@ -1925,12 +2122,23 @@ def _perform_repair(
                 "repair-deferred", initial_report, label, target_lang, item_type, item_id,
                 target_path=str(target_path),
             )
+        if expected_source_hash is not None and _file_hash_or_none(source_path) != expected_source_hash:
+            print(f"[REPAIR] Deferred {label} '{target_lang}': source changed while queued")
+            return RepairJobResult(
+                "repair-deferred", initial_report, label, target_lang, item_type, item_id,
+                target_path=str(target_path),
+            )
 
-        working_path = Path(target_path)
-        recovery_temp: Path | None = None
-        if recovery_raw is not None:
-            recovery_temp = _write_recovery_candidate(target_path, recovery_raw)
-            working_path = recovery_temp
+        if recovery_raw is None:
+            from clean_et_subs import read_text_best_effort
+            recovery_raw = read_text_best_effort(Path(target_path))
+            if recovery_raw is None:
+                return RepairJobResult(
+                    "repair-deferred", initial_report, label, target_lang,
+                    item_type, item_id, target_path=str(target_path),
+                )
+        recovery_temp = _write_recovery_candidate(target_path, recovery_raw)
+        working_path = recovery_temp
 
         attempt_state: dict = {}
 
@@ -1994,12 +2202,90 @@ def _perform_repair(
                 for entry in repair.attempt_history
             )
             if repair.success:
-                if recovery_temp is not None:
-                    _replace_managed_file(recovery_temp, target_path)
-                    recovery_temp = None
+                if (
+                    expected_source_hash is not None
+                    and _file_hash_or_none(source_path) != expected_source_hash
+                ):
+                    print(
+                        f"[REPAIR] Deferred {label} '{target_lang}': "
+                        "source changed during repair"
+                    )
+                    return RepairJobResult(
+                        "repair-deferred", repair.report, label, target_lang,
+                        item_type, item_id, repair.attempts, second_attempts,
+                        str(target_path),
+                    )
+                if (
+                    expected_target_hash is not None
+                    and _file_hash_or_none(target_path) != expected_target_hash
+                ):
+                    print(
+                        f"[REPAIR] Deferred {label} '{target_lang}': "
+                        "target changed during repair"
+                    )
+                    return RepairJobResult(
+                        "repair-deferred", repair.report, label, target_lang,
+                        item_type, item_id, repair.attempts, second_attempts,
+                        str(target_path),
+                    )
+                parent = _get_validation_state().latest_artifact(
+                    target_path, expected_target_hash
+                )
+                candidate_hash = _file_hash_or_none(recovery_temp)
+                if candidate_hash is None:
+                    return RepairJobResult(
+                        "repair-deferred", repair.report, label, target_lang,
+                        item_type, item_id, repair.attempts, second_attempts,
+                        str(target_path),
+                    )
+                suffix = _target_suffix(target_path, target_lang)
+                try:
+                    pending_artifact_id = _get_validation_state().record_artifact_version(
+                        target_path,
+                        target_hash=candidate_hash,
+                        source_path=source_path,
+                        source_hash=expected_source_hash,
+                        source_language=source_lang,
+                        target_language=target_lang,
+                        origin=origin or "external",
+                        operation="cue_repair",
+                        parent_artifact_id=parent.get("id") if parent else None,
+                        target_identity=_target_identity_from_sidecar(
+                            target_path, target_lang
+                        ),
+                        target_variant=suffix[1] if suffix is not None else "",
+                        disposition="replacement_pending",
+                        pending_destination=target_path,
+                    )
+                except StateStoreError as exc:
+                    print(
+                        f"{YELLOW}[REPAIR] Deferred {label} '{target_lang}': "
+                        f"could not persist replacement intent ({exc}){RESET}"
+                    )
+                    return RepairJobResult(
+                        "repair-deferred", repair.report, label, target_lang,
+                        item_type, item_id, repair.attempts, second_attempts,
+                        str(target_path),
+                    )
+                _replace_managed_file(recovery_temp, target_path)
+                recovery_temp = None
+                try:
+                    _get_validation_state().set_artifact_disposition(
+                        pending_artifact_id, "active"
+                    )
+                except StateStoreError as exc:
+                    print(
+                        f"{YELLOW}[REPAIR] Replacement completed but state "
+                        f"finalization was deferred: {exc}{RESET}"
+                    )
+                    return RepairJobResult(
+                        "repair-deferred", repair.report, label, target_lang,
+                        item_type, item_id, repair.attempts, second_attempts,
+                        str(target_path),
+                    )
                 repaired = ", ".join(str(number) for number in repair.repaired_cues)
                 print(f"{GREEN}[REPAIR] Repaired and validated {label} '{target_lang}' cue(s): {repaired}{RESET}")
-                _record_validation_result(
+                if not _record_validation_result(
                     target_path,
                     _file_hash_or_none(source_path),
                     _file_hash_or_none(target_path),
@@ -2013,7 +2299,17 @@ def _perform_repair(
                     formatRecoveredCues=format_recovered_cues or [],
                     lingarrOutcome="repaired",
                     completeness=completeness.to_dict() if completeness is not None else None,
-                )
+                    sourcePath=source_path,
+                    sourceLanguage=source_lang,
+                    targetLanguage=target_lang,
+                    operation="cue_repair",
+                    parentArtifactId=parent.get("id") if parent else None,
+                ):
+                    return RepairJobResult(
+                        "repair-deferred", repair.report, label, target_lang,
+                        item_type, item_id, repair.attempts, second_attempts,
+                        str(target_path),
+                    )
                 return RepairJobResult(
                     "repaired", repair.report, label, target_lang, item_type, item_id,
                     repair.attempts, second_attempts, str(target_path),
@@ -2034,7 +2330,7 @@ def _perform_repair(
                 origin=origin,
             )
             if action in ("quarantined", "deleted") and item_id is not None:
-                _clear_submission(item_id, target_lang)
+                _clear_submission(item_id, target_lang, item_type)
                 print(f"[CLEANUP] Cleared cooldown for retry: {label} '{target_lang}'")
             return RepairJobResult(
                 action, repair.report, label, target_lang, item_type, item_id,
@@ -2195,7 +2491,7 @@ def _validate_translated_file(
         completeness = _evaluate_completeness(target_path, media_duration)
         _add_completeness_issue(report, completeness)
         if report.valid:
-            _record_validation_result(
+            if not _record_validation_result(
                 target_path,
                 _file_hash_or_none(source_path),
                 _file_hash_or_none(target_path),
@@ -2203,7 +2499,8 @@ def _validate_translated_file(
                 report,
                 origin=origin,
                 completeness=completeness.to_dict() if completeness is not None else None,
-            )
+            ):
+                return "repair-deferred", report
             return "valid", report
         label = title or os.path.basename(target_path)
         print(f"{YELLOW}[CLEANUP] Invalid translation {label} '{target_lang}': {report.summary()}{RESET}")
@@ -2233,19 +2530,43 @@ def _validate_translated_file(
 
     source_hash = _file_hash_or_none(source_path)
     expected_target_hash = _file_hash_or_none(target_path)
+    target_suffix = _target_suffix(target_path, target_lang)
+    target_identity = _target_identity_from_sidecar(target_path, target_lang)
+    target_variant = target_suffix[1] if target_suffix is not None else None
     recorded = (
-        _get_validation_state().matching_record(target_path, expected_target_hash)
+        _get_validation_state().matching_record(
+            target_path,
+            expected_target_hash,
+            target_identity=target_identity,
+            target_language=target_lang,
+            target_variant=target_variant,
+        )
         if expected_target_hash is not None else None
     )
     recorded_origin = recorded.get("origin") if recorded is not None else None
     recorded_source_aligned = bool(
         recorded_origin == "lingarr"
+        and source_hash is not None
+        and recorded.get("sourceHash") is not None
         and recorded.get("sourceHash") == source_hash
+        and (
+            not recorded.get("sourceLanguage")
+            or recorded.get("sourceLanguage") == source_lang
+        )
+        and (
+            not recorded.get("sourcePath")
+            or os.path.normcase(os.path.abspath(recorded["sourcePath"]))
+            == os.path.normcase(os.path.abspath(source_path))
+            or _is_variant_aware_adjacent_source(
+                source_path, source_lang, target_path, target_lang
+            )
+        )
     )
     explicit_source_aligned = bool(
         origin == "lingarr"
         and provenance_source_hash is not None
         and provenance_source_hash == source_hash
+        and recorded_source_aligned
     )
     if recorded_origin == "lingarr" and not recorded_source_aligned:
         print(
@@ -2259,7 +2580,7 @@ def _validate_translated_file(
             f"{os.path.basename(target_path)}; using conservative target-only "
             f"validation{RESET}"
         )
-    source_aligned = recorded_source_aligned or explicit_source_aligned
+    source_aligned = recorded_source_aligned
     effective_origin = "lingarr" if source_aligned else (
         origin if origin != "lingarr" else None
     )
@@ -2283,7 +2604,7 @@ def _validate_translated_file(
             f"{YELLOW}[CLEANUP] Retained {os.path.basename(target_path)} with "
             f"source-less line-count warning: {report.summary()}{RESET}"
         )
-        _record_validation_result(
+        if not _record_validation_result(
             target_path,
             source_hash,
             expected_target_hash,
@@ -2292,7 +2613,8 @@ def _validate_translated_file(
             origin=effective_origin,
             warningRules=["excessive_lines"],
             completeness=completeness.to_dict() if completeness is not None else None,
-        )
+        ):
+            return "repair-deferred", report
         return "valid-warning", report
     if report.valid:
         if CLEANUP_FORMAT_REPAIR_ENABLED and source_aligned:
@@ -2318,11 +2640,12 @@ def _validate_translated_file(
                     recovery = None
                 if recovery is None:
                     print(f"[CLEANUP] OK {os.path.basename(target_path)} (original retained)")
-                    _record_validation_result(
+                    if not _record_validation_result(
                         target_path, source_hash, expected_target_hash, "valid", report,
                         origin=effective_origin,
                         completeness=completeness.to_dict() if completeness is not None else None,
-                    )
+                    ):
+                        return "repair-deferred", report
                     return "valid", report
                 if dry_run:
                     print(f"[FORMAT] DRYRUN: would normalize {target_path}")
@@ -2330,17 +2653,37 @@ def _validate_translated_file(
                 try:
                     with _target_repair_lock(target_path):
                         temp = _write_recovery_candidate(target_path, recovery.raw)
-                        _replace_managed_file(temp, target_path)
-                except OSError as exc:
+                        replaced = _replace_managed_file_if_current(
+                            temp,
+                            target_path,
+                            source_path=source_path,
+                            expected_source_hash=source_hash,
+                            expected_target_hash=expected_target_hash,
+                            source_language=source_lang,
+                            target_language=target_lang,
+                            origin=effective_origin,
+                            operation="format_repair",
+                            parent_artifact_id=(
+                                recorded.get("artifactId") if recorded else None
+                            ),
+                        )
+                except (OSError, StateStoreError) as exc:
                     print(
                         f"{RED}[ERROR] Could not normalize {target_path}: {exc}{RESET}"
                     )
                     return "action-failed", report
+                if not replaced:
+                    print(
+                        f"{YELLOW}[FORMAT] Deferred {target_path}: "
+                        "source or target changed during normalization"
+                        f"{RESET}"
+                    )
+                    return "repair-deferred", report
                 print(
                     f"{GREEN}[FORMAT] Normalized {os.path.basename(target_path)} without AI: "
                     f"{', '.join(recovery.fixes) or 'canonicalized'}{RESET}"
                 )
-                _record_validation_result(
+                if not _record_validation_result(
                     target_path,
                     source_hash,
                     _file_hash_or_none(target_path),
@@ -2350,15 +2693,22 @@ def _validate_translated_file(
                     formatFixes=recovery.fixes,
                     formatRecoveredCues=recovery.recovered_cues,
                     completeness=completeness.to_dict() if completeness is not None else None,
-                )
+                    sourcePath=source_path,
+                    sourceLanguage=source_lang,
+                    targetLanguage=target_lang,
+                    operation="format_repair",
+                    parentArtifactId=recorded.get("artifactId") if recorded else None,
+                ):
+                    return "repair-deferred", normalized_report
                 return "formatted", normalized_report
         mode = "source-aware" if source_aligned else "independent target"
         print(f"[CLEANUP] OK {os.path.basename(target_path)} ({mode} validation passed)")
-        _record_validation_result(
+        if not _record_validation_result(
             target_path, source_hash, expected_target_hash, "valid", report,
             origin=effective_origin,
             completeness=completeness.to_dict() if completeness is not None else None,
-        )
+        ):
+            return "repair-deferred", report
         return "valid", report
 
     label = title or os.path.basename(target_path)
@@ -2412,19 +2762,45 @@ def _validate_translated_file(
                 try:
                     with _target_repair_lock(target_path):
                         temp = _write_recovery_candidate(target_path, recovery.raw)
-                        _replace_managed_file(temp, target_path)
-                except OSError as exc:
+                        replaced = _replace_managed_file_if_current(
+                            temp,
+                            target_path,
+                            source_path=source_path,
+                            expected_source_hash=source_hash,
+                            expected_target_hash=expected_target_hash,
+                            source_language=source_lang,
+                            target_language=target_lang,
+                            origin=effective_origin,
+                            operation="format_repair",
+                            parent_artifact_id=(
+                                recorded.get("artifactId") if recorded else None
+                            ),
+                        )
+                except (OSError, StateStoreError) as exc:
                     print(
                         f"{RED}[ERROR] Could not repair {target_path}: {exc}{RESET}"
                     )
                     return "action-failed", report
+                if not replaced:
+                    print(
+                        f"{YELLOW}[FORMAT] Deferred {target_path}: "
+                        "source or target changed during format repair"
+                        f"{RESET}"
+                    )
+                    return "repair-deferred", report
                 print(f"{GREEN}[FORMAT] Repaired and validated {label} '{target_lang}' without AI{RESET}")
-                _record_validation_result(
+                if not _record_validation_result(
                     target_path, source_hash, _file_hash_or_none(target_path), "valid", recovered_report,
                     origin=effective_origin,
                     formatFixes=format_fixes, formatRecoveredCues=format_recovered_cues,
                     completeness=completeness.to_dict() if completeness is not None else None,
-                )
+                    sourcePath=source_path,
+                    sourceLanguage=source_lang,
+                    targetLanguage=target_lang,
+                    operation="format_repair",
+                    parentArtifactId=recorded.get("artifactId") if recorded else None,
+                ):
+                    return "repair-deferred", recovered_report
                 return "formatted", recovered_report
             report = recovered_report
             recovery_raw = recovery.raw
@@ -2448,6 +2824,7 @@ def _validate_translated_file(
             "item_type": item_type,
             "initial_report": report,
             "expected_target_hash": expected_target_hash,
+            "expected_source_hash": source_hash,
             "recovery_raw": recovery_raw,
             "format_fixes": format_fixes,
             "format_recovered_cues": format_recovered_cues,
@@ -2738,7 +3115,13 @@ def process_item(item: dict, item_type: str, id_field: str,
             submission = _find_submission_for_target(existing, target_lang)
             recovered_origin = (
                 "lingarr"
-                if _submission_matches_source(submission, source_path)
+                if _submission_matches_source(
+                    submission,
+                    source_path,
+                    source_lang,
+                    existing,
+                    target_lang,
+                )
                 else None
             )
             if recovered_origin:
@@ -2815,7 +3198,17 @@ def process_item(item: dict, item_type: str, id_field: str,
                 )
                 continue
 
-        age = _check_cooldown(item_id, target_lang)
+        try:
+            age = _check_cooldown(item_id, target_lang, item_type)
+        except StateStoreError as exc:
+            print(f"{YELLOW}[DEFER] State unavailable for cooldown check: {exc}{RESET}")
+            with stats_lock:
+                stats["deferred"] = stats.get("deferred", 0) + 1
+            _status_transition(
+                item_type, item_id, target_lang, "deferred",
+                reason="persistent state unavailable",
+            )
+            continue
         if age is not None:
             cooldown_remaining = RESUBMIT_COOLDOWN - age
             print(f"[SKIP] {title} '{target_lang}': submitted {age}s ago, "
@@ -2852,7 +3245,13 @@ def process_item(item: dict, item_type: str, id_field: str,
             appeared_submission = _find_submission_for_target(appeared, target_lang)
             appeared_origin = (
                 "lingarr"
-                if _submission_matches_source(appeared_submission, source_path)
+                if _submission_matches_source(
+                    appeared_submission,
+                    source_path,
+                    source_lang,
+                    appeared,
+                    target_lang,
+                )
                 else None
             )
             if appeared_origin and not _normalize_managed_output(appeared, title):
@@ -2928,6 +3327,33 @@ def process_item(item: dict, item_type: str, id_field: str,
         )
         source_hash = _file_hash_or_none(source_path)
         print(f"[TRANSLATE] {title}: {source_lang} -> {target_lang} ({src_lines} lines)")
+        try:
+            attempt_id = _record_submission(
+                item_id,
+                target_lang,
+                target_path,
+                expected_target_path=target_path,
+                video_path=video_path or None,
+                source_path=source_path,
+                source_hash=source_hash,
+                source_language=source_lang,
+                item_type=item_type,
+                target_variant=target_variant,
+                status="reserved",
+            )
+        except (StateStoreError, OSError) as exc:
+            _translation_capacity.release(capacity_token)
+            print(
+                f"{YELLOW}[DEFER] Could not reserve durable translation "
+                f"state for {title} '{target_lang}': {exc}{RESET}"
+            )
+            with stats_lock:
+                stats["deferred"] = stats.get("deferred", 0) + 1
+            _status_transition(
+                item_type, item_id, target_lang, "deferred",
+                reason="could not persist translation reservation",
+            )
+            continue
         status: str | None = None
         try:
             job_id = lingarr_submit_file(
@@ -2938,6 +3364,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                 lingarr_media_type,
             )
             if job_id is None:
+                _mark_submission_failed(attempt_id)
                 with stats_lock:
                     stats["failed"] += 1
                 _status_transition(
@@ -2949,18 +3376,20 @@ def process_item(item: dict, item_type: str, id_field: str,
                 )
                 continue
 
-            _record_submission(
-                item_id,
-                target_lang,
-                target_path,
-                expected_target_path=target_path,
-                video_path=video_path or None,
-                source_path=source_path,
-                source_hash=source_hash,
-                source_language=source_lang,
-                item_type=item_type,
-                target_variant=target_variant,
-            )
+            try:
+                _mark_submission_submitted(attempt_id, job_id)
+            except StateStoreError as exc:
+                print(
+                    f"{YELLOW}[DEFER] Lingarr accepted {title} '{target_lang}' "
+                    f"but its job state could not be persisted: {exc}{RESET}"
+                )
+                with stats_lock:
+                    stats["deferred"] = stats.get("deferred", 0) + 1
+                _status_transition(
+                    item_type, item_id, target_lang, "deferred",
+                    reason="Lingarr job persistence failed",
+                )
+                continue
             _status_transition(item_type, item_id, target_lang, "translating")
             with stats_lock:
                 stats["submitted"] += 1
@@ -3039,7 +3468,7 @@ def process_item(item: dict, item_type: str, id_field: str,
         actual_suffix = _target_suffix(actual_target_path, target_lang)
         actual_variant = actual_suffix[1] if actual_suffix is not None else ""
         _update_submission_actual_path(
-            item_id, target_lang, actual_target_path, actual_variant
+            item_id, target_lang, actual_target_path, actual_variant, item_type
         )
         if os.path.normcase(os.path.abspath(actual_target_path)) != os.path.normcase(
             os.path.abspath(target_path)
@@ -3048,14 +3477,21 @@ def process_item(item: dict, item_type: str, id_field: str,
                 stats["variant_outputs_discovered"] = (
                     stats.get("variant_outputs_discovered", 0) + 1
                 )
-        _record_pending_lingarr_output(
+        if not _record_pending_lingarr_output(
             source_path,
             actual_target_path,
             source_lang,
             target_lang,
             item_type,
             item_id,
-        )
+        ):
+            with stats_lock:
+                stats["deferred"] = stats.get("deferred", 0) + 1
+            _status_transition(
+                item_type, item_id, target_lang, "deferred",
+                reason="completed output provenance persistence failed",
+            )
+            continue
 
         _status_transition(item_type, item_id, target_lang, "validating")
         validation_action, validation_report = _validate_translated_file(
@@ -3587,9 +4023,13 @@ def run_existing_cleanup_scan() -> dict:
                         pending_hash = None
                     if (
                         pending_hash is not None
-                        and (
-                        not submission.get("sourceHash")
-                        or submission.get("sourceHash") == pending_hash
+                        and submission.get("sourceHash") == pending_hash
+                        and _submission_matches_source(
+                            submission,
+                            pending_source,
+                            pending_language,
+                            candidate.path,
+                            candidate.target_lang,
                         )
                     ):
                         source_path = Path(pending_source)
@@ -3804,7 +4244,7 @@ def run_retention_housekeeping() -> dict:
     logs_removed = purge_old_files(LOG_DIR, RETENTION_DAYS, exclude=current_log)
     try:
         state_removed = _get_validation_state().prune_older_than(RETENTION_DAYS)
-    except OSError as e:
+    except (OSError, StateStoreError) as e:
         print(f"{YELLOW}[WARNING] Could not prune validation state: {e}{RESET}")
         state_removed = 0
     result = {
@@ -4055,6 +4495,7 @@ def run_cycle(cycle_num: int) -> None:
 
 def main() -> int:
     global _status_tracker
+    state_store = _initialize_state_store()
     status_server = None
     if STATUS_ENABLED:
         try:
@@ -4124,7 +4565,6 @@ def main() -> int:
             mappings.append(f"{language.name} ({language.code} -> {targets})")
         print(f"[INFO] Lingarr supports languages: {'; '.join(mappings)}")
 
-    _load_submit_cache()
     run_retention_housekeeping()
     last_retention_check = time.monotonic()
 
@@ -4176,6 +4616,7 @@ def main() -> int:
     if status_server is not None:
         status_server.shutdown()
         status_server.server_close()
+    state_store.close()
     print("[INFO] Bazarr AutoTranslate stopped cleanly.")
     return 0
 

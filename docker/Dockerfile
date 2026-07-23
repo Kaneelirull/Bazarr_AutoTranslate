@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY Bazarr_AutoTranslate.py .
 COPY clean_et_subs.py .
+COPY state_store.py .
 COPY status_dashboard.py .
 COPY entrypoint.sh .
 

@@ -129,7 +129,13 @@ The default prune action moves candidates out of the media directory immediately
 
 Target variants `.et.srt`, `.et.hi.srt`, `.et.sdh.srt`, and arbitrary numbered forms such as `.et.12.srt` receive language/content validation. Lingarr output names are discovered from the files that actually changed: for example, an `.en.hi.srt` source expects and accepts `.et.hi.srt` rather than incorrectly waiting for `.et.srt`. Existing target variants prefer a matching source variant, then fall back to a plain source.
 
-Lingarr provenance is persisted before validation, including the source and actual output hashes and paths. If the container restarts between Lingarr completion and local validation, the next scan recovers that relationship and can still use source-aware format or cue repair. Exact source cue alignment, source-anchored formatting recovery, and AI cue repair apply only to outputs positively identified as Lingarr-created. Bazarr/manual subtitles are treated as independently segmented and are not rejected merely for differing English cue counts or timestamps.
+Lingarr provenance is persisted transactionally in `/config/bazarr-autotranslate.sqlite3` before submission and again when the actual output is discovered. It includes media identity, source and target paths, languages, variants, SHA-256 hashes, Lingarr job IDs, validation results, and parent/child versions created by format or cue repair. If the container restarts between Lingarr completion and local validation, the next scan recovers that relationship and can still use source-aware format or cue repair.
+
+Source-aware validation requires an exact target path/hash record and the current source hash. A moved adjacent source is accepted only when its language and content hash still match. Changed or unproven files fall back to conservative target-only validation. Bazarr/manual subtitles are stored as external observations without an inferred source.
+
+On the first upgraded startup, valid entries from `submitted_cache.json` and `validation_state.json` are imported once. The originals are retained as `.migrated.bak` files. Malformed rows are skipped with a warning. SQLite initialization, integrity, or write failures fail closed: new translations and source-aware repairs are deferred rather than proceeding without durable provenance.
+
+Only one Bazarr AutoTranslate container may use a given `/config` directory. A second instance exits with an explicit lock error, preventing duplicate submissions and conflicting state updates.
 
 A source-less subtitle whose only validation issue is `excessive_lines` is retained as `valid_with_warnings` by default and skipped on later scans while its hash is unchanged. Prompt leakage, malformed structure, wrong language/script, repetition, undersized content, or any other strong rule still makes it eligible for the configured cleanup action. No dialogue lines are joined automatically.
 
@@ -147,7 +153,7 @@ Each quarantined subtitle has a companion `.validation.json` report containing i
 2. Correct the subtitle or adjust settings only for a confirmed false positive.
 3. Move the subtitle back to `targetPath` and trigger a Bazarr subtitle scan.
 
-The `/config` volume persists quarantine files, validation state, provenance, cooldown state, and quarantine holds across container recreation. Quarantine files, companion reports, daily application logs, old validation-state records, and expired holds are removed after their configured retention period. Cleanup runs at startup and hourly by default.
+The `/config` volume persists the SQLite state database, migration backups, dashboard history, quarantine files, provenance, cooldown state, and quarantine holds across container recreation. Provenance artifact lineage is retained; expired cooldown-only attempts, old validation results, expired holds, quarantine files, reports, and logs follow the configured retention policy. Cleanup runs at startup and hourly by default.
 
 Docker console logs use the `local` logging driver with five 10 MB rotated files. Docker supports size-based rather than age-based console-log rotation; the daily files under `./logs` are the age-controlled 30-day log history.
 

@@ -31,6 +31,7 @@ from clean_et_subs import (  # noqa: E402
     validate_subtitle_without_source,
     write_validation_report,
 )
+from state_store import StateStore  # noqa: E402
 
 
 def make_srt(*texts: str) -> str:
@@ -60,6 +61,11 @@ class SubtitleValidationTests(unittest.TestCase):
         cls.estonian = target_language_for_code("et")
 
     def setUp(self):
+        self._state_directory = tempfile.TemporaryDirectory()
+        self.state = StateStore(
+            Path(self._state_directory.name) / "state.sqlite3",
+            validator_version=cleanup.VALIDATOR_VERSION,
+        )
         self._permissions_patcher = patch.object(
             cleanup, "normalize_managed_file", lambda _path: None
         )
@@ -67,6 +73,8 @@ class SubtitleValidationTests(unittest.TestCase):
 
     def tearDown(self):
         self._permissions_patcher.stop()
+        self.state.close()
+        self._state_directory.cleanup()
 
     def validate_pair(self, source: Path, target: Path):
         return validate_subtitle_pair(
@@ -146,7 +154,7 @@ class SubtitleValidationTests(unittest.TestCase):
             target = root / "movie.et.srt"
             target.write_text(make_srt("Tere"), encoding="utf-8")
             target_hash = file_sha256(target)
-            state = ValidationStateStore(root / "state.json")
+            state = self.state
             state.record(
                 target,
                 source_hash="source",
@@ -454,7 +462,7 @@ class SubtitleValidationTests(unittest.TestCase):
             root = Path(directory)
             source = root / "show.eng.srt"
             target = root / "show.et.srt"
-            state = ValidationStateStore(root / "validation_state.json")
+            state = self.state
             source.write_text(make_srt("Hello"), encoding="utf-8")
             target.write_text(make_srt("Tere"), encoding="utf-8")
             source_hash = file_sha256(source)
@@ -476,7 +484,7 @@ class SubtitleValidationTests(unittest.TestCase):
             target = root / "show.et.srt"
             target.write_text(make_srt("Tere"), encoding="utf-8")
             target_hash = file_sha256(target)
-            state = ValidationStateStore(root / "validation_state.json")
+            state = self.state
             state.record(
                 target,
                 source_hash="source-hash-is-irrelevant-for-target-only-reuse",
@@ -496,7 +504,7 @@ class SubtitleValidationTests(unittest.TestCase):
             target = root / "show.et.hi.srt"
             target.write_text(make_srt("Tere"), encoding="utf-8")
             target_hash = file_sha256(target)
-            state = ValidationStateStore(root / "validation_state.json")
+            state = self.state
             state.record(
                 target,
                 source_hash=None,
@@ -621,7 +629,7 @@ class SubtitleValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "show.et.srt"
-            state = ValidationStateStore(root / "validation_state.json")
+            state = self.state
             target.write_text(make_srt("Tere"), encoding="utf-8")
             state.record(
                 target,

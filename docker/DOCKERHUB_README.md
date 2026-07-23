@@ -145,12 +145,23 @@ read-only and requires manual refresh.
 | Container path | Purpose |
 | --- | --- |
 | `/media` | Shared media and subtitle library |
-| `/config` | Submission cache, validation state, dashboard history, quarantine |
+| `/config` | SQLite provenance state, migration backups, dashboard history, quarantine |
 | `/var/log/bazarr-autotranslate` | Daily application logs |
 
 Do not run the application container as an arbitrary non-root user. It must be
 able to correct Lingarr-created subtitle ownership to the managed
 `568:568/0664` contract.
+
+Correctness-critical state is stored in
+`/config/bazarr-autotranslate.sqlite3`. It transactionally records submission
+cooldowns, exact source/target hashes, Lingarr outputs, validation results,
+repair lineage, and quarantine holds. Existing `submitted_cache.json` and
+`validation_state.json` files are imported once and preserved as
+`.migrated.bak` backups.
+
+Only one application container may use a given `/config` directory. A second
+instance exits instead of risking duplicate translations. If SQLite cannot be
+opened, verified, or updated, translation and repair actions fail closed.
 
 ## Updating
 

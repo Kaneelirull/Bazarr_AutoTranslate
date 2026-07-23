@@ -8,7 +8,6 @@ import shutil
 import sys
 import signal
 import tempfile
-import threading
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -1344,236 +1343,11 @@ def file_sha256(path: Path | str) -> str:
     return digest.hexdigest()
 
 
-class ValidationStateStore:
-    def __init__(self, path: Path | str):
-        self.path = Path(path)
-        self._lock = threading.RLock()
-        self._data: dict = {
-            "validatorVersion": VALIDATOR_VERSION,
-            "files": {},
-            "quarantineTombstones": {},
-        }
-        self.load()
-
-    @staticmethod
-    def _key(path: Path | str) -> str:
-        return str(Path(path).resolve())
-
-    def load(self) -> None:
-        with self._lock:
-            try:
-                payload = json.loads(self.path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                return
-            except (OSError, ValueError):
-                return
-            if isinstance(payload, dict) and isinstance(payload.get("files"), dict):
-                self._data = payload
-                self._data.setdefault("quarantineTombstones", {})
-
-    def is_unchanged_valid(
-        self,
-        target_path: Path | str,
-        source_hash: Optional[str],
-        target_hash: str,
-    ) -> bool:
-        with self._lock:
-            entry = self._data.get("files", {}).get(self._key(target_path), {})
-            return (
-                entry.get("validatorVersion") == VALIDATOR_VERSION
-                and entry.get("result") in ("valid", "valid_with_warnings")
-                and entry.get("sourceHash") == source_hash
-                and entry.get("targetHash") == target_hash
-            )
-
-    def matching_origin(self, target_path: Path | str, target_hash: str) -> Optional[str]:
-        """Return provenance only while the on-disk content still matches the recorded hash."""
-        entry = self.matching_record(target_path, target_hash)
-        if entry is None:
-            return None
-        origin = entry.get("origin")
-        return origin if isinstance(origin, str) and origin else None
-
-    def matching_record(
-        self, target_path: Path | str, target_hash: str
-    ) -> Optional[dict]:
-        """Return a copy of the provenance record while target content is unchanged."""
-        with self._lock:
-            entry = self._data.get("files", {}).get(self._key(target_path), {})
-            if entry.get("targetHash") != target_hash:
-                return None
-            return dict(entry)
-
-    def current_valid_details(self, target_path: Path | str, target_hash: str) -> Optional[dict]:
-        """Return cached validation details only for unchanged content and this validator version."""
-        with self._lock:
-            entry = self._data.get("files", {}).get(self._key(target_path), {})
-            if (
-                entry.get("validatorVersion") != VALIDATOR_VERSION
-                or entry.get("result") not in ("valid", "valid_with_warnings")
-                or entry.get("targetHash") != target_hash
-            ):
-                return None
-            details = entry.get("details")
-            return dict(details) if isinstance(details, dict) else {}
-
-    def record(
-        self,
-        target_path: Path | str,
-        *,
-        source_hash: Optional[str],
-        target_hash: Optional[str],
-        result: str,
-        origin: Optional[str] = None,
-        details: Optional[dict] = None,
-    ) -> None:
-        entry = {
-            "validatorVersion": VALIDATOR_VERSION,
-            "sourceHash": source_hash,
-            "targetHash": target_hash,
-            "result": result,
-            "validatedAt": datetime.now(timezone.utc).isoformat(),
-        }
-        if origin:
-            entry["origin"] = origin
-        if details:
-            entry["details"] = details
-        with self._lock:
-            self._data.setdefault("files", {})[self._key(target_path)] = entry
-            self._data["validatorVersion"] = VALIDATOR_VERSION
-            self._save_locked()
-
-    def record_quarantine_tombstone(
-        self,
-        identity: str,
-        *,
-        target_path: Path | str,
-        target_hash: str,
-        target_language: str,
-        rules: Iterable[str],
-        origin: Optional[str],
-        hold_days: int,
-        now: Optional[datetime] = None,
-    ) -> tuple[dict, bool]:
-        timestamp = now or datetime.now(timezone.utc)
-        identity_key = str(identity)
-        key = f"{identity_key}|{target_hash}"
-        with self._lock:
-            tombstones = self._data.setdefault("quarantineTombstones", {})
-            previous = tombstones.get(key, {})
-            if not previous:
-                legacy = tombstones.get(identity_key, {})
-                if legacy.get("targetHash") == target_hash:
-                    previous = legacy
-                    tombstones.pop(identity_key, None)
-            repeated = previous.get("targetHash") == target_hash
-            first_seen = (
-                previous.get("firstSeen")
-                if repeated and isinstance(previous.get("firstSeen"), str)
-                else timestamp.isoformat()
-            )
-            occurrences = int(previous.get("occurrences", 0)) + 1 if repeated else 1
-            entry = {
-                "identity": identity_key,
-                "targetPath": str(target_path),
-                "targetHash": target_hash,
-                "targetLanguage": target_language,
-                "rules": sorted({str(rule) for rule in rules if rule}),
-                "origin": origin or "unknown",
-                "firstSeen": first_seen,
-                "lastSeen": timestamp.isoformat(),
-                "holdUntil": datetime.fromtimestamp(
-                    timestamp.timestamp() + max(1, hold_days) * 86400,
-                    timezone.utc,
-                ).isoformat(),
-                "occurrences": occurrences,
-            }
-            tombstones[key] = entry
-            self._save_locked()
-            return dict(entry), repeated
-
-    def active_quarantine_tombstone(
-        self,
-        identity: str,
-        *,
-        target_hash: Optional[str] = None,
-        now: Optional[datetime] = None,
-    ) -> Optional[dict]:
-        timestamp = now or datetime.now(timezone.utc)
-        with self._lock:
-            matches: list[tuple[datetime, dict]] = []
-            for key, entry in self._data.setdefault(
-                "quarantineTombstones", {}
-            ).items():
-                if not isinstance(entry, dict):
-                    continue
-                entry_identity = entry.get("identity")
-                if entry_identity != str(identity) and key != str(identity):
-                    continue
-                if target_hash is not None and entry.get("targetHash") != target_hash:
-                    continue
-                try:
-                    hold_until = datetime.fromisoformat(entry["holdUntil"])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if hold_until > timestamp:
-                    matches.append((hold_until, entry))
-            if not matches:
-                return None
-            return dict(max(matches, key=lambda item: item[0])[1])
-
-    def clear_quarantine_tombstone(self, identity: str) -> bool:
-        with self._lock:
-            tombstones = self._data.setdefault("quarantineTombstones", {})
-            removed = [
-                key
-                for key, entry in tombstones.items()
-                if key == str(identity)
-                or (
-                    isinstance(entry, dict)
-                    and entry.get("identity") == str(identity)
-                )
-            ]
-            for key in removed:
-                tombstones.pop(key, None)
-            if removed:
-                self._save_locked()
-            return bool(removed)
-
-    def prune_older_than(self, retention_days: int, now: Optional[datetime] = None) -> int:
-        cutoff = (now or datetime.now(timezone.utc)).timestamp() - retention_days * 86400
-        removed = 0
-        with self._lock:
-            files = self._data.setdefault("files", {})
-            for key, entry in list(files.items()):
-                try:
-                    validated_at = datetime.fromisoformat(entry["validatedAt"]).timestamp()
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if validated_at < cutoff:
-                    del files[key]
-                    removed += 1
-            tombstones = self._data.setdefault("quarantineTombstones", {})
-            for key, entry in list(tombstones.items()):
-                try:
-                    hold_until = datetime.fromisoformat(entry["holdUntil"]).timestamp()
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if hold_until < (now or datetime.now(timezone.utc)).timestamp():
-                    del tombstones[key]
-                    removed += 1
-            if removed:
-                self._save_locked()
-        return removed
-
-    def _save_locked(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        temp_path.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temp_path, self.path)
+# Backward-compatible import name; validation state is now SQLite-backed.
+from state_store import StateStore as ValidationStateStore
 
 
-def quarantine_subtitle(
+def quarantine_destination(
     path: Path | str,
     roots: Iterable[Path],
     quarantine_root: Path | str,
@@ -1599,6 +1373,23 @@ def quarantine_subtitle(
             f"{base_destination.stem}.{counter}{base_destination.suffix}"
         )
         counter += 1
+    return destination
+
+
+def quarantine_subtitle(
+    path: Path | str,
+    roots: Iterable[Path],
+    quarantine_root: Path | str,
+    *,
+    destination: Path | str | None = None,
+) -> Path:
+    source = Path(path)
+    destination = (
+        Path(destination)
+        if destination is not None
+        else quarantine_destination(source, roots, quarantine_root)
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
     normalize_managed_file(source)
     shutil.move(str(source), str(destination))
     return destination
