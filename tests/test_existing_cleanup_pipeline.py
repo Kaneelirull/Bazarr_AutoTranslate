@@ -1095,7 +1095,13 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self._record_lingarr_artifact(source, target)
-            responses = ["[SOURCE] still leaked [/SOURCE]", "Parandatud"]
+            responses = [
+                "[SOURCE] still leaked [/SOURCE]",
+                "[SOURCE] still leaked [/SOURCE]",
+                "[SOURCE] still leaked [/SOURCE]",
+                "[SOURCE] still leaked [/SOURCE]",
+                "Parandatud",
+            ]
 
             def translate(*args, **kwargs):
                 kwargs["outcome_meta"].update({"httpStatus": 200, "httpDurationSeconds": 0.01})
@@ -1109,7 +1115,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                     CLEANUP_FORMAT_REPAIR_ENABLED=True,
                     CLEANUP_REPAIR_ENABLED=True,
                     CLEANUP_REPAIR_CONTEXT_LINES=1,
-                    CLEANUP_MAX_REPAIR_ATTEMPTS=2,
+                    CLEANUP_MAX_REPAIR_ATTEMPTS=5,
                     _validation_state=state,
                 ),
                 patch.object(app, "lingarr_translate_line", side_effect=translate),
@@ -1128,8 +1134,8 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
 
             logs = output.getvalue()
             self.assertEqual(action, "repaired")
-            self.assertIn("attempt 1/2 with context before=1 after=1", logs)
-            self.assertIn("attempt 2/2 without context", logs)
+            self.assertIn("attempt 1/5 with context before=1 after=1", logs)
+            self.assertIn("attempt 5/5 without context", logs)
             self.assertIn("rejected HTTP 200", logs)
             self.assertIn("accepted HTTP 200", logs)
             self.assertNotIn("Target secret dialogue", logs)
