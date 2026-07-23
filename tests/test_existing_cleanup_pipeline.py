@@ -61,12 +61,105 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 SUBMIT_CACHE_FILE=str(cache_file),
                 _submitted_cache={},
                 _submitted_paths={},
+                _submitted_metadata={},
             ):
                 app._record_submission(42, "et", str(target))
                 self.assertIsNotNone(app._check_cooldown(42, "et"))
                 cleared = app._clear_submission_for_path(target, "et")
                 self.assertEqual(cleared, 1)
                 self.assertIsNone(app._check_cooldown(42, "et"))
+
+    def test_variant_paths_and_dynamic_target_discovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "show.mkv"
+            video.write_bytes(b"video")
+            cases = {
+                "show.en.srt": "show.et.srt",
+                "show.eng.hi.srt": "show.et.hi.srt",
+                "show.en.sdh.srt": "show.et.sdh.srt",
+                "show.eng.12.srt": "show.et.12.srt",
+            }
+            for source_name, target_name in cases.items():
+                source = root / source_name
+                source.write_text(make_srt("English"), encoding="utf-8")
+                self.assertEqual(
+                    Path(app._derive_target_path(str(source), "en", "et")).name,
+                    target_name,
+                )
+                (root / target_name).write_text(make_srt("Tere"), encoding="utf-8")
+
+            found = {Path(path).name for path in app._find_target_sidecars(str(video), "et")}
+            self.assertEqual(found, set(cases.values()))
+            self.assertEqual(app._sub_priority(str(root / "show.est.srt"), "et"), 0)
+            self.assertEqual(app._sub_priority(str(root / "show.eng.srt"), "en"), 0)
+
+    def test_changed_hi_output_is_discovered_when_plain_was_expected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "show.mkv"
+            expected = root / "show.et.srt"
+            hi_target = root / "show.et.hi.srt"
+            video.write_bytes(b"video")
+            hi_target.write_text(make_srt("Old"), encoding="utf-8")
+            before = app._snapshot_target_sidecars(str(video), "et")
+            hi_target.write_text(make_srt("New"), encoding="utf-8")
+
+            discovered = app._discover_completed_target(
+                str(video), "et", str(expected), before
+            )
+
+            self.assertEqual(discovered, str(hi_target))
+
+    def test_variant_quarantine_clears_logical_plain_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "show.mkv"
+            target = root / "show.et.hi.srt"
+            cache_file = root / "submitted_cache.json"
+            video.write_bytes(b"video")
+            with patch.multiple(
+                app,
+                SUBMIT_CACHE_FILE=str(cache_file),
+                _submitted_cache={},
+                _submitted_paths={},
+                _submitted_metadata={},
+            ):
+                app._record_submission(
+                    42,
+                    "et",
+                    str(root / "show.et.srt"),
+                    expected_target_path=str(root / "show.et.srt"),
+                    video_path=str(video),
+                )
+                self.assertEqual(app._clear_submission_for_path(target, "et"), 1)
+                self.assertIsNone(app._check_cooldown(42, "et"))
+
+    def test_submit_cache_loads_legacy_entries_and_ignores_malformed_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache_file = Path(directory) / "submitted_cache.json"
+            now = app.time.time()
+            cache_file.write_text(
+                json.dumps(
+                    {
+                        "42:et": now,
+                        "not-an-id:et": {"submittedAt": now},
+                        "broken": {"submittedAt": "not-a-time"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.multiple(
+                app,
+                SUBMIT_CACHE_FILE=str(cache_file),
+                RESUBMIT_COOLDOWN=3600,
+                _submitted_cache={},
+                _submitted_paths={},
+                _submitted_metadata={},
+            ):
+                app._load_submit_cache()
+                self.assertIsNotNone(app._check_cooldown(42, "et"))
+                self.assertEqual(set(app._submitted_cache), {(42, "et")})
 
     def _prune_fixture(self, directory: str, *, managed=("en", "et", "sv")):
         root = Path(directory) / "media"
@@ -454,7 +547,9 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                     lingarr_poll_job=completed,
                     _count_dialogue_lines=lambda _path: 1,
                     _estimate_timeout=lambda _path: 60,
-                    _record_submission=lambda *_args: None,
+                    _record_submission=lambda *_args, **_kwargs: None,
+                    _update_submission_actual_path=lambda *_args, **_kwargs: None,
+                    _record_pending_lingarr_output=lambda *_args, **_kwargs: None,
                     _validate_translated_file=lambda *_args, **_kwargs: ("valid", report),
                 ),
             ):
@@ -463,6 +558,57 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             states = [state for state, _ in recorder.states]
             self.assertEqual(states, ["translating", "validating", "accepted"])
             self.assertEqual(stats["completed"], 1)
+
+    def test_process_item_accepts_actual_hi_output_and_persists_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            source = root / "movie.en.hi.srt"
+            target = root / "movie.et.hi.srt"
+            video.write_bytes(b"video")
+            source.write_text(make_srt("English dialogue"), encoding="utf-8")
+            item = {
+                "radarrId": 7,
+                "title": "Movie",
+                "missing_subtitles": [{"code2": "et"}],
+            }
+            subtitles = [{"code2": "en", "path": str(source), "forced": False}]
+            state = ValidationStateStore(root / "validation_state.json")
+            stats = defaultdict(int)
+            stats["translations"] = []
+
+            def completed(*_args):
+                target.write_text(make_srt("Tere"), encoding="utf-8")
+                return "Completed"
+
+            report = SimpleNamespace(issues=[])
+            with patch.multiple(
+                app,
+                LANGUAGES=["en", "et"],
+                CLEANUP_UNDERSIZED_ENABLED=False,
+                SUBMIT_CACHE_FILE=str(root / "submitted_cache.json"),
+                _submitted_cache={},
+                _submitted_paths={},
+                _submitted_metadata={},
+                _validation_state=state,
+                fetch_subtitles=lambda *_args: (str(video), subtitles),
+                lingarr_resolve_media_id=lambda *_args: 99,
+                lingarr_active_count=lambda: 0,
+                lingarr_submit_file=lambda *_args: 123,
+                lingarr_poll_job=completed,
+                _count_dialogue_lines=lambda _path: 1,
+                _estimate_timeout=lambda _path: 60,
+                _validate_translated_file=lambda *_args, **_kwargs: ("valid", report),
+            ):
+                app.process_item(item, "movies", "radarrId", stats, threading.Lock())
+                metadata = dict(app._submitted_metadata[(7, "et")])
+
+            self.assertEqual(stats["completed"], 1)
+            self.assertEqual(stats["variant_outputs_discovered"], 0)
+            self.assertEqual(metadata["expectedTargetPath"], str(target))
+            self.assertEqual(metadata["actualTargetPath"], str(target))
+            self.assertEqual(metadata["targetVariant"], ".hi")
+            self.assertEqual(state.matching_origin(target, app._file_hash_or_none(target)), "lingarr")
 
     def test_status_marks_repaired_validation_as_accepted_subtype(self):
         class Recorder:
@@ -528,6 +674,212 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertTrue(report.valid, report.summary())
             self.assertTrue(target.exists())
 
+    def test_source_less_excessive_lines_only_is_retained_and_cached(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "movie.et.srt"
+            target.write_text(
+                make_srt("Üks\nKaks\nKolm\nNeli\nViis"),
+                encoding="utf-8",
+            )
+            state = ValidationStateStore(root / "state.json")
+
+            with patch.multiple(
+                app,
+                CLEANUP_LANGUAGES={"et"},
+                CLEANUP_SOURCELESS_LINE_ONLY_ACTION="warn",
+                _validation_state=state,
+            ):
+                action, report = app._validate_translated_file(
+                    str(root / "missing.eng.srt"),
+                    str(target),
+                    "en",
+                    "et",
+                    None,
+                )
+
+            target_hash = app._file_hash_or_none(target)
+            self.assertEqual(action, "valid-warning")
+            self.assertEqual({issue.rule for issue in report.issues}, {"excessive_lines"})
+            self.assertTrue(target.exists())
+            self.assertTrue(state.is_unchanged_valid(target, None, target_hash))
+
+    def test_source_less_line_count_plus_prompt_marker_is_quarantined(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "movie.et.srt"
+            target.write_text(
+                make_srt("[CONTEXT]\nÜks\nKaks\nKolm\nNeli"),
+                encoding="utf-8",
+            )
+            quarantine = root / "quarantine"
+            state = ValidationStateStore(root / "state.json")
+
+            with patch.multiple(
+                app,
+                CLEANUP_LANGUAGES={"et"},
+                CLEANUP_SOURCELESS_LINE_ONLY_ACTION="warn",
+                CLEANUP_ACTION="quarantine",
+                CLEANUP_ROOTS=[root],
+                CLEANUP_QUARANTINE_DIR=quarantine,
+                _validation_state=state,
+            ):
+                action, report = app._validate_translated_file(
+                    str(root / "missing.eng.srt"),
+                    str(target),
+                    "en",
+                    "et",
+                    None,
+                )
+
+            self.assertEqual(action, "quarantined")
+            self.assertIn("prompt_marker", {issue.rule for issue in report.issues})
+            self.assertFalse(target.exists())
+
+    def test_repeat_invalid_hash_suppresses_ai_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "movie.eng.srt"
+            target = root / "movie.et.srt"
+            source.write_text(make_srt("English"), encoding="utf-8")
+            target.write_text(make_srt("Üks\nKaks\nKolm\nNeli\nViis"), encoding="utf-8")
+            state = ValidationStateStore(root / "state.json")
+            target_hash = app._file_hash_or_none(target)
+            identity = app._quarantine_identity("et", target_path=target)
+            state.record_quarantine_tombstone(
+                identity,
+                target_path=target,
+                target_hash=target_hash,
+                target_language="et",
+                rules=["excessive_lines"],
+                origin="lingarr",
+                hold_days=30,
+            )
+
+            with (
+                patch.multiple(
+                    app,
+                    CLEANUP_LANGUAGES={"et"},
+                    CLEANUP_ACTION="report",
+                    CLEANUP_REPAIR_ENABLED=True,
+                    _validation_state=state,
+                ),
+                patch.object(app, "_queue_repair") as queue_repair,
+            ):
+                action, report = app._validate_translated_file(
+                    str(source),
+                    str(target),
+                    "en",
+                    "et",
+                    None,
+                    origin="lingarr",
+                )
+
+            self.assertEqual(action, "reported")
+            self.assertTrue(report.ai_repair_suppressed)
+            queue_repair.assert_not_called()
+
+    def test_two_cycle_repeat_quarantine_creates_translation_hold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            source = root / "movie.eng.srt"
+            target = root / "movie.et.srt"
+            video.write_bytes(b"video")
+            source.write_text(make_srt("English"), encoding="utf-8")
+            invalid = make_srt("[CONTEXT]\nÜks\nKaks\nKolm\nNeli")
+            target.write_text(invalid, encoding="utf-8")
+            state = ValidationStateStore(root / "state.json")
+            quarantine = root / "quarantine"
+
+            common = dict(
+                CLEANUP_LANGUAGES={"et"},
+                CLEANUP_ACTION="quarantine",
+                CLEANUP_ROOTS=[root],
+                CLEANUP_QUARANTINE_DIR=quarantine,
+                CLEANUP_REPAIR_ENABLED=False,
+                CLEANUP_QUARANTINE_HOLD_DAYS=30,
+                _validation_state=state,
+            )
+            with patch.multiple(app, **common):
+                first_action, first_report = app._validate_translated_file(
+                    str(source), str(target), "en", "et", 7, origin="lingarr"
+                )
+                target.write_text(invalid, encoding="utf-8")
+                second_action, second_report = app._validate_translated_file(
+                    str(source), str(target), "en", "et", 7, origin="lingarr"
+                )
+
+            self.assertEqual(first_action, "quarantined")
+            self.assertEqual(second_action, "quarantined")
+            self.assertFalse(first_report.repeat_offender)
+            self.assertTrue(second_report.repeat_offender)
+            hold = state.active_quarantine_tombstone(
+                app._quarantine_identity("et", video_path=video)
+            )
+            self.assertEqual(hold["occurrences"], 2)
+
+            stats = defaultdict(int)
+            stats["translations"] = []
+            item = {
+                "radarrId": 7,
+                "title": "Movie",
+                "missing_subtitles": [{"code2": "et"}],
+            }
+            subtitles = [{"code2": "en", "path": str(source), "forced": False}]
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et"],
+                    CLEANUP_UNDERSIZED_ENABLED=False,
+                    _validation_state=state,
+                    fetch_subtitles=lambda *_args: (str(video), subtitles),
+                    lingarr_resolve_media_id=lambda *_args: 99,
+                ),
+                patch.object(app, "lingarr_submit_file") as submit,
+            ):
+                app.process_item(item, "movies", "radarrId", stats, threading.Lock())
+
+            self.assertEqual(stats["quarantine_holds"], 1)
+            self.assertEqual(stats["deferred"], 1)
+            submit.assert_not_called()
+
+    def test_changed_valid_replacement_clears_quarantine_hold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "movie.et.srt"
+            target.write_text(make_srt("Katki\nÜks\nKaks\nKolm\nNeli"), encoding="utf-8")
+            state = ValidationStateStore(root / "state.json")
+            identity = app._quarantine_identity("et", target_path=target)
+            state.record_quarantine_tombstone(
+                identity,
+                target_path=target,
+                target_hash=app._file_hash_or_none(target),
+                target_language="et",
+                rules=["excessive_lines"],
+                origin="unknown",
+                hold_days=30,
+            )
+            target.write_text(make_srt("See on korras."), encoding="utf-8")
+
+            with patch.multiple(
+                app,
+                LANGUAGES=["en", "et"],
+                CLEANUP_LANGUAGES={"et"},
+                _validation_state=state,
+            ):
+                action, report = app._validate_translated_file(
+                    str(root / "missing.eng.srt"),
+                    str(target),
+                    "en",
+                    "et",
+                    None,
+                )
+
+            self.assertEqual(action, "valid")
+            self.assertTrue(report.valid)
+            self.assertIsNone(state.active_quarantine_tombstone(identity))
+
     def test_recorded_lingarr_target_keeps_exact_alignment(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -541,7 +893,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             state = ValidationStateStore(root / "state.json")
             state.record(
                 target,
-                source_hash="source",
+                source_hash=app._file_hash_or_none(source),
                 target_hash=app._file_hash_or_none(target),
                 result="valid",
                 origin="lingarr",
@@ -554,6 +906,33 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
 
             self.assertEqual(action, "dry-run")
             self.assertIn("cue_count_mismatch", {issue.rule for issue in report.issues})
+
+    def test_changed_source_drops_stale_exact_alignment_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "movie.eng.srt"
+            target = root / "movie.et.srt"
+            source.write_text(
+                make_multi_srt("New source one", "New source two"),
+                encoding="utf-8",
+            )
+            target.write_text(make_srt("See on korras."), encoding="utf-8")
+            state = ValidationStateStore(root / "state.json")
+            state.record(
+                target,
+                source_hash="old-source-hash",
+                target_hash=app._file_hash_or_none(target),
+                result="pending_validation",
+                origin="lingarr",
+            )
+
+            with patch.multiple(app, _validation_state=state, CLEANUP_LANGUAGES={"et"}):
+                action, report = app._validate_translated_file(
+                    str(source), str(target), "en", "et", None, dry_run=True
+                )
+
+            self.assertEqual(action, "valid")
+            self.assertTrue(report.valid)
 
     def test_completed_lingarr_output_outside_cleanup_languages_checks_completeness(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -715,6 +1094,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                     CLEANUP_ACTION="quarantine",
                     CLEANUP_QUARANTINE_DIR=quarantine,
                     CLEANUP_REPAIR_ENABLED=False,
+                    CLEANUP_SOURCELESS_LINE_ONLY_ACTION="quarantine",
                     _validation_state=state,
                 ),
                 patch.object(app, "trigger_bazarr_sync") as trigger,
@@ -750,6 +1130,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                     CLEANUP_ACTION="quarantine",
                     CLEANUP_QUARANTINE_DIR=Path(directory) / "quarantine",
                     CLEANUP_REPAIR_ENABLED=True,
+                    CLEANUP_SOURCELESS_LINE_ONLY_ACTION="quarantine",
                     _validation_state=state,
                 ),
                 patch.object(app, "lingarr_translate_line") as translate,
