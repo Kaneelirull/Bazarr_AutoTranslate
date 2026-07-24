@@ -15,6 +15,8 @@ sys.path.insert(0, str(REPO_ROOT / "docker"))
 from status_dashboard import (  # noqa: E402
     StatusTracker,
     build_cycle_jobs,
+    episode_identity,
+    episode_identity_from_path,
     render_dashboard,
     start_status_server,
 )
@@ -40,6 +42,9 @@ def queue_jobs(cycle_id="cycle-1"):
         ({
             "sonarrEpisodeId": 42,
             "seriesTitle": "Example Show",
+            "season": 1,
+            "episode": 2,
+            "title": "The Beginning",
             "missing_subtitles": [
                 {"code2": "sv"},
                 {"code2": "et"},
@@ -77,6 +82,73 @@ class StatusDashboardTests(unittest.TestCase):
             ],
         )
         self.assertEqual(len({job["key"] for job in jobs}), 3)
+        self.assertEqual(jobs[0]["episodeCode"], "S01E02")
+        self.assertEqual(jobs[0]["episodeTitle"], "The Beginning")
+        self.assertIsNone(jobs[-1]["episodeCode"])
+        self.assertIsNone(jobs[-1]["episodeTitle"])
+
+    def test_episode_identity_accepts_schema_variants_and_paths(self):
+        self.assertEqual(
+            episode_identity(
+                {
+                    "series_title": "Example Show",
+                    "season_number": "4",
+                    "episode_number": 9,
+                    "episode_title": "A Better Ending",
+                },
+                "episodes",
+            ),
+            ("S04E09", "A Better Ending"),
+        )
+        self.assertEqual(
+            episode_identity_from_path(
+                "/media/Example Show - s4e9 - A Better Ending.en.srt"
+            ),
+            "S04E09",
+        )
+        self.assertIsNone(episode_identity_from_path("/media/Example Movie.mkv"))
+
+    def test_queued_duration_is_blank_and_active_duration_uses_started_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock = FakeClock()
+            tracker = self.make_tracker(directory, clock)
+            jobs = queue_jobs()
+            tracker.start_cycle("cycle-1", 1, jobs)
+            clock.advance(30)
+            queued = tracker.snapshot()["upNext"][0]
+            self.assertIsNone(queued["durationSeconds"])
+
+            tracker.transition(jobs[0]["key"], "translating")
+            clock.advance(12.4)
+            active = tracker.snapshot()["activeJobs"][0]
+            self.assertEqual(active["durationSeconds"], 12.4)
+
+    def test_path_enrichment_updates_all_languages_and_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self.make_tracker(directory)
+            jobs = queue_jobs()
+            for job in jobs:
+                if job["itemType"] == "episodes":
+                    job["episodeCode"] = None
+                    job["episodeTitle"] = None
+            tracker.start_cycle("cycle-1", 1, jobs)
+            self.assertTrue(
+                tracker.set_episode_identity(
+                    "episodes", 42, "S03E07", "Recovered title"
+                )
+            )
+            episode_rows = [
+                row for row in tracker.snapshot()["upNext"]
+                if row["itemType"] == "episodes"
+            ]
+            self.assertEqual(
+                {(row["episodeCode"], row["episodeTitle"]) for row in episode_rows},
+                {("S03E07", "Recovered title")},
+            )
+            tracker.transition(jobs[0]["key"], "accepted")
+            recent = tracker.snapshot()["recentOutcomes"][0]
+            self.assertEqual(recent["episodeCode"], "S03E07")
+            self.assertEqual(recent["episodeTitle"], "Recovered title")
 
     def test_submission_is_active_and_validation_is_accepted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -274,6 +346,11 @@ class StatusDashboardTests(unittest.TestCase):
             self.assertNotIn("/media/", page)
             self.assertNotIn("api_key", page.lower())
             self.assertNotIn("http-equiv=\"refresh\"", page.lower())
+            self.assertIn("/assets/dashboard.css", page)
+            self.assertIn("/assets/dashboard.js", page)
+            self.assertNotIn("<style>", page)
+            self.assertNotIn("<script>", page)
+            self.assertNotIn("&quot;jobs&quot;", page)
 
     def test_http_routes_cache_headers_and_not_found(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -285,7 +362,25 @@ class StatusDashboardTests(unittest.TestCase):
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/") as response:
                     self.assertEqual(response.status, 200)
                     self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    csp = response.headers["Content-Security-Policy"]
+                    self.assertIn("script-src 'self'", csp)
+                    self.assertIn("connect-src 'self'", csp)
+                    self.assertNotIn("'unsafe-inline'", csp)
                     self.assertIn(b"Translation status", response.read())
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/assets/dashboard.css"
+                ) as response:
+                    self.assertEqual(response.headers["Content-Type"], "text/css; charset=utf-8")
+                    self.assertIn(b"--bg-base", response.read())
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/assets/dashboard.js"
+                ) as response:
+                    script = response.read()
+                    self.assertIn(b"formatDuration", script)
+                    self.assertIn(b"Refresh in", script)
+                    self.assertIn(b"types.size > 1", script)
+                    self.assertIn(b"No maintenance actions", script)
+                    self.assertIn(b"repaired)", script)
                 with urllib.request.urlopen(
                     f"http://127.0.0.1:{port}/api/status"
                 ) as response:
