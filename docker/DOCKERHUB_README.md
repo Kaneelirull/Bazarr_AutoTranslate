@@ -145,7 +145,7 @@ http://HOST:8765
 
 Relevant settings are `STATUS_ENABLED`, `STATUS_BIND`, `STATUS_PORT`,
 `STATUS_HISTORY_RETENTION_DAYS`, and `STATUS_RECENT_LIMIT`. The dashboard is
-read-only and requires manual refresh.
+read-only, refreshes every 30 seconds, and retains a manual refresh control.
 
 ## Persistent paths
 

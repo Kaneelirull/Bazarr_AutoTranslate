@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import requests
-from status_dashboard import StatusTracker, build_cycle_jobs, start_status_server
+from status_dashboard import (
+    StatusTracker,
+    build_cycle_jobs,
+    episode_identity_from_path,
+    start_status_server,
+)
 from state_store import StateStore, StateStoreError
 
 # Unbuffered output
@@ -365,6 +370,22 @@ def _status_transition(
     except OSError as exc:
         print(f"{YELLOW}[STATUS] Could not persist job update: {exc}{RESET}")
         return False
+
+
+def _status_set_episode_identity(
+    item_type: str | None,
+    item_id: int | None,
+    path: str | Path | None,
+) -> None:
+    if _status_tracker is None or item_type != "episodes":
+        return
+    episode_code = episode_identity_from_path(path)
+    if not episode_code:
+        return
+    try:
+        _status_tracker.set_episode_identity(item_type, item_id, episode_code)
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not persist episode identity: {exc}{RESET}")
 
 
 def _status_set_phase(phase: str, *, next_cycle_at: float | None = None) -> None:
@@ -3014,6 +3035,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                 reason="Bazarr subtitle lookup unavailable",
             )
         return
+    _status_set_episode_identity(item_type, item_id, video_path)
     if video_path:
         _queue_video_for_pruning(video_path, item_type)
     available_by_lang: dict[str, list[str]] = {}
@@ -3079,6 +3101,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                 reason="no complete source subtitle",
             )
         return
+    _status_set_episode_identity(item_type, item_id, source_path)
     if rejected_sources:
         with stats_lock:
             stats["cleanup_alternative_sources"] = stats.get("cleanup_alternative_sources", 0) + 1

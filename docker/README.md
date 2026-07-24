@@ -2,7 +2,7 @@
 
 Continuously monitors Bazarr for missing subtitles and translates them through Lingarr's direct API. It also validates new and existing target-language subtitles, repairs isolated bad cues, and quarantines files that cannot be repaired safely.
 
-The container includes a read-only status dashboard at `http://<docker-host>:8765`. It is intentionally manual-refresh and intended for a trusted LAN.
+The container includes a read-only status dashboard at `http://<docker-host>:8765`. It refreshes every 30 seconds, retains a manual refresh control, and is intended for a trusted LAN.
 
 ## How it works
 
@@ -99,7 +99,7 @@ Existing-library cleanup runs after startup synchronization and then on its own 
 
 The status page shows one queue entry per missing target language. Its initial count is fixed when the Bazarr wanted queue is read. A Lingarr submission is shown as `translating`; it becomes `accepted` only after the resulting subtitle passes local validation. `Done` includes accepted, failed, timed-out, deferred, and quarantined jobs, while `Remaining` contains queued, translating, validating, and repairing work.
 
-The page includes the current or most recently completed cycle, active jobs, the next ten jobs, the latest twenty outcomes, and exact rolling 1-hour, 6-hour, 12-hour, 24-hour, and 7-day totals. Existing-library repairs, quarantines, undersized detections, and sidecar pruning are reported separately as maintenance activity.
+The page includes the current or most recently completed cycle, active jobs, the next ten jobs, the latest twenty outcomes, and exact rolling 1-hour, 6-hour, 12-hour, 24-hour, and 7-day totals. It formats elapsed time and local timestamps for readability, includes episode identity when available, supports dark and light themes, and refreshes in place every 30 seconds. Existing-library repairs, quarantines, undersized detections, and sidecar pruning are reported separately as maintenance activity.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -111,7 +111,7 @@ The page includes the current or most recently completed cycle, active jobs, the
 
 Endpoints:
 
-- `/` — server-rendered dashboard with a manual Refresh button
+- `/` — responsive dashboard shell with live and manual refresh controls
 - `/api/status` — the same snapshot as JSON
 - `/healthz` — status-server health and current worker phase
 

@@ -13,6 +13,7 @@ COPY Bazarr_AutoTranslate.py .
 COPY clean_et_subs.py .
 COPY state_store.py .
 COPY status_dashboard.py .
+COPY static ./static
 COPY entrypoint.sh .
 
 RUN chmod +x entrypoint.sh clean_et_subs.py \
