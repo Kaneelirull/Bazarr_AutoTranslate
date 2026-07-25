@@ -399,6 +399,26 @@ class StatusDashboardTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
+    def test_dashboard_assets_use_accessible_reason_tooltips(self):
+        script = (
+            REPO_ROOT / "docker" / "static" / "dashboard.js"
+        ).read_text(encoding="utf-8")
+        stylesheet = (
+            REPO_ROOT / "docker" / "static" / "dashboard.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('data-tooltip-trigger aria-describedby="${tooltipId}"', script)
+        self.assertIn('role="tooltip" hidden', script)
+        self.assertIn("<strong>Reason</strong>", script)
+        self.assertIn("escapeHtml(reason)", script)
+        self.assertIn('event.key !== "Escape"', script)
+        self.assertIn('document.addEventListener("mouseover"', script)
+        self.assertIn("pinnedTooltipTrigger", script)
+        self.assertNotIn('class="reason"', script)
+        self.assertIn(".badge-tooltip-trigger:focus-visible", stylesheet)
+        self.assertIn(".status-tooltip[hidden]", stylesheet)
+        self.assertIn("max-width: min(320px, calc(100vw - 24px))", stylesheet)
+
     def test_port_conflict_raises_without_corrupting_tracker(self):
         with tempfile.TemporaryDirectory() as directory:
             tracker = self.make_tracker(directory)

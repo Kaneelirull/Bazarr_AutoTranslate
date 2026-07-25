@@ -8,6 +8,9 @@
   let nextRefreshAt = 0;
   let requestInFlight = false;
   let updateError = "";
+  let tooltipSequence = 0;
+  let activeTooltipTrigger = null;
+  let pinnedTooltipTrigger = null;
 
   const escapeHtml = (value) => String(value ?? "—")
     .replaceAll("&", "&amp;")
@@ -83,8 +86,124 @@
 
   const statusMarkup = (state, reason = "") => {
     const clean = String(state || "unknown");
-    return `<span class="badge ${escapeHtml(clean)}">${escapeHtml(labelForState(clean))}</span>`
-      + (reason ? `<span class="reason">${escapeHtml(reason)}</span>` : "");
+    const label = labelForState(clean);
+    if (!reason) {
+      return `<span class="badge ${escapeHtml(clean)}">${escapeHtml(label)}</span>`;
+    }
+    tooltipSequence += 1;
+    const tooltipId = `status-reason-${tooltipSequence}`;
+    return `<span class="status-with-tooltip">`
+      + `<button class="badge badge-tooltip-trigger ${escapeHtml(clean)}" type="button" `
+      + `data-tooltip-trigger aria-describedby="${tooltipId}" aria-expanded="false">${escapeHtml(label)}</button>`
+      + `<span class="status-tooltip" id="${tooltipId}" role="tooltip" hidden>`
+      + `<strong>Reason</strong><span>${escapeHtml(reason)}</span></span></span>`;
+  };
+
+  const tooltipFor = (trigger) => {
+    const id = trigger?.getAttribute("aria-describedby");
+    return id ? document.getElementById(id) : null;
+  };
+
+  const positionTooltip = (trigger) => {
+    const tooltip = tooltipFor(trigger);
+    if (!tooltip || tooltip.hidden) return;
+    const margin = 8;
+    const viewportPadding = 12;
+    const triggerRect = trigger.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const roomAbove = triggerRect.top - margin - tooltipRect.height >= viewportPadding;
+    const roomBelow = triggerRect.bottom + margin + tooltipRect.height <= window.innerHeight - viewportPadding;
+    const placeAbove = roomAbove && !roomBelow;
+    const top = placeAbove
+      ? triggerRect.top - tooltipRect.height - margin
+      : Math.min(triggerRect.bottom + margin, window.innerHeight - tooltipRect.height - viewportPadding);
+    const idealLeft = triggerRect.left + (triggerRect.width / 2) - (tooltipRect.width / 2);
+    const left = Math.min(
+      Math.max(idealLeft, viewportPadding),
+      window.innerWidth - tooltipRect.width - viewportPadding,
+    );
+    const arrowLeft = Math.min(
+      Math.max(triggerRect.left + (triggerRect.width / 2) - left, 12),
+      tooltipRect.width - 12,
+    );
+    tooltip.classList.toggle("is-above", placeAbove);
+    tooltip.style.top = `${Math.max(viewportPadding, top)}px`;
+    tooltip.style.left = `${Math.max(viewportPadding, left)}px`;
+    tooltip.style.setProperty("--tooltip-arrow-left", `${arrowLeft}px`);
+  };
+
+  const closeTooltip = (trigger = activeTooltipTrigger) => {
+    const tooltip = tooltipFor(trigger);
+    if (tooltip) tooltip.hidden = true;
+    if (trigger) trigger.setAttribute("aria-expanded", "false");
+    if (activeTooltipTrigger === trigger) activeTooltipTrigger = null;
+    if (pinnedTooltipTrigger === trigger) pinnedTooltipTrigger = null;
+  };
+
+  const openTooltip = (trigger, pinned = false) => {
+    if (!trigger) return;
+    if (activeTooltipTrigger && activeTooltipTrigger !== trigger) {
+      closeTooltip(activeTooltipTrigger);
+    }
+    const tooltip = tooltipFor(trigger);
+    if (!tooltip) return;
+    tooltip.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    activeTooltipTrigger = trigger;
+    pinnedTooltipTrigger = pinned ? trigger : null;
+    positionTooltip(trigger);
+  };
+
+  const bindTooltipEvents = () => {
+    document.addEventListener("mouseover", (event) => {
+      const trigger = event.target.closest?.("[data-tooltip-trigger]");
+      if (trigger && !trigger.contains(event.relatedTarget)) openTooltip(trigger);
+    });
+    document.addEventListener("mouseout", (event) => {
+      const trigger = event.target.closest?.("[data-tooltip-trigger]");
+      if (
+        trigger
+        && !trigger.contains(event.relatedTarget)
+        && pinnedTooltipTrigger !== trigger
+        && document.activeElement !== trigger
+      ) {
+        closeTooltip(trigger);
+      }
+    });
+    document.addEventListener("focusin", (event) => {
+      const trigger = event.target.closest?.("[data-tooltip-trigger]");
+      if (trigger) openTooltip(trigger, pinnedTooltipTrigger === trigger);
+    });
+    document.addEventListener("focusout", (event) => {
+      const trigger = event.target.closest?.("[data-tooltip-trigger]");
+      if (
+        trigger
+        && pinnedTooltipTrigger !== trigger
+        && !trigger.matches(":hover")
+      ) {
+        closeTooltip(trigger);
+      }
+    });
+    document.addEventListener("click", (event) => {
+      const trigger = event.target.closest?.("[data-tooltip-trigger]");
+      if (!trigger) {
+        closeTooltip();
+        return;
+      }
+      if (pinnedTooltipTrigger === trigger) {
+        closeTooltip(trigger);
+      } else {
+        openTooltip(trigger, true);
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !activeTooltipTrigger) return;
+      const trigger = activeTooltipTrigger;
+      closeTooltip(trigger);
+      trigger.focus();
+    });
+    window.addEventListener("resize", () => positionTooltip(activeTooltipTrigger));
+    document.addEventListener("scroll", () => positionTooltip(activeTooltipTrigger), true);
   };
 
   const table = (rows, kind, emptyMessage) => {
@@ -280,6 +399,9 @@
     const active = snapshot.activeJobs || [];
     const upcoming = snapshot.upNext || [];
     const recent = snapshot.recentOutcomes || [];
+    activeTooltipTrigger = null;
+    pinnedTooltipTrigger = null;
+    tooltipSequence = 0;
     root.innerHTML = `<div class="dashboard-shell">
       ${renderHeader(service, cycle)}
       ${renderOverview(cycle, service)}
@@ -397,6 +519,7 @@
     updateError = "Initial status data was invalid";
   }
   root.removeAttribute("data-snapshot");
+  bindTooltipEvents();
   render();
   scheduleRefresh();
   window.setInterval(tick, 1000);
