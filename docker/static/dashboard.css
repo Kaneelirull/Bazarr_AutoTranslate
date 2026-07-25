@@ -445,8 +445,7 @@ progress::-moz-progress-bar {
 }
 
 .media-detail,
-.time-exact,
-.reason {
+.time-exact {
   display: block;
   margin-top: 2px;
   color: var(--text-secondary);
@@ -465,13 +464,87 @@ progress::-moz-progress-bar {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
+  border: 0;
   border-radius: var(--radius-full);
   padding: 3px 10px;
   background: var(--bg-overlay);
   color: var(--text-secondary);
+  font-family: var(--font-sans);
   font-size: 12px;
   font-weight: 650;
+  line-height: 1.4;
   white-space: nowrap;
+}
+
+.status-with-tooltip {
+  display: inline-flex;
+}
+
+.badge-tooltip-trigger {
+  cursor: help;
+}
+
+.badge-tooltip-trigger:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.status-tooltip {
+  --tooltip-arrow-left: 50%;
+  position: fixed;
+  z-index: 20;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 24px));
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: var(--bg-overlay);
+  color: var(--text-primary);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.24);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+[data-theme="light"] .status-tooltip {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+}
+
+.status-tooltip[hidden] {
+  display: none;
+}
+
+.status-tooltip::before {
+  position: absolute;
+  top: -5px;
+  left: var(--tooltip-arrow-left);
+  width: 8px;
+  height: 8px;
+  border-top: 1px solid var(--border-default);
+  border-left: 1px solid var(--border-default);
+  background: var(--bg-overlay);
+  content: "";
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.status-tooltip.is-above::before {
+  top: auto;
+  bottom: -5px;
+  transform: translateX(-50%) rotate(225deg);
+}
+
+.status-tooltip strong,
+.status-tooltip span {
+  display: block;
+}
+
+.status-tooltip strong {
+  margin-bottom: 2px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .badge.translating,
