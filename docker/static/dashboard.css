@@ -626,7 +626,8 @@ progress::-moz-progress-bar {
 }
 
 .duration,
-.queue-position {
+.queue-position,
+.time-exact-only {
   font-family: var(--font-mono);
   font-size: 13px;
   font-weight: 600;

@@ -653,6 +653,7 @@ def render_dashboard(snapshot: dict) -> str:
         json.dumps(bootstrap_snapshot, ensure_ascii=False, separators=(",", ":")),
         quote=True,
     )
+    display_timezone = html.escape(os.getenv("TZ", "UTC").strip() or "UTC", quote=True)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -664,7 +665,7 @@ def render_dashboard(snapshot: dict) -> str:
 <script src="/assets/dashboard.js" defer></script>
 </head>
 <body>
-<main id="dashboard" data-snapshot="{bootstrap}" aria-busy="true">
+<main id="dashboard" data-snapshot="{bootstrap}" data-time-zone="{display_timezone}" aria-busy="true">
   <h1>Translation status</h1>
   <p class="loading">Loading translation status…</p>
 </main>

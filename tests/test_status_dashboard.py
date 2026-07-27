@@ -354,6 +354,13 @@ class StatusDashboardTests(unittest.TestCase):
             self.assertNotIn("<script>", page)
             self.assertNotIn("&quot;jobs&quot;", page)
 
+    def test_dashboard_exposes_configured_display_timezone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self.make_tracker(directory)
+            with patch.dict("os.environ", {"TZ": "Europe/Tallinn"}):
+                page = render_dashboard(tracker.snapshot())
+            self.assertIn('data-time-zone="Europe/Tallinn"', page)
+
     def test_http_routes_cache_headers_and_not_found(self):
         with tempfile.TemporaryDirectory() as directory:
             tracker = self.make_tracker(directory)
@@ -448,6 +455,16 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn(".protection-row.is-healthy", stylesheet)
         self.assertIn(".protection-row.is-warning", stylesheet)
         self.assertIn("@media (max-width: 440px)", stylesheet)
+        self.assertIn('["Est. total", "estimate"]', script)
+        self.assertIn('["Remaining", "eta"]', script)
+        self.assertIn("exactTimeMarkup(row.startedAt)", script)
+        self.assertIn('new Intl.DateTimeFormat("en-GB"', script)
+        self.assertIn('hourCycle: "h23"', script)
+        self.assertIn("configuredTimeZone", script)
+        self.assertIn("formatRemaining", script)
+        self.assertIn("Over by", script)
+        self.assertIn(".live-remaining", script)
+        self.assertIn(".time-exact-only", stylesheet)
 
     def test_port_conflict_raises_without_corrupting_tracker(self):
         with tempfile.TemporaryDirectory() as directory:
