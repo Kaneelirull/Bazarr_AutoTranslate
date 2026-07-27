@@ -8,6 +8,10 @@ import subprocess
 import time
 import threading
 import tempfile
+import logging
+import logging.handlers
+import queue
+import atexit
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from collections import Counter
 from dataclasses import dataclass
@@ -79,6 +83,52 @@ class _TeeStream:
     def encoding(self):
         return self.primary.encoding
 
+
+class _DailyLogHandler(logging.Handler):
+    def __init__(self, sink: _DailyLogSink):
+        super().__init__()
+        self.sink = sink
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.sink.write(self.format(record) + "\n")
+
+
+class _QueuedLogStream:
+    """Turn fragmented print writes into one queued record per thread and line."""
+
+    def __init__(self, logger: logging.Logger, level: int, primary):
+        self.logger = logger
+        self.level = level
+        self.primary = primary
+        self._local = threading.local()
+
+    def write(self, value: str) -> int:
+        if not value:
+            return 0
+        pending = getattr(self._local, "pending", "") + value
+        lines = pending.split("\n")
+        self._local.pending = lines.pop()
+        for line in lines:
+            if line:
+                self.logger.log(self.level, line)
+        return len(value)
+
+    def flush(self) -> None:
+        pending = getattr(self._local, "pending", "")
+        if pending:
+            self.logger.log(self.level, pending)
+            self._local.pending = ""
+
+    def fileno(self):
+        return self.primary.fileno()
+
+    def isatty(self) -> bool:
+        return self.primary.isatty()
+
+    @property
+    def encoding(self):
+        return self.primary.encoding
+
 # ANSI colors (disabled outside TTY)
 _tty = sys.stdout.isatty()
 GREEN = "\033[92m" if _tty else ""
@@ -118,6 +168,26 @@ CHECK_INTERVAL = max(10, int(os.getenv("CHECK_INTERVAL", "1200")))
 CONNECT_TIMEOUT = max(5, int(os.getenv("CONNECT_TIMEOUT", "10")))
 POLL_INTERVAL = max(5, int(os.getenv("POLL_INTERVAL", "20")))
 POLL_TIMEOUT = max(30, int(os.getenv("POLL_TIMEOUT", "900")))
+TRANSLATION_TIMEOUT_MULTIPLIER = max(
+    1.0, float(os.getenv("TRANSLATION_TIMEOUT_MULTIPLIER", "1.25"))
+)
+TRANSLATION_TIMEOUT_CAP = max(
+    POLL_TIMEOUT, int(os.getenv("TRANSLATION_TIMEOUT_CAP", "10800"))
+)
+TRANSLATION_COLD_SECONDS_PER_CUE = max(
+    0.01, float(os.getenv("TRANSLATION_COLD_SECONDS_PER_CUE", "1.8"))
+)
+TRANSLATION_TIMING_ALPHA = min(
+    1.0, max(0.01, float(os.getenv("TRANSLATION_TIMING_ALPHA", "0.20")))
+)
+LONG_JOB_THRESHOLD = max(60, int(os.getenv("LONG_JOB_THRESHOLD", "1800")))
+REPAIR_TIMEOUT_MULTIPLIER = max(
+    1.0, float(os.getenv("REPAIR_TIMEOUT_MULTIPLIER", "2.0"))
+)
+CIRCUIT_FAILURE_THRESHOLD = max(
+    1, int(os.getenv("CIRCUIT_FAILURE_THRESHOLD", "3"))
+)
+CIRCUIT_OPEN_SECONDS = max(60, int(os.getenv("CIRCUIT_OPEN_SECONDS", "21600")))
 RESUBMIT_COOLDOWN = max(60, int(os.getenv("RESUBMIT_COOLDOWN", "3600")))
 SYNC_TIMEOUT = max(30, int(os.getenv("SYNC_TIMEOUT", "600")))
 SYNC_POLL_INTERVAL = max(5, int(os.getenv("SYNC_POLL_INTERVAL", "15")))
@@ -184,6 +254,18 @@ STATUS_RECENT_LIMIT = max(1, int(os.getenv("STATUS_RECENT_LIMIT", "20")))
 STATUS_SNAPSHOT_FILE = Path(STATE_DIR) / "status.json"
 STATUS_HISTORY_FILE = Path(STATE_DIR) / "status_history.jsonl"
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
+_CIRCUIT_CONFIG_FINGERPRINT = hashlib.sha256(
+    json.dumps(
+        {
+            "lingarr": LINGARR_URL,
+            "languages": LANGUAGES,
+            "timeoutMultiplier": TRANSLATION_TIMEOUT_MULTIPLIER,
+            "timeoutCap": TRANSLATION_TIMEOUT_CAP,
+            "parallel": PARALLEL_TRANSLATES,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+).hexdigest()[:16]
 
 if not LANGUAGES:
     print(f"{RED}[ERROR] LANGUAGES must contain at least one language code{RESET}")
@@ -204,8 +286,23 @@ if not 1 <= STATUS_PORT <= 65535:
     sys.exit(1)
 
 _app_log_sink = _DailyLogSink(LOG_DIR)
-sys.stdout = _TeeStream(sys.stdout, _app_log_sink)
-sys.stderr = _TeeStream(sys.stderr, _app_log_sink)
+_log_queue: queue.Queue = queue.Queue()
+_app_logger = logging.getLogger("bazarr_autotranslate")
+_app_logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
+_app_logger.propagate = False
+_queue_handler = logging.handlers.QueueHandler(_log_queue)
+_app_logger.addHandler(_queue_handler)
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.setFormatter(logging.Formatter("%(message)s"))
+_daily_handler = _DailyLogHandler(_app_log_sink)
+_daily_handler.setFormatter(logging.Formatter("%(message)s"))
+_log_listener = logging.handlers.QueueListener(
+    _log_queue, _console_handler, _daily_handler, respect_handler_level=True
+)
+_log_listener.start()
+atexit.register(_log_listener.stop)
+sys.stdout = _QueuedLogStream(_app_logger, logging.INFO, _console_handler.stream)
+sys.stderr = _QueuedLogStream(_app_logger, logging.ERROR, _console_handler.stream)
 
 BAZARR_HEADERS: dict = {"Accept": "application/json", "X-API-KEY": BAZARR_API_KEY}
 LINGARR_HEADERS: dict = {"Accept": "application/json", "Content-Type": "application/json"}
@@ -342,6 +439,58 @@ class TranslationCapacityGate:
 _translation_capacity = TranslationCapacityGate(PARALLEL_TRANSLATES)
 
 
+class FileLaneGate:
+    """Partition full-file work while leaving cue-repair capacity independent."""
+
+    def __init__(self, workers: int):
+        self.workers = max(1, workers)
+        self._condition = threading.Condition()
+        self._active_long = 0
+        self._active_short = 0
+        self._waiting_short = 0
+
+    def acquire(self, is_long: bool) -> str | None:
+        lane = "long" if is_long else "short"
+        with self._condition:
+            if not is_long:
+                self._waiting_short += 1
+            try:
+                while not shutdown_requested:
+                    if self.workers == 1:
+                        available = (
+                            self._active_long + self._active_short == 0
+                            and (not is_long or self._waiting_short == 0)
+                        )
+                    elif is_long:
+                        available = self._active_long == 0
+                    else:
+                        available = self._active_short < self.workers - 1
+                    if available:
+                        if is_long:
+                            self._active_long += 1
+                        else:
+                            self._active_short += 1
+                        return lane
+                    self._condition.wait(timeout=1)
+            finally:
+                if not is_long:
+                    self._waiting_short -= 1
+        return None
+
+    def release(self, lane: str | None) -> None:
+        if lane is None:
+            return
+        with self._condition:
+            if lane == "long":
+                self._active_long = max(0, self._active_long - 1)
+            else:
+                self._active_short = max(0, self._active_short - 1)
+            self._condition.notify_all()
+
+
+_file_lane_gate = FileLaneGate(PARALLEL_TRANSLATES)
+
+
 def dbg(msg: str) -> None:
     if DEBUG:
         print(f"[DEBUG] {msg}")
@@ -355,17 +504,16 @@ def _status_transition(
     *,
     repaired: bool = False,
     reason: str | None = None,
+    details: dict | None = None,
 ) -> bool:
     if _status_tracker is None:
         return False
     try:
+        kwargs = {"repaired": repaired, "reason": reason}
+        if details is not None:
+            kwargs["details"] = details
         return _status_tracker.transition_for(
-            item_type,
-            item_id,
-            target_lang,
-            state,
-            repaired=repaired,
-            reason=reason,
+            item_type, item_id, target_lang, state, **kwargs
         )
     except OSError as exc:
         print(f"{YELLOW}[STATUS] Could not persist job update: {exc}{RESET}")
@@ -386,6 +534,33 @@ def _status_set_episode_identity(
         _status_tracker.set_episode_identity(item_type, item_id, episode_code)
     except OSError as exc:
         print(f"{YELLOW}[STATUS] Could not persist episode identity: {exc}{RESET}")
+
+
+def _refresh_status_diagnostics() -> None:
+    if _status_tracker is None or not hasattr(_status_tracker, "set_diagnostics"):
+        return
+    target = next(iter(CLEANUP_LANGUAGES), LANGUAGES[-1] if LANGUAGES else "et")
+    try:
+        file_timing = _get_validation_state().timing_estimate(
+            kind="file",
+            source_language=None,
+            target_language=target,
+            cold_seconds_per_cue=TRANSLATION_COLD_SECONDS_PER_CUE,
+            alpha=TRANSLATION_TIMING_ALPHA,
+        )
+        repair_timing = _get_validation_state().timing_estimate(
+            kind="repair",
+            source_language=None,
+            target_language=target,
+            cold_seconds_per_cue=TRANSLATION_COLD_SECONDS_PER_CUE,
+            alpha=TRANSLATION_TIMING_ALPHA,
+        )
+        _status_tracker.set_diagnostics(
+            timing={"file": file_timing, "repair": repair_timing},
+            circuits=_get_validation_state().circuit_breakers(),
+        )
+    except (OSError, StateStoreError) as exc:
+        print(f"{YELLOW}[STATUS] Could not refresh diagnostics: {exc}{RESET}")
 
 
 def _status_set_phase(phase: str, *, next_cycle_at: float | None = None) -> None:
@@ -1129,7 +1304,49 @@ def lingarr_get_job(job_id: int) -> dict | None:
     return None
 
 
-def lingarr_poll_job(job_id: int, deadline: float, label: str) -> str | None:
+def lingarr_cancel_job(job_id: int) -> bool:
+    detail = lingarr_get_job(job_id)
+    if not detail:
+        return False
+    try:
+        response = requests.post(
+            lingarr_url("TranslationRequest/cancel"),
+            headers=LINGARR_HEADERS,
+            json=detail,
+            timeout=CONNECT_TIMEOUT,
+        )
+        return response.status_code in (200, 202, 204)
+    except requests.RequestException as exc:
+        print(f"{YELLOW}[WARNING] Could not cancel Lingarr job {job_id}: {exc}{RESET}")
+        return False
+
+
+def _safe_failure_details(job_id: int | None) -> dict:
+    if job_id is None:
+        return {}
+    job = lingarr_get_job(job_id) or {}
+    messages = [
+        str(event.get("message"))[:500]
+        for event in job.get("events", [])
+        if isinstance(event, dict) and event.get("message")
+    ]
+    return {
+        "jobId": job_id,
+        "status": job.get("status"),
+        "progress": job.get("progress"),
+        "errorMessage": str(job.get("errorMessage") or "")[:1000] or None,
+        "events": messages[-10:],
+        "provider": job.get("provider") or "unknown",
+        "model": job.get("model") or "unknown",
+    }
+
+
+def lingarr_poll_job(
+    job_id: int,
+    deadline: float,
+    label: str,
+    progress_callback=None,
+) -> str | None:
     last_progress = -1
     while not shutdown_requested:
         job = lingarr_get_job(job_id)
@@ -1139,6 +1356,8 @@ def lingarr_poll_job(job_id: int, deadline: float, label: str) -> str | None:
             if progress != last_progress:
                 last_progress = progress
                 dbg(f"{label} job {job_id}: status={status} progress={progress}")
+                if progress_callback is not None:
+                    progress_callback(progress)
             if status == "Completed":
                 return "Completed"
             if status in ("Failed", "Cancelled", "Interrupted"):
@@ -1157,6 +1376,153 @@ def lingarr_poll_job(job_id: int, deadline: float, label: str) -> str | None:
             time.sleep(1)
 
     return None
+
+
+def _recover_failed_lingarr_job(
+    job_id: int,
+    source_path: str,
+    target_path: str,
+    source_lang: str,
+    target_lang: str,
+    label: str,
+) -> dict:
+    """Rebuild a failed file job from completed Lingarr lines and repair gaps."""
+    from clean_et_subs import (
+        SubtitleCue,
+        parse_srt_cues,
+        read_text_best_effort,
+        render_srt_cues,
+    )
+
+    detail = lingarr_get_job(job_id) or {}
+    line_rows = detail.get("lines")
+    if not isinstance(line_rows, list) or not line_rows:
+        return {"recovered": False, "reason": "Lingarr returned no positioned lines"}
+    raw = read_text_best_effort(Path(source_path))
+    if raw is None:
+        return {"recovered": False, "reason": "source unreadable"}
+    source_cues, errors = parse_srt_cues(raw)
+    if errors or not source_cues:
+        return {"recovered": False, "reason": "source SRT is not structurally recoverable"}
+
+    positioned = {
+        int(row["position"]): row
+        for row in line_rows
+        if isinstance(row, dict) and isinstance(row.get("position"), int)
+    }
+    if not positioned:
+        return {"recovered": False, "reason": "Lingarr line positions missing"}
+    offset = 0 if 0 in positioned else 1
+    recovered: list[SubtitleCue] = []
+    unresolved: list[int] = []
+    repair_elapsed = 0.0
+    repair_attempts = 0
+    repaired_cues = 0
+
+    for index, cue in enumerate(source_cues):
+        row = positioned.get(index + offset, {})
+        translated = row.get("target") if isinstance(row, dict) else None
+        translated = translated.strip() if isinstance(translated, str) else ""
+        if not translated:
+            before = [entry.text for entry in source_cues[max(0, index - 5):index]]
+            after = [entry.text for entry in source_cues[index + 1:index + 6]]
+            delays = (5, 15, 45)
+            for attempt, delay in enumerate(delays, start=1):
+                started = time.monotonic()
+                translated = lingarr_translate_line(
+                    cue.text,
+                    source_lang,
+                    target_lang,
+                    before,
+                    after,
+                    repair_label=label,
+                    cue_number=cue.number,
+                    attempt=attempt,
+                ) or ""
+                repair_elapsed += time.monotonic() - started
+                repair_attempts += 1
+                if translated.strip():
+                    break
+                if attempt < len(delays) and not shutdown_requested:
+                    time.sleep(delay)
+            if translated.strip():
+                repaired_cues += 1
+        if not translated.strip():
+            unresolved.append(cue.number)
+            continue
+        recovered.append(
+            SubtitleCue(cue.number, cue.timestamp, translated.strip().splitlines())
+        )
+
+    if unresolved:
+        print(
+            f"{YELLOW}[RECOVER] {label} job {job_id}: unresolved cue(s) "
+            f"{','.join(map(str, unresolved[:20]))}"
+            f"{'...' if len(unresolved) > 20 else ''}{RESET}"
+        )
+        return {
+            "recovered": False,
+            "reason": "unresolved cues",
+            "unresolvedCues": unresolved,
+            "attempts": repair_attempts,
+        }
+
+    destination = Path(target_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=f".{destination.name}.",
+            suffix=".recovering",
+            dir=destination.parent,
+            delete=False,
+        ) as handle:
+            handle.write(render_srt_cues(recovered))
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        os.replace(temp_path, destination)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+    if repair_attempts and repair_elapsed > 0:
+        try:
+            _get_validation_state().record_timing_sample(
+                kind="repair",
+                source_language=source_lang,
+                target_language=target_lang,
+                cue_count=max(1, repaired_cues),
+                elapsed_seconds=repair_elapsed,
+                outcome="accepted",
+                lingarr_job_id=job_id,
+                attempts=repair_attempts,
+            )
+        except StateStoreError as exc:
+            print(f"{YELLOW}[TIMING] Could not persist repair timing: {exc}{RESET}")
+    print(
+        f"{GREEN}[RECOVER] Reconstructed {label} from Lingarr job {job_id}; "
+        f"repaired {repair_attempts} cue attempt(s){RESET}"
+    )
+    return {
+        "recovered": True,
+        "path": str(destination),
+        "attempts": repair_attempts,
+        "repairedCues": repaired_cues,
+        "repairElapsedSeconds": round(repair_elapsed, 3),
+        "eventMessages": [
+            str(event.get("message"))
+            for event in detail.get("events", [])
+            if isinstance(event, dict) and event.get("message")
+        ][-5:],
+    }
 
 # ---------------------------------------------------------------------------
 # Subtitle helpers
@@ -1494,17 +1860,61 @@ def _count_dialogue_lines(path: str) -> int | None:
         return None
 
 
-def _estimate_timeout(source_path: str) -> int:
-    n = _count_dialogue_lines(source_path)
-    if n is None:
-        return POLL_TIMEOUT
-    base = n * 1.8
-    estimated = int(base * 1.3)
-    hard_cap = max(POLL_TIMEOUT, CHECK_INTERVAL - 60)
-    timeout = min(max(POLL_TIMEOUT, estimated), hard_cap)
-    print(f"[INFO] Source has {n} dialogue lines — base ~{int(base)}s, "
-          f"timeout set to {timeout}s (floor {POLL_TIMEOUT}s, cap {hard_cap}s)")
-    return timeout
+def _count_srt_cues(path: str) -> int | None:
+    try:
+        from clean_et_subs import parse_srt_cues, read_text_best_effort
+
+        raw = read_text_best_effort(Path(path))
+        if raw is None:
+            return None
+        cues, _errors = parse_srt_cues(raw)
+        return len(cues)
+    except (OSError, ValueError):
+        return None
+
+
+def _timing_estimate(kind: str, source_lang: str | None, target_lang: str) -> dict:
+    try:
+        return _get_validation_state().timing_estimate(
+            kind=kind,
+            source_language=source_lang,
+            target_language=target_lang,
+            cold_seconds_per_cue=TRANSLATION_COLD_SECONDS_PER_CUE,
+            alpha=TRANSLATION_TIMING_ALPHA,
+        )
+    except StateStoreError as exc:
+        print(f"{YELLOW}[TIMING] Using cold estimate; state unavailable: {exc}{RESET}")
+        return {
+            "secondsPerCue": TRANSLATION_COLD_SECONDS_PER_CUE,
+            "sampleCount": 0,
+            "scope": "cold_start",
+        }
+
+
+def _estimate_timeout(source_path: str, source_lang: str, target_lang: str) -> dict:
+    cue_count = _count_srt_cues(source_path)
+    if cue_count is None:
+        cue_count = _count_dialogue_lines(source_path) or 0
+    learned = _timing_estimate("file", source_lang, target_lang)
+    base = cue_count * learned["secondsPerCue"]
+    timeout = min(
+        max(POLL_TIMEOUT, int(base * TRANSLATION_TIMEOUT_MULTIPLIER)),
+        TRANSLATION_TIMEOUT_CAP,
+    )
+    estimate = {
+        **learned,
+        "cueCount": cue_count,
+        "estimatedSeconds": round(base, 3),
+        "timeoutSeconds": timeout,
+        "lane": "long" if base > LONG_JOB_THRESHOLD else "short",
+    }
+    print(
+        f"[TIMING] Source has {cue_count} cues; "
+        f"{learned['secondsPerCue']:.3f}s/cue ({learned['scope']}, "
+        f"{learned['sampleCount']} samples) - estimate ~{int(base)}s, "
+        f"timeout {timeout}s, lane {estimate['lane']}"
+    )
+    return estimate
 
 
 def _derive_target_path(source_path: str, source_lang: str, target_lang: str) -> str | None:
@@ -2446,12 +2856,44 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             "item_type": job_kwargs.get("item_type"),
             "item_id": job_kwargs.get("item_id"),
             "target_lang": job_kwargs.get("target_lang"),
+            "source_lang": job_kwargs.get("source_lang"),
+            "queued_monotonic": time.monotonic(),
         }
         _pending_repairs[future] = metadata
     future.add_done_callback(
         lambda completed, repair_metadata=metadata: _publish_repair_status(
             completed, repair_metadata
         )
+    )
+    cue_count = len(getattr(report, "repairable_cue_indexes", []) or [])
+    repair_timing = _timing_estimate(
+        "repair", job_kwargs.get("source_lang"), target_lang
+    )
+    _status_transition(
+        job_kwargs.get("item_type"),
+        job_kwargs.get("item_id"),
+        target_lang,
+        "repairing",
+        details={
+            "cueCount": cue_count,
+            "secondsPerCue": round(repair_timing["secondsPerCue"], 4),
+            "timingSampleCount": repair_timing["sampleCount"],
+            "timingScope": repair_timing["scope"],
+            "estimatedSeconds": round(
+                cue_count
+                * repair_timing["secondsPerCue"]
+                * REPAIR_TIMEOUT_MULTIPLIER,
+                1,
+            ),
+            "etaSeconds": round(
+                cue_count
+                * repair_timing["secondsPerCue"]
+                * REPAIR_TIMEOUT_MULTIPLIER,
+                1,
+            ),
+            "lane": "repair",
+            "attempts": 0,
+        },
     )
     for index in report.repairable_cue_indexes:
         print(f"[REPAIR] Queued {label} '{target_lang}' cue position {index + 1}")
@@ -2475,6 +2917,33 @@ def _drain_pending_repairs(stats: dict) -> list[RepairJobResult]:
             _publish_repair_status(future, metadata)
             continue
         results.append(result)
+        if result.action == "repaired":
+            elapsed = max(
+                0.001,
+                time.monotonic() - float(metadata.get("queued_monotonic", time.monotonic())),
+            )
+            try:
+                _get_validation_state().record_timing_sample(
+                    kind="repair",
+                    source_language=metadata.get("source_lang"),
+                    target_language=result.target_lang,
+                    cue_count=max(
+                        1,
+                        len(
+                            getattr(
+                                metadata.get("report"),
+                                "repairable_cue_indexes",
+                                [],
+                            )
+                            or []
+                        ),
+                    ),
+                    elapsed_seconds=elapsed,
+                    outcome="accepted",
+                    attempts=max(1, result.attempts),
+                )
+            except StateStoreError as exc:
+                print(f"{YELLOW}[TIMING] Could not persist repair sample: {exc}{RESET}")
         _publish_repair_status(future, metadata)
         stats["cleanup_repair_attempts"] = stats.get("cleanup_repair_attempts", 0) + result.attempts
         stats["cleanup_second_attempts"] = stats.get("cleanup_second_attempts", 0) + result.second_attempts
@@ -3007,6 +3476,13 @@ def process_item(item: dict, item_type: str, id_field: str,
     if item_id is None:
         return
     title = _item_title(item, item_type)
+    series_title = title
+    series_id = item.get("sonarrSeriesId") if item_type == "episodes" else None
+    series_key = (
+        f"sonarr:{series_id}"
+        if series_id is not None
+        else f"{item_type}:{title.casefold()}"
+    )
     lingarr_media_type = "Episode" if item_type == "episodes" else "Movie"
 
     missing_raw = {
@@ -3110,7 +3586,6 @@ def process_item(item: dict, item_type: str, id_field: str,
         _se = _re.search(r"[Ss](\d{1,2})[Ee](\d{1,2})", os.path.basename(source_path))
         if _se:
             title = f"{title} S{int(_se.group(1)):02d}E{int(_se.group(2)):02d}"
-    item_timeout = _estimate_timeout(source_path)
     print(f"[INFO] {title}: source={source_lang}, targets={target_langs}")
 
     media_id = lingarr_resolve_media_id(item_type, item_id)
@@ -3265,8 +3740,70 @@ def process_item(item: dict, item_type: str, id_field: str,
             )
             continue
 
+        try:
+            circuit = _get_validation_state().circuit_permission(
+                series_key=series_key,
+                series_title=series_title,
+                config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+            )
+        except StateStoreError as exc:
+            print(f"{YELLOW}[CIRCUIT] State unavailable for {title}: {exc}{RESET}")
+            circuit = {"allowed": True, "state": "unknown", "failures": 0}
+        if not circuit["allowed"]:
+            retry_at = circuit.get("retryAt")
+            print(
+                f"{YELLOW}[CIRCUIT] Deferred {title}: {circuit['state']} after "
+                f"{circuit.get('failures', 0)} failures; retry_at={retry_at}{RESET}"
+            )
+            _status_transition(
+                item_type,
+                item_id,
+                target_lang,
+                "deferred",
+                reason=f"series circuit {circuit['state']}",
+            )
+            continue
+
+        src_lines = _count_dialogue_lines(source_path)
+        if src_lines is None or src_lines == 0:
+            reason = "source unreadable" if src_lines is None else "source has no dialogue"
+            print(f"{YELLOW}[SKIP] {title} '{target_lang}': {reason}{RESET}")
+            with stats_lock:
+                stats["deferred"] = stats.get("deferred", 0) + 1
+            _status_transition(
+                item_type, item_id, target_lang, "deferred", reason=reason
+            )
+            continue
+        try:
+            timing = _estimate_timeout(source_path, source_lang, target_lang)
+        except TypeError:
+            # Preserve compatibility with integrations that patched the original
+            # one-argument timeout hook.
+            timeout_override = int(_estimate_timeout(source_path))
+            cue_count = _count_srt_cues(source_path) or src_lines
+            timing = {
+                "cueCount": cue_count,
+                "secondsPerCue": (
+                    timeout_override / cue_count if cue_count else 0.0
+                ),
+                "sampleCount": 0,
+                "scope": "override",
+                "estimatedSeconds": timeout_override,
+                "timeoutSeconds": timeout_override,
+                "lane": (
+                    "long" if timeout_override > LONG_JOB_THRESHOLD else "short"
+                ),
+            }
+        lane = _file_lane_gate.acquire(timing["lane"] == "long")
+        if lane is None:
+            _status_transition(
+                item_type, item_id, target_lang, "deferred", reason="file lane unavailable"
+            )
+            continue
+
         capacity_token = _translation_capacity.acquire(media_id, lingarr_media_type)
         if capacity_token is None:
+            _file_lane_gate.release(lane)
             with stats_lock:
                 stats["api_errors"] = stats.get("api_errors", 0) + 1
                 stats["deferred"] = stats.get("deferred", 0) + 1
@@ -3284,6 +3821,7 @@ def process_item(item: dict, item_type: str, id_field: str,
         )
         if appeared:
             _translation_capacity.release(capacity_token)
+            _file_lane_gate.release(lane)
             capacity_token = None
             appeared_submission = _find_submission_for_target(appeared, target_lang)
             appeared_origin = (
@@ -3345,6 +3883,7 @@ def process_item(item: dict, item_type: str, id_field: str,
         src_lines = _count_dialogue_lines(source_path)
         if src_lines is None:
             _translation_capacity.release(capacity_token)
+            _file_lane_gate.release(lane)
             print(f"{YELLOW}[SKIP] {title} '{target_lang}': source not readable — deferring{RESET}")
             with stats_lock:
                 stats.setdefault("deferred", 0)
@@ -3355,6 +3894,7 @@ def process_item(item: dict, item_type: str, id_field: str,
             continue
         if src_lines == 0:
             _translation_capacity.release(capacity_token)
+            _file_lane_gate.release(lane)
             print(f"{YELLOW}[SKIP] {title} '{target_lang}': source has no dialogue lines{RESET}")
             with stats_lock:
                 stats.setdefault("deferred", 0)
@@ -3386,6 +3926,7 @@ def process_item(item: dict, item_type: str, id_field: str,
             )
         except (StateStoreError, OSError) as exc:
             _translation_capacity.release(capacity_token)
+            _file_lane_gate.release(lane)
             print(
                 f"{YELLOW}[DEFER] Could not reserve durable translation "
                 f"state for {title} '{target_lang}': {exc}{RESET}"
@@ -3398,6 +3939,8 @@ def process_item(item: dict, item_type: str, id_field: str,
             )
             continue
         status: str | None = None
+        translation_started = time.monotonic()
+        job_id: int | None = None
         try:
             job_id = lingarr_submit_file(
                 media_id,
@@ -3433,17 +3976,98 @@ def process_item(item: dict, item_type: str, id_field: str,
                     reason="Lingarr job persistence failed",
                 )
                 continue
-            _status_transition(item_type, item_id, target_lang, "translating")
+            _status_transition(
+                item_type,
+                item_id,
+                target_lang,
+                "translating",
+                details={
+                    "cueCount": timing["cueCount"],
+                    "secondsPerCue": round(timing["secondsPerCue"], 4),
+                    "timingSampleCount": timing["sampleCount"],
+                    "timingScope": timing["scope"],
+                    "estimatedSeconds": timing["estimatedSeconds"],
+                    "timeoutSeconds": timing["timeoutSeconds"],
+                    "etaSeconds": timing["estimatedSeconds"],
+                    "lane": lane,
+                    "attempts": 1,
+                    "jobId": job_id,
+                    "circuit": circuit,
+                },
+            )
             with stats_lock:
                 stats["submitted"] += 1
                 _mark_activity(stats, item_type)
 
-            deadline = time.time() + item_timeout
-            status = lingarr_poll_job(job_id, deadline, title)
+            deadline = time.time() + timing["timeoutSeconds"]
+            progress_callback = lambda progress: _status_transition(
+                    item_type,
+                    item_id,
+                    target_lang,
+                    "translating",
+                    details={
+                        "progress": progress,
+                        "etaSeconds": max(
+                            0,
+                            round(
+                                timing["estimatedSeconds"]
+                                * (1.0 - min(100, max(0, progress)) / 100.0),
+                                1,
+                            ),
+                        ),
+                    },
+                )
+            try:
+                status = lingarr_poll_job(
+                    job_id,
+                    deadline,
+                    title,
+                    progress_callback=progress_callback,
+                )
+            except TypeError:
+                status = lingarr_poll_job(job_id, deadline, title)
         finally:
             _translation_capacity.release(capacity_token)
+            _file_lane_gate.release(lane)
+        translation_elapsed = time.monotonic() - translation_started
 
         if status != "Completed":
+            safe_to_recover = status is not None
+            if status is None and job_id is not None:
+                safe_to_recover = lingarr_cancel_job(job_id)
+            recovery = (
+                _recover_failed_lingarr_job(
+                    job_id,
+                    source_path,
+                    target_path,
+                    source_lang,
+                    target_lang,
+                    title,
+                )
+                if job_id is not None and safe_to_recover and not shutdown_requested
+                else {"recovered": False, "reason": "job unavailable"}
+            )
+            if recovery.get("recovered"):
+                status = "Completed"
+                translation_elapsed += float(recovery.get("repairElapsedSeconds", 0))
+
+        if status != "Completed":
+            failure_reason = (
+                "Lingarr timeout" if status is None else f"Lingarr job {status.lower()}"
+            )
+            try:
+                _get_validation_state().record_circuit_outcome(
+                    series_key=series_key,
+                    series_title=series_title,
+                    success=False,
+                    reason=failure_reason,
+                    threshold=CIRCUIT_FAILURE_THRESHOLD,
+                    open_seconds=CIRCUIT_OPEN_SECONDS,
+                    config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+                )
+            except StateStoreError as exc:
+                print(f"{YELLOW}[CIRCUIT] Could not record failure: {exc}{RESET}")
+            _refresh_status_diagnostics()
             with stats_lock:
                 if status is None:
                     stats["timed_out"] += 1
@@ -3459,7 +4083,12 @@ def process_item(item: dict, item_type: str, id_field: str,
                 )
             elif status is None:
                 _status_transition(
-                    item_type, item_id, target_lang, "timed_out", reason="Lingarr timeout"
+                    item_type,
+                    item_id,
+                    target_lang,
+                    "timed_out",
+                    reason="Lingarr timeout",
+                    details={"failureDetails": _safe_failure_details(job_id)},
                 )
             else:
                 _status_transition(
@@ -3468,6 +4097,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                     target_lang,
                     "failed",
                     reason=f"Lingarr job {status.lower()}",
+                    details={"failureDetails": _safe_failure_details(job_id)},
                 )
             continue
 
@@ -3544,6 +4174,28 @@ def process_item(item: dict, item_type: str, id_field: str,
             provenance_source_hash=source_hash,
         )
         if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
+            try:
+                _get_validation_state().record_timing_sample(
+                    kind="file",
+                    source_language=source_lang,
+                    target_language=target_lang,
+                    cue_count=timing["cueCount"],
+                    elapsed_seconds=translation_elapsed,
+                    outcome="accepted",
+                    lingarr_job_id=job_id,
+                )
+                _get_validation_state().record_circuit_outcome(
+                    series_key=series_key,
+                    series_title=series_title,
+                    success=True,
+                    reason=None,
+                    threshold=CIRCUIT_FAILURE_THRESHOLD,
+                    open_seconds=CIRCUIT_OPEN_SECONDS,
+                    config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+                )
+            except StateStoreError as exc:
+                print(f"{YELLOW}[TIMING] Could not persist successful sample: {exc}{RESET}")
+            _refresh_status_diagnostics()
             print(
                 f"{GREEN}[OK] {title} '{target_lang}' translated to "
                 f"{os.path.basename(actual_target_path)}{RESET}"
@@ -4393,7 +5045,11 @@ def run_cycle(cycle_num: int) -> None:
         print("[INFO] No wanted items found.")
     else:
         print(f"[INFO] Processing {len(work)} item(s) with {PARALLEL_TRANSLATES} worker(s)...")
-        with ThreadPoolExecutor(max_workers=PARALLEL_TRANSLATES) as executor:
+        # Extra dispatch threads let short work reach its reserved lane even when
+        # several long items appear first; the lane and Lingarr gates still cap
+        # actual full-file translations at PARALLEL_TRANSLATES.
+        dispatch_workers = max(PARALLEL_TRANSLATES * 4, PARALLEL_TRANSLATES + 1)
+        with ThreadPoolExecutor(max_workers=dispatch_workers) as executor:
             futures = {
                 executor.submit(process_item, item, itype, ifield, stats, stats_lock):
                 (item, itype, ifield)
@@ -4548,9 +5204,10 @@ def main() -> int:
                 retention_days=STATUS_HISTORY_RETENTION_DAYS,
                 recent_limit=STATUS_RECENT_LIMIT,
             )
+            _refresh_status_diagnostics()
             try:
                 status_server, _ = start_status_server(
-                    _status_tracker, STATUS_BIND, STATUS_PORT
+                    _status_tracker, STATUS_BIND, STATUS_PORT, LOG_DIR
                 )
                 print(f"[STATUS] Dashboard listening on http://{STATUS_BIND}:{STATUS_PORT}")
             except OSError as exc:
@@ -4592,6 +5249,16 @@ def main() -> int:
           + (f" on {STATUS_BIND}:{STATUS_PORT}" if STATUS_ENABLED else ""))
     print(f"  Status retention  : {STATUS_HISTORY_RETENTION_DAYS} days")
     print(f"  Parallel workers  : {PARALLEL_TRANSLATES}")
+    print(
+        f"  Adaptive timeout  : x{TRANSLATION_TIMEOUT_MULTIPLIER:g}, "
+        f"cap {TRANSLATION_TIMEOUT_CAP}s, cold "
+        f"{TRANSLATION_COLD_SECONDS_PER_CUE:g}s/cue"
+    )
+    print(f"  Long-job threshold: {LONG_JOB_THRESHOLD}s (one dedicated file lane)")
+    print(
+        f"  Circuit breaker   : {CIRCUIT_FAILURE_THRESHOLD} failures / "
+        f"{CIRCUIT_OPEN_SECONDS}s"
+    )
     print(f"  Check interval    : {CHECK_INTERVAL}s (after Bazarr sync)")
     print(f"  Poll interval     : {POLL_INTERVAL}s  (floor {POLL_TIMEOUT}s per translation)")
     print(f"  Sync timeout      : {SYNC_TIMEOUT}s")

@@ -18,6 +18,7 @@ from status_dashboard import (  # noqa: E402
     episode_identity,
     episode_identity_from_path,
     render_dashboard,
+    read_logs,
     start_status_server,
 )
 
@@ -299,7 +300,8 @@ class StatusDashboardTests(unittest.TestCase):
                 list(payload),
                 [
                     "generatedAt", "service", "currentCycle", "activeJobs",
-                    "upNext", "recentOutcomes", "history", "maintenance",
+                    "upNext", "recentOutcomes", "timing", "circuits",
+                    "history", "maintenance",
                 ],
             )
             self.assertFalse((Path(directory) / "status.json.tmp").exists())
@@ -429,6 +431,22 @@ class StatusDashboardTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     start_status_server(tracker, "127.0.0.1", 8765)
                 self.assertEqual(tracker.snapshot()["service"]["phase"], "startup")
+
+    def test_log_reader_filters_paginates_and_redacts_paths_and_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bazarr-autotranslate-2026-01-01.log").write_text(
+                "[INFO] Top Gear started\n"
+                "[ERROR] api_key=secret /media/shows/topgear/file.srt\n"
+                "[INFO] Other show\n",
+                encoding="utf-8",
+            )
+            page = read_logs(root, {"job": ["top gear"], "limit": ["1"]})
+            self.assertEqual(len(page["lines"]), 1)
+            error = read_logs(root, {"level": ["ERROR"]})
+            self.assertEqual(len(error["lines"]), 1)
+            self.assertNotIn("secret", error["lines"][0])
+            self.assertNotIn("/media/", error["lines"][0])
 
 
 if __name__ == "__main__":

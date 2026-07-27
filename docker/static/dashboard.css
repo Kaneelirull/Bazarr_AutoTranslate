@@ -174,6 +174,57 @@ h3 {
   color: var(--text-secondary);
 }
 
+.log-shell {
+  padding-bottom: 3rem;
+}
+
+.log-filters {
+  display: grid;
+  grid-template-columns: minmax(9rem, .7fr) repeat(2, minmax(12rem, 1fr)) auto;
+  gap: .8rem;
+  align-items: end;
+  margin-bottom: 1rem;
+}
+
+.log-filters label {
+  display: grid;
+  gap: .35rem;
+  color: var(--muted);
+  font-size: .8rem;
+  font-weight: 700;
+}
+
+.log-filters input,
+.log-filters select {
+  min-height: 2.6rem;
+  border: 1px solid var(--border);
+  border-radius: .65rem;
+  background: var(--surface-strong);
+  color: var(--text);
+  padding: .55rem .7rem;
+  font: inherit;
+}
+
+.log-output {
+  min-height: 24rem;
+  max-height: 65vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: .75rem;
+  background: #081019;
+  color: #c8d5df;
+  padding: 1rem;
+  font: .78rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .log-filters {
+    grid-template-columns: 1fr;
+  }
+}
+
 .header-meta {
   display: flex;
   flex-wrap: wrap;

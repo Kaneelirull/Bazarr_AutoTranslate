@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
+from urllib.parse import parse_qs, urlsplit
 
 
 TERMINAL_STATES = {"accepted", "failed", "timed_out", "deferred", "quarantined"}
@@ -46,6 +47,10 @@ STATIC_ASSETS = {
     "/assets/dashboard.js": (
         "text/javascript; charset=utf-8",
         STATIC_DIR / "dashboard.js",
+    ),
+    "/assets/logs.js": (
+        "text/javascript; charset=utf-8",
+        STATIC_DIR / "logs.js",
     ),
     "/assets/plus-jakarta-sans.ttf": (
         "font/ttf",
@@ -253,6 +258,7 @@ class StatusTracker:
         *,
         repaired: bool = False,
         reason: str | None = None,
+        details: dict | None = None,
     ) -> bool:
         if state not in TERMINAL_STATES | ACTIVE_STATES | {"queued"}:
             raise ValueError(f"unsupported status state: {state}")
@@ -261,6 +267,10 @@ class StatusTracker:
             if job is None or job.get("state") in TERMINAL_STATES:
                 return False
             now = self.clock()
+            if details:
+                for key, value in details.items():
+                    if key not in {"key", "itemType", "itemId", "targetLanguage"}:
+                        job[key] = value
             if state in TERMINAL_STATES:
                 self._finish_job_locked(job, state, now, repaired=repaired, reason=reason)
             else:
@@ -432,6 +442,17 @@ class StatusTracker:
             "repaired": job["repaired"],
             "durationSeconds": job["durationSeconds"],
             "reason": job.get("reason"),
+            "cueCount": job.get("cueCount"),
+            "secondsPerCue": job.get("secondsPerCue"),
+            "estimatedSeconds": job.get("estimatedSeconds"),
+            "timeoutSeconds": job.get("timeoutSeconds"),
+            "etaSeconds": 0,
+            "progress": job.get("progress"),
+            "lane": job.get("lane"),
+            "attempts": job.get("attempts"),
+            "jobId": job.get("jobId"),
+            "failureDetails": job.get("failureDetails"),
+            "circuit": job.get("circuit"),
         }
         self._append_history_locked(event)
 
@@ -480,6 +501,24 @@ class StatusTracker:
         done = sum(states[state] for state in TERMINAL_STATES)
         started = _parse_iso(self._cycle.get("startedAt")) or self.clock()
         ended = _parse_iso(self._cycle.get("completedAt")) or self.clock()
+        known_estimates = [
+            float(job["estimatedSeconds"])
+            for job in jobs
+            if isinstance(job.get("estimatedSeconds"), (int, float))
+            and job["estimatedSeconds"] > 0
+        ]
+        fallback_estimate = (
+            sum(known_estimates) / len(known_estimates) if known_estimates else 0.0
+        )
+        remaining_work = 0.0
+        for job in jobs:
+            if job.get("state") in TERMINAL_STATES:
+                continue
+            estimate = float(job.get("estimatedSeconds") or fallback_estimate)
+            if job.get("state") == "translating":
+                estimate = float(job.get("etaSeconds") or estimate)
+            remaining_work += estimate
+        workers = max(1, sum(job.get("state") == "translating" for job in jobs))
         return {
             **self._cycle,
             "queued": states["queued"],
@@ -494,6 +533,7 @@ class StatusTracker:
             "quarantined": states["quarantined"],
             "remaining": max(0, self._cycle.get("initial", len(jobs)) - done),
             "elapsedSeconds": max(0, round(ended - started, 3)),
+            "etaSeconds": round(remaining_work / workers, 1) if remaining_work else None,
         }
 
     def _job_public(self, job: dict) -> dict:
@@ -504,6 +544,10 @@ class StatusTracker:
                 "targetLanguage", "state",
                 "queuedAt", "startedAt", "finishedAt", "durationSeconds",
                 "repaired", "reason",
+                "cueCount", "secondsPerCue", "timingSampleCount",
+                "timingScope", "estimatedSeconds", "timeoutSeconds",
+                "etaSeconds", "progress", "lane", "attempts",
+                "jobId", "failureDetails", "circuit",
             )
         }
         if job.get("state") in ACTIVE_STATES:
@@ -537,6 +581,8 @@ class StatusTracker:
             "activeJobs": active,
             "upNext": up_next,
             "recentOutcomes": recent,
+            "timing": self._service.get("timing", {}),
+            "circuits": self._service.get("circuits", []),
             "history": {
                 label: self._window_counts_locked("job", seconds)
                 for label, seconds in HISTORY_WINDOWS.items()
@@ -549,6 +595,12 @@ class StatusTracker:
                 },
             },
         }
+
+    def set_diagnostics(self, *, timing: dict, circuits: list[dict]) -> None:
+        with self._lock:
+            self._service["timing"] = timing
+            self._service["circuits"] = circuits
+            self._write_snapshot_locked()
 
     def _write_snapshot_locked(self) -> None:
         self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -572,7 +624,14 @@ class StatusTracker:
                 )
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp, self.snapshot_path)
+            for attempt in range(5):
+                try:
+                    os.replace(temp, self.snapshot_path)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.01 * (attempt + 1))
             temp = None
         finally:
             if temp is not None:
@@ -616,6 +675,86 @@ def render_dashboard(snapshot: dict) -> str:
 </html>"""
 
 
+def render_logs_page() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Bazarr AutoTranslate Logs</title>
+<link rel="stylesheet" href="/assets/dashboard.css">
+<script src="/assets/logs.js" defer></script>
+</head>
+<body>
+<main class="dashboard-shell log-shell">
+  <header class="topbar"><div><div class="eyebrow">Diagnostics</div>
+  <h1>Service logs</h1><p class="header-meta">Sanitized, read-only operational output</p></div>
+  <div class="header-actions"><a class="btn btn-secondary" href="/">Status</a></div></header>
+  <section class="panel">
+    <form id="log-filters" class="log-filters">
+      <label>Level <select name="level"><option value="">All</option><option>ERROR</option>
+      <option>WARNING</option><option>FAIL</option><option>TIMEOUT</option></select></label>
+      <label>Show or job <input name="job" maxlength="100"></label>
+      <label>Text <input name="q" maxlength="100"></label>
+      <button class="btn btn-primary" type="submit">Filter</button>
+    </form>
+    <p id="log-status" class="section-note" role="status">Loading logs...</p>
+    <pre id="log-output" class="log-output" tabindex="0"></pre>
+    <button id="load-more" class="btn btn-secondary" type="button">Load older</button>
+  </section>
+</main>
+</body>
+</html>"""
+
+
+_SECRET_RE = re.compile(r"(?i)(api[-_ ]?key|authorization)(\s*[:=]\s*)\S+")
+_UNIX_MEDIA_PATH_RE = re.compile(r"(?<!\w)/(?:media|config)/[^\s]+")
+_WINDOWS_PATH_RE = re.compile(r"(?i)\b[A-Z]:\\[^\r\n]+")
+
+
+def _sanitize_log_line(line: str) -> str:
+    line = _SECRET_RE.sub(r"\1\2<redacted>", line)
+    line = _UNIX_MEDIA_PATH_RE.sub("<managed-path>", line)
+    line = _WINDOWS_PATH_RE.sub("<managed-path>", line)
+    return line[:4000]
+
+
+def read_logs(log_dir: Path, query: dict[str, list[str]]) -> dict:
+    limit = min(500, max(1, int(query.get("limit", ["200"])[0])))
+    cursor = max(0, int(query.get("cursor", ["0"])[0]))
+    level = query.get("level", [""])[0].strip().upper()
+    job = query.get("job", [""])[0].strip().casefold()
+    text = query.get("q", [""])[0].strip().casefold()
+    lines: list[str] = []
+    files = sorted(log_dir.glob("bazarr-autotranslate-*.log"), reverse=True)[:30]
+    for path in files:
+        try:
+            file_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in reversed(file_lines):
+            clean = _sanitize_log_line(line)
+            folded = clean.casefold()
+            if level and f"[{level}]" not in clean.upper():
+                continue
+            if job and job not in folded:
+                continue
+            if text and text not in folded:
+                continue
+            lines.append(clean)
+            if len(lines) >= cursor + limit + 1:
+                break
+        if len(lines) >= cursor + limit + 1:
+            break
+    page = lines[cursor:cursor + limit]
+    return {
+        "lines": page,
+        "nextCursor": cursor + limit if len(lines) > cursor + limit else None,
+        "sanitized": True,
+    }
+
+
 class _DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -624,18 +763,41 @@ def start_status_server(
     tracker: StatusTracker,
     bind: str,
     port: int,
+    log_dir: Path | str | None = None,
 ) -> tuple[_DashboardServer, threading.Thread]:
+    managed_log_dir = Path(log_dir) if log_dir is not None else None
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            if self.path == "/":
+            parsed = urlsplit(self.path)
+            if parsed.path == "/":
                 body = render_dashboard(tracker.snapshot()).encode("utf-8")
                 self._send(200, "text/html; charset=utf-8", body)
-            elif self.path == "/api/status":
+            elif parsed.path == "/logs":
+                self._send(
+                    200,
+                    "text/html; charset=utf-8",
+                    render_logs_page().encode("utf-8"),
+                )
+            elif parsed.path == "/api/logs":
+                if managed_log_dir is None:
+                    self._send(404, "application/json; charset=utf-8", b'{"error":"logs unavailable"}')
+                    return
+                try:
+                    payload = read_logs(managed_log_dir, parse_qs(parsed.query))
+                except (TypeError, ValueError):
+                    self._send(400, "application/json; charset=utf-8", b'{"error":"invalid query"}')
+                    return
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                )
+            elif parsed.path == "/api/status":
                 body = json.dumps(
                     tracker.snapshot(), ensure_ascii=False, indent=2
                 ).encode("utf-8")
                 self._send(200, "application/json; charset=utf-8", body)
-            elif self.path == "/healthz":
+            elif parsed.path == "/healthz":
                 snapshot = tracker.snapshot()
                 body = json.dumps({
                     "status": "ok",
@@ -643,8 +805,8 @@ def start_status_server(
                     "generatedAt": snapshot["generatedAt"],
                 }).encode("utf-8")
                 self._send(200, "application/json; charset=utf-8", body)
-            elif self.path in STATIC_ASSETS:
-                content_type, asset_path = STATIC_ASSETS[self.path]
+            elif parsed.path in STATIC_ASSETS:
+                content_type, asset_path = STATIC_ASSETS[parsed.path]
                 try:
                     body = asset_path.read_bytes()
                 except OSError:
@@ -659,7 +821,8 @@ def start_status_server(
                 self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
 
         def do_HEAD(self) -> None:
-            if self.path in ("/", "/api/status", "/healthz") or self.path in STATIC_ASSETS:
+            path = urlsplit(self.path).path
+            if path in ("/", "/logs", "/api/status", "/api/logs", "/healthz") or path in STATIC_ASSETS:
                 self._send(200, "text/plain; charset=utf-8", b"", include_body=False)
             else:
                 self._send(404, "text/plain; charset=utf-8", b"", include_body=False)

@@ -422,6 +422,87 @@ class StateStoreTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_timing_estimate_uses_successful_samples_and_global_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(Path(directory))
+            try:
+                for elapsed in (10.0, 12.0, 11.0, 5000.0):
+                    store.record_timing_sample(
+                        kind="file",
+                        source_language="en",
+                        target_language="et",
+                        cue_count=10,
+                        elapsed_seconds=elapsed,
+                        outcome="accepted",
+                    )
+                store.record_timing_sample(
+                    kind="file",
+                    source_language="en",
+                    target_language="et",
+                    cue_count=10,
+                    elapsed_seconds=1.0,
+                    outcome="failed",
+                )
+                estimate = store.timing_estimate(
+                    kind="file",
+                    source_language="en",
+                    target_language="et",
+                    cold_seconds_per_cue=1.8,
+                    alpha=0.2,
+                )
+                self.assertEqual(estimate["sampleCount"], 4)
+                self.assertEqual(estimate["scope"], "language_pair")
+                self.assertLess(estimate["secondsPerCue"], 5.0)
+                fallback = store.timing_estimate(
+                    kind="file",
+                    source_language="sv",
+                    target_language="et",
+                    cold_seconds_per_cue=1.8,
+                    alpha=0.2,
+                )
+                self.assertEqual(fallback["scope"], "global")
+            finally:
+                store.close()
+
+    def test_circuit_breaker_opens_and_allows_one_half_open_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(Path(directory))
+            try:
+                for index in range(3):
+                    state = store.record_circuit_outcome(
+                        series_key="sonarr:1",
+                        series_title="Top Gear",
+                        success=False,
+                        reason="timeout",
+                        threshold=3,
+                        open_seconds=60,
+                        config_fingerprint="a",
+                        now=100 + index,
+                    )
+                self.assertEqual(state["state"], "open")
+                self.assertFalse(store.circuit_permission(
+                    series_key="sonarr:1",
+                    series_title="Top Gear",
+                    config_fingerprint="a",
+                    now=120,
+                )["allowed"])
+                trial = store.circuit_permission(
+                    series_key="sonarr:1",
+                    series_title="Top Gear",
+                    config_fingerprint="a",
+                    now=200,
+                )
+                self.assertTrue(trial["allowed"])
+                self.assertEqual(trial["state"], "half_open")
+                self.assertFalse(store.circuit_permission(
+                    series_key="sonarr:1",
+                    series_title="Top Gear",
+                    config_fingerprint="a",
+                    now=201,
+                )["allowed"])
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()
