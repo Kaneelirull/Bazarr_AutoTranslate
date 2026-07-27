@@ -97,6 +97,30 @@ Existing-library cleanup runs after startup synchronization and then on its own 
 
 ## Translation status dashboard
 
+### Adaptive timing and long files
+
+Accepted translations are sampled in SQLite and used to learn a robust
+seconds-per-cue estimate for each language pair. New installations start at
+`TRANSLATION_COLD_SECONDS_PER_CUE=1.8`. Per-file deadlines use the learned
+estimate, `TRANSLATION_TIMEOUT_MULTIPLIER`, and
+`TRANSLATION_TIMEOUT_CAP` (three hours by default).
+
+`PARALLEL_TRANSLATES` continues to control full-file work only. With two or
+more workers, one lane is reserved for files estimated above
+`LONG_JOB_THRESHOLD` and the remaining lanes serve short files. With one
+worker, short files have priority. `CLEANUP_REPAIR_WORKERS` remains an
+independent cue-repair executor.
+
+Failed Lingarr jobs are inspected for positioned line results. Valid completed
+lines are retained and unresolved cues are retried individually instead of
+resubmitting the complete episode. Three consecutive failures open a temporary
+per-series circuit so one problematic show cannot monopolize the queue.
+
+The dashboard shows learned cue speed, estimates, ETA, lanes, and circuit
+state. The **Logs** link opens a searchable, sanitized, read-only view of
+managed AutoTranslate logs. Lingarr's internal provider command timeout is not
+configurable through its documented API and is not changed here.
+
 The status page shows one queue entry per missing target language. Its initial count is fixed when the Bazarr wanted queue is read. A Lingarr submission is shown as `translating`; it becomes `accepted` only after the resulting subtitle passes local validation. `Done` includes accepted, failed, timed-out, deferred, and quarantined jobs, while `Remaining` contains queued, translating, validating, and repairing work.
 
 The page includes the current or most recently completed cycle, active jobs, the next ten jobs, the latest twenty outcomes, and exact rolling 1-hour, 6-hour, 12-hour, 24-hour, and 7-day totals. It formats elapsed time and local timestamps for readability, includes episode identity when available, supports dark and light themes, and refreshes in place every 30 seconds. Existing-library repairs, quarantines, undersized detections, and sidecar pruning are reported separately as maintenance activity.

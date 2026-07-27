@@ -99,6 +99,16 @@
       + `<strong>Reason</strong><span>${escapeHtml(reason)}</span></span></span>`;
   };
 
+  const detailedReason = (row) => {
+    const detail = row?.failureDetails || {};
+    const parts = [
+      row?.reason,
+      detail.errorMessage,
+      ...(Array.isArray(detail.events) ? detail.events.slice(-2) : []),
+    ].filter(Boolean);
+    return parts.join(" | ");
+  };
+
   const tooltipFor = (trigger) => {
     const id = trigger?.getAttribute("aria-describedby");
     return id ? document.getElementById(id) : null;
@@ -226,6 +236,9 @@
         ["Language", "language"],
         ["Status", "status"],
         ["Elapsed", "elapsed"],
+        ["Estimate", "estimate"],
+        ["ETA", "eta"],
+        ["Lane", "lane"],
         ["Started", "started"],
       ];
     } else {
@@ -235,6 +248,9 @@
         ["Language", "language"],
         ["Outcome", "outcome"],
         ["Duration", "duration"],
+        ["Estimate", "estimate"],
+        ["Lane", "lane"],
+        ["Attempts", "attempts"],
         ["Finished", "finished"],
       ];
     }
@@ -244,16 +260,20 @@
       if (key === "media") return mediaMarkup(row);
       if (key === "type") return escapeHtml(row.itemType === "movies" ? "Movie" : "Episode");
       if (key === "language") return escapeHtml(row.targetLanguage || "—");
-      if (key === "status") return statusMarkup(row.state, row.reason);
+      if (key === "status") return statusMarkup(row.state, detailedReason(row));
       if (key === "outcome") {
         const state = row.repaired && row.outcome === "accepted" ? "repaired" : row.outcome;
-        return statusMarkup(state, row.reason);
+        return statusMarkup(state, detailedReason(row));
       }
       if (key === "elapsed") {
         const started = row.startedAt || "";
         return `<span class="duration live-duration" data-started-at="${escapeHtml(started)}">${escapeHtml(formatDuration(row.durationSeconds))}</span>`;
       }
       if (key === "duration") return `<span class="duration">${escapeHtml(formatDuration(row.durationSeconds))}</span>`;
+      if (key === "estimate") return `<span class="duration">${escapeHtml(formatDuration(row.estimatedSeconds))}</span>`;
+      if (key === "eta") return `<span class="duration">${escapeHtml(formatDuration(row.etaSeconds))}</span>`;
+      if (key === "lane") return escapeHtml(row.lane || "—");
+      if (key === "attempts") return escapeHtml(row.attempts ?? "—");
       if (key === "queued") return timeMarkup(row.queuedAt);
       if (key === "started") return timeMarkup(row.startedAt);
       if (key === "finished") return timeMarkup(row.timestamp || row.finishedAt);
@@ -296,6 +316,7 @@
         </p>
       </div>
       <div class="header-actions">
+        <a class="btn btn-secondary" href="/logs">Logs</a>
         <button class="btn btn-secondary" id="theme-toggle" type="button" aria-label="Switch color theme">Theme</button>
         <button class="btn btn-primary" id="refresh-button" type="button">Refresh now</button>
       </div>
@@ -315,6 +336,7 @@
           <div class="overview-facts">
             <div class="fact"><span class="fact-label">Remaining</span><strong class="fact-value">${number(cycle.remaining).toLocaleString()}</strong></div>
             <div class="fact"><span class="fact-label">Elapsed</span><strong class="fact-value">${escapeHtml(formatDuration(cycle.elapsedSeconds))}</strong></div>
+            <div class="fact"><span class="fact-label">Approx. ETA</span><strong class="fact-value">${escapeHtml(formatDuration(cycle.etaSeconds))}</strong></div>
             <div class="fact"><span class="fact-label">Next cycle</span><strong class="fact-value">${service.nextCycleAt ? escapeHtml(relativeTime(service.nextCycleAt)) : "—"}</strong></div>
           </div>
         </div>
@@ -340,6 +362,27 @@
           </div>
         </div>
       </div>
+    </section>`;
+  };
+
+  const renderDiagnostics = (timing, circuits) => {
+    const file = timing?.file || {};
+    const repair = timing?.repair || {};
+    const rate = (entry) => Number.isFinite(Number(entry.secondsPerCue))
+      ? `${Number(entry.secondsPerCue).toFixed(3)}s / cue`
+      : "—";
+    const breakers = (circuits || []).map((entry) => (
+      `<div class="maintenance-item"><span class="maintenance-label">${escapeHtml(entry.seriesTitle || entry.seriesKey)} · ${escapeHtml(entry.state)}</span>`
+      + `<strong class="maintenance-value">${number(entry.failures)} failures</strong></div>`
+    )).join("");
+    return `<section class="panel">${panelHeader("Timing & protection", "Learned from accepted work; estimates are approximate.")}
+      <div class="metric-grid">
+        ${metric("File average", rate(file), "tone-accent")}
+        ${metric("File samples", number(file.sampleCount).toLocaleString())}
+        ${metric("Repair average", rate(repair), "tone-warning")}
+        ${metric("Repair samples", number(repair.sampleCount).toLocaleString())}
+      </div>
+      ${breakers ? `<div class="maintenance-grid circuit-grid">${breakers}</div>` : '<p class="empty-state">No open series circuits.</p>'}
     </section>`;
   };
 
@@ -405,6 +448,7 @@
     root.innerHTML = `<div class="dashboard-shell">
       ${renderHeader(service, cycle)}
       ${renderOverview(cycle, service)}
+      ${renderDiagnostics(snapshot.timing || {}, snapshot.circuits || [])}
       <section class="panel">${panelHeader("Active now", `${active.length.toLocaleString()} in progress`)}
         ${table(active, "active", "No active translations or repairs.")}
       </section>

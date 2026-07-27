@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import statistics
 import threading
 import time
 from contextlib import contextmanager
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class StateStoreError(RuntimeError):
@@ -243,9 +244,270 @@ class StateStore:
                     occurrences INTEGER NOT NULL,
                     PRIMARY KEY(identity, target_hash)
                 );
+
+                CREATE TABLE IF NOT EXISTS timing_samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    source_language TEXT,
+                    target_language TEXT NOT NULL,
+                    cue_count INTEGER NOT NULL,
+                    elapsed_seconds REAL NOT NULL,
+                    seconds_per_cue REAL NOT NULL,
+                    outcome TEXT NOT NULL,
+                    lingarr_job_id INTEGER,
+                    attempts INTEGER NOT NULL DEFAULT 1,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_timing_samples_lookup
+                    ON timing_samples(
+                        kind, source_language, target_language, outcome, created_at DESC
+                    );
+
+                CREATE TABLE IF NOT EXISTS circuit_breakers (
+                    series_key TEXT PRIMARY KEY,
+                    series_title TEXT NOT NULL,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    state TEXT NOT NULL DEFAULT 'closed',
+                    opened_at REAL,
+                    retry_at REAL,
+                    half_open_claimed INTEGER NOT NULL DEFAULT 0,
+                    config_fingerprint TEXT NOT NULL,
+                    last_reason TEXT,
+                    updated_at REAL NOT NULL
+                );
                 """
             )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def record_timing_sample(
+        self,
+        *,
+        kind: str,
+        source_language: str | None,
+        target_language: str,
+        cue_count: int,
+        elapsed_seconds: float,
+        outcome: str,
+        lingarr_job_id: int | None = None,
+        attempts: int = 1,
+    ) -> None:
+        if cue_count <= 0 or elapsed_seconds <= 0:
+            return
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO timing_samples(
+                    kind, source_language, target_language, cue_count,
+                    elapsed_seconds, seconds_per_cue, outcome,
+                    lingarr_job_id, attempts, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    kind,
+                    source_language,
+                    target_language,
+                    cue_count,
+                    elapsed_seconds,
+                    elapsed_seconds / cue_count,
+                    outcome,
+                    lingarr_job_id,
+                    max(1, attempts),
+                    time.time(),
+                ),
+            )
+
+    def timing_estimate(
+        self,
+        *,
+        kind: str,
+        source_language: str | None,
+        target_language: str,
+        cold_seconds_per_cue: float,
+        alpha: float,
+        limit: int = 50,
+    ) -> dict:
+        """Return a robust EWMA, falling back from language pair to global data."""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT seconds_per_cue
+                FROM timing_samples
+                WHERE kind = ? AND source_language IS ? AND target_language = ?
+                  AND outcome = 'accepted'
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                (kind, source_language, target_language, limit),
+            ).fetchall()
+            scope = "language_pair"
+            if not rows:
+                rows = self._connection.execute(
+                    """
+                    SELECT seconds_per_cue
+                    FROM timing_samples
+                    WHERE kind = ? AND outcome = 'accepted'
+                    ORDER BY created_at DESC LIMIT ?
+                    """,
+                    (kind, limit),
+                ).fetchall()
+                scope = "global" if rows else "cold_start"
+        values = [float(row["seconds_per_cue"]) for row in reversed(rows)]
+        if not values:
+            return {
+                "secondsPerCue": float(cold_seconds_per_cue),
+                "sampleCount": 0,
+                "scope": scope,
+            }
+        median = statistics.median(values)
+        lower = max(0.01, median * 0.25)
+        upper = max(lower, median * 4.0)
+        estimate = min(max(values[0], lower), upper)
+        blend = min(1.0, max(0.01, float(alpha)))
+        for value in values[1:]:
+            clamped = min(max(value, lower), upper)
+            estimate = blend * clamped + (1.0 - blend) * estimate
+        return {
+            "secondsPerCue": estimate,
+            "sampleCount": len(values),
+            "scope": scope,
+        }
+
+    def circuit_permission(
+        self,
+        *,
+        series_key: str,
+        series_title: str,
+        config_fingerprint: str,
+        now: float | None = None,
+    ) -> dict:
+        now = time.time() if now is None else now
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM circuit_breakers WHERE series_key = ?",
+                (series_key,),
+            ).fetchone()
+            if row is None or row["config_fingerprint"] != config_fingerprint:
+                connection.execute(
+                    """
+                    INSERT INTO circuit_breakers(
+                        series_key, series_title, config_fingerprint, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(series_key) DO UPDATE SET
+                        series_title=excluded.series_title,
+                        consecutive_failures=0, state='closed', opened_at=NULL,
+                        retry_at=NULL, half_open_claimed=0,
+                        config_fingerprint=excluded.config_fingerprint,
+                        last_reason=NULL, updated_at=excluded.updated_at
+                    """,
+                    (series_key, series_title, config_fingerprint, now),
+                )
+                return {"allowed": True, "state": "closed", "failures": 0}
+            state = row["state"]
+            if state == "open" and row["retry_at"] and now >= row["retry_at"]:
+                connection.execute(
+                    """
+                    UPDATE circuit_breakers
+                    SET state='half_open', half_open_claimed=1, updated_at=?
+                    WHERE series_key=?
+                    """,
+                    (now, series_key),
+                )
+                return {
+                    "allowed": True,
+                    "state": "half_open",
+                    "failures": row["consecutive_failures"],
+                    "retryAt": row["retry_at"],
+                }
+            allowed = state == "closed"
+            return {
+                "allowed": allowed,
+                "state": state,
+                "failures": row["consecutive_failures"],
+                "retryAt": row["retry_at"],
+                "reason": row["last_reason"],
+            }
+
+    def record_circuit_outcome(
+        self,
+        *,
+        series_key: str,
+        series_title: str,
+        success: bool,
+        reason: str | None,
+        threshold: int,
+        open_seconds: int,
+        config_fingerprint: str,
+        now: float | None = None,
+    ) -> dict:
+        now = time.time() if now is None else now
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM circuit_breakers WHERE series_key=?",
+                (series_key,),
+            ).fetchone()
+            failures = 0 if success else int(row["consecutive_failures"] if row else 0) + 1
+            state = "closed"
+            opened_at = None
+            retry_at = None
+            if not success and failures >= max(1, threshold):
+                state = "open"
+                opened_at = now
+                retry_at = now + max(1, open_seconds)
+            connection.execute(
+                """
+                INSERT INTO circuit_breakers(
+                    series_key, series_title, consecutive_failures, state,
+                    opened_at, retry_at, half_open_claimed, config_fingerprint,
+                    last_reason, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                ON CONFLICT(series_key) DO UPDATE SET
+                    series_title=excluded.series_title,
+                    consecutive_failures=excluded.consecutive_failures,
+                    state=excluded.state, opened_at=excluded.opened_at,
+                    retry_at=excluded.retry_at, half_open_claimed=0,
+                    config_fingerprint=excluded.config_fingerprint,
+                    last_reason=excluded.last_reason, updated_at=excluded.updated_at
+                """,
+                (
+                    series_key,
+                    series_title,
+                    failures,
+                    state,
+                    opened_at,
+                    retry_at,
+                    config_fingerprint,
+                    None if success else reason,
+                    now,
+                ),
+            )
+        return {
+            "state": state,
+            "failures": failures,
+            "retryAt": retry_at,
+            "reason": None if success else reason,
+        }
+
+    def circuit_breakers(self) -> list[dict]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT series_key, series_title, consecutive_failures, state,
+                       retry_at, last_reason
+                FROM circuit_breakers
+                WHERE state != 'closed' OR consecutive_failures > 0
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+        return [
+            {
+                "seriesKey": row["series_key"],
+                "seriesTitle": row["series_title"],
+                "failures": row["consecutive_failures"],
+                "state": row["state"],
+                "retryAt": row["retry_at"],
+                "reason": row["last_reason"],
+            }
+            for row in rows
+        ]
 
     def _verify(self) -> None:
         result = self._connection.execute("PRAGMA quick_check").fetchone()[0]
@@ -1112,6 +1374,7 @@ class StateStore:
         cutoff = datetime.fromtimestamp(
             timestamp.timestamp() - retention_days * 86400, timezone.utc
         ).isoformat()
+        cutoff_timestamp = timestamp.timestamp() - retention_days * 86400
         with self._transaction() as db:
             validations = db.execute(
                 "DELETE FROM validation_results WHERE validated_at < ?", (cutoff,)
@@ -1132,7 +1395,11 @@ class StateStore:
                 """,
                 (timestamp.timestamp(),),
             ).rowcount
-        return int(validations + holds + attempts)
+            timings = db.execute(
+                "DELETE FROM timing_samples WHERE created_at < ?",
+                (cutoff_timestamp,),
+            ).rowcount
+        return int(validations + holds + attempts + timings)
 
     # ------------------------------------------------------------------
     # One-time JSON migration
