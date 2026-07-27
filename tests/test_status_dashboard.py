@@ -354,6 +354,13 @@ class StatusDashboardTests(unittest.TestCase):
             self.assertNotIn("<script>", page)
             self.assertNotIn("&quot;jobs&quot;", page)
 
+    def test_dashboard_exposes_configured_display_timezone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self.make_tracker(directory)
+            with patch.dict("os.environ", {"TZ": "Europe/Tallinn"}):
+                page = render_dashboard(tracker.snapshot())
+            self.assertIn('data-time-zone="Europe/Tallinn"', page)
+
     def test_http_routes_cache_headers_and_not_found(self):
         with tempfile.TemporaryDirectory() as directory:
             tracker = self.make_tracker(directory)
@@ -420,6 +427,44 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn(".badge-tooltip-trigger:focus-visible", stylesheet)
         self.assertIn(".status-tooltip[hidden]", stylesheet)
         self.assertIn("max-width: min(320px, calc(100vw - 24px))", stylesheet)
+
+    def test_dashboard_assets_render_timing_and_protection_states(self):
+        script = (
+            REPO_ROOT / "docker" / "static" / "dashboard.js"
+        ).read_text(encoding="utf-8")
+        stylesheet = (
+            REPO_ROOT / "docker" / "static" / "dashboard.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('toFixed(1)} sec/cue', script)
+        self.assertIn('"Cold-start estimate"', script)
+        self.assertIn('"Learned average"', script)
+        self.assertIn('"File translation"', script)
+        self.assertIn('"Cue repair"', script)
+        self.assertIn("All series available", script)
+        self.assertIn("Protection active", script)
+        self.assertIn(
+            'failures === 1 ? "failure" : "failures"',
+            script,
+        )
+        self.assertIn('entry.state === "open" || entry.state === "half_open"', script)
+        self.assertIn("Number(entry.retryAt) * 1000", script)
+        self.assertIn('role="status"', script)
+        self.assertIn(".diagnostics-content", stylesheet)
+        self.assertIn(".timing-grid", stylesheet)
+        self.assertIn(".protection-row.is-healthy", stylesheet)
+        self.assertIn(".protection-row.is-warning", stylesheet)
+        self.assertIn("@media (max-width: 440px)", stylesheet)
+        self.assertIn('["Est. total", "estimate"]', script)
+        self.assertIn('["Remaining", "eta"]', script)
+        self.assertIn("exactTimeMarkup(row.startedAt)", script)
+        self.assertIn('new Intl.DateTimeFormat("en-GB"', script)
+        self.assertIn('hourCycle: "h23"', script)
+        self.assertIn("configuredTimeZone", script)
+        self.assertIn("formatRemaining", script)
+        self.assertIn("Over by", script)
+        self.assertIn(".live-remaining", script)
+        self.assertIn(".time-exact-only", stylesheet)
 
     def test_port_conflict_raises_without_corrupting_tracker(self):
         with tempfile.TemporaryDirectory() as directory:

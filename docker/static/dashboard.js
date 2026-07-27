@@ -3,6 +3,7 @@
 
   const REFRESH_MS = 30_000;
   const root = document.getElementById("dashboard");
+  const configuredTimeZone = root.dataset.timeZone || "UTC";
   let snapshot = {};
   let refreshTimer = null;
   let nextRefreshAt = 0;
@@ -62,7 +63,22 @@
 
   const exactTime = (value) => {
     const date = parseTime(value);
-    return date ? date.toLocaleString([], { dateStyle: "medium", timeStyle: "medium" }) : "—";
+    if (!date) return "—";
+    const options = {
+      timeZone: configuredTimeZone,
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    };
+    try {
+      return new Intl.DateTimeFormat("en-GB", options).format(date);
+    } catch (_error) {
+      return new Intl.DateTimeFormat("en-GB", { ...options, timeZone: "UTC" }).format(date);
+    }
   };
 
   const timeMarkup = (value, extraClass = "") => {
@@ -97,6 +113,16 @@
       + `data-tooltip-trigger aria-describedby="${tooltipId}" aria-expanded="false">${escapeHtml(label)}</button>`
       + `<span class="status-tooltip" id="${tooltipId}" role="tooltip" hidden>`
       + `<strong>Reason</strong><span>${escapeHtml(reason)}</span></span></span>`;
+  };
+
+  const exactTimeMarkup = (value) => {
+    if (!parseTime(value)) return '<span class="duration">—</span>';
+    return `<time class="time-exact-only" datetime="${escapeHtml(value)}">${escapeHtml(exactTime(value))}</time>`;
+  };
+
+  const formatRemaining = (seconds) => {
+    const value = Math.round(number(seconds));
+    return value >= 0 ? formatDuration(value) : `Over by ${formatDuration(Math.abs(value))}`;
   };
 
   const detailedReason = (row) => {
@@ -235,10 +261,10 @@
         ...(showType ? [["Type", "type"]] : []),
         ["Language", "language"],
         ["Status", "status"],
-        ["Elapsed", "elapsed"],
-        ["Estimate", "estimate"],
-        ["ETA", "eta"],
         ["Lane", "lane"],
+        ["Elapsed", "elapsed"],
+        ["Est. total", "estimate"],
+        ["Remaining", "eta"],
         ["Started", "started"],
       ];
     } else {
@@ -271,11 +297,27 @@
       }
       if (key === "duration") return `<span class="duration">${escapeHtml(formatDuration(row.durationSeconds))}</span>`;
       if (key === "estimate") return `<span class="duration">${escapeHtml(formatDuration(row.estimatedSeconds))}</span>`;
-      if (key === "eta") return `<span class="duration">${escapeHtml(formatDuration(row.etaSeconds))}</span>`;
+      if (key === "eta") {
+        if (row.estimatedSeconds === null || row.estimatedSeconds === undefined) {
+          return '<span class="duration">—</span>';
+        }
+        const started = parseTime(row.startedAt);
+        const elapsed = started
+          ? Math.max(0, (Date.now() - started.getTime()) / 1000)
+          : number(row.durationSeconds);
+        const hasProgressEstimate = number(row.progress) > 0
+          && row.etaSeconds !== null
+          && row.etaSeconds !== undefined;
+        const remaining = hasProgressEstimate
+          ? number(row.etaSeconds)
+          : number(row.estimatedSeconds) - elapsed;
+        const deadlineAt = Date.now() + remaining * 1000;
+        return `<span class="duration live-remaining" data-deadline-at="${deadlineAt}">${escapeHtml(formatRemaining(remaining))}</span>`;
+      }
       if (key === "lane") return escapeHtml(row.lane || "—");
       if (key === "attempts") return escapeHtml(row.attempts ?? "—");
       if (key === "queued") return timeMarkup(row.queuedAt);
-      if (key === "started") return timeMarkup(row.startedAt);
+      if (key === "started") return exactTimeMarkup(row.startedAt);
       if (key === "finished") return timeMarkup(row.timestamp || row.finishedAt);
       return "—";
     };
@@ -369,20 +411,60 @@
     const file = timing?.file || {};
     const repair = timing?.repair || {};
     const rate = (entry) => Number.isFinite(Number(entry.secondsPerCue))
-      ? `${Number(entry.secondsPerCue).toFixed(3)}s / cue`
+      ? `~${Number(entry.secondsPerCue).toFixed(1)} sec/cue`
       : "—";
-    const breakers = (circuits || []).map((entry) => (
-      `<div class="maintenance-item"><span class="maintenance-label">${escapeHtml(entry.seriesTitle || entry.seriesKey)} · ${escapeHtml(entry.state)}</span>`
-      + `<strong class="maintenance-value">${number(entry.failures)} failures</strong></div>`
-    )).join("");
-    return `<section class="panel">${panelHeader("Timing & protection", "Learned from accepted work; estimates are approximate.")}
-      <div class="metric-grid">
-        ${metric("File average", rate(file), "tone-accent")}
-        ${metric("File samples", number(file.sampleCount).toLocaleString())}
-        ${metric("Repair average", rate(repair), "tone-warning")}
-        ${metric("Repair samples", number(repair.sampleCount).toLocaleString())}
+    const timingBlock = (title, entry) => {
+      const samples = number(entry.sampleCount);
+      const basis = samples > 0 ? "Learned average" : "Cold-start estimate";
+      return `<article class="timing-block">
+        <div class="timing-block-copy">
+          <span class="timing-kind">${escapeHtml(title)}</span>
+          <span class="timing-basis">${basis}</span>
+        </div>
+        <div class="timing-reading">
+          <strong>${escapeHtml(rate(entry))}</strong>
+          <span>${samples.toLocaleString()} ${samples === 1 ? "sample" : "samples"}</span>
+        </div>
+      </article>`;
+    };
+    const activeCircuits = (circuits || []).filter(
+      (entry) => entry.state === "open" || entry.state === "half_open",
+    );
+    const breakerRows = activeCircuits.map((entry) => {
+      const failures = number(entry.failures);
+      const retryAt = entry.retryAt && Number.isFinite(Number(entry.retryAt))
+        ? new Date(Number(entry.retryAt) * 1000).toISOString()
+        : entry.retryAt;
+      const trial = retryAt ? ` · Next trial ${timeMarkup(retryAt)}` : "";
+      return `<div class="protection-series">
+        <strong>${escapeHtml(entry.seriesTitle || entry.seriesKey || "Unknown series")}</strong>
+        <span>${failures.toLocaleString()} consecutive ${failures === 1 ? "failure" : "failures"}${trial}</span>
+      </div>`;
+    }).join("");
+    const protection = breakerRows
+      ? `<div class="protection-row is-warning" role="status">
+          <span class="protection-badge">Protection active</span>
+          <div class="protection-copy">
+            <strong>Some series are temporarily paused</strong>
+            <span>Other translations and cue repairs continue normally.</span>
+          </div>
+          <div class="protection-series-list">${breakerRows}</div>
+        </div>`
+      : `<div class="protection-row is-healthy" role="status">
+          <span class="protection-badge">Healthy</span>
+          <div class="protection-copy">
+            <strong>All series available</strong>
+            <span>No circuit breakers are limiting translation.</span>
+          </div>
+        </div>`;
+    return `<section class="panel">${panelHeader("Timing & protection", "Adaptive estimates and series circuit-breaker status.")}
+      <div class="diagnostics-content">
+        <div class="timing-grid">
+          ${timingBlock("File translation", file)}
+          ${timingBlock("Cue repair", repair)}
+        </div>
+        ${protection}
       </div>
-      ${breakers ? `<div class="maintenance-grid circuit-grid">${breakers}</div>` : '<p class="empty-state">No open series circuits.</p>'}
     </section>`;
   };
 
@@ -515,6 +597,12 @@
     document.querySelectorAll(".live-duration").forEach((node) => {
       const started = parseTime(node.dataset.startedAt);
       if (started) node.textContent = formatDuration((Date.now() - started.getTime()) / 1000);
+    });
+    document.querySelectorAll(".live-remaining").forEach((node) => {
+      const deadlineAt = Number(node.dataset.deadlineAt);
+      if (Number.isFinite(deadlineAt)) {
+        node.textContent = formatRemaining((deadlineAt - Date.now()) / 1000);
+      }
     });
     const countdown = document.getElementById("refresh-countdown");
     if (countdown && nextRefreshAt) {
