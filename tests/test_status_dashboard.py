@@ -421,6 +421,34 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn(".status-tooltip[hidden]", stylesheet)
         self.assertIn("max-width: min(320px, calc(100vw - 24px))", stylesheet)
 
+    def test_dashboard_assets_render_timing_and_protection_states(self):
+        script = (
+            REPO_ROOT / "docker" / "static" / "dashboard.js"
+        ).read_text(encoding="utf-8")
+        stylesheet = (
+            REPO_ROOT / "docker" / "static" / "dashboard.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('toFixed(1)} sec/cue', script)
+        self.assertIn('"Cold-start estimate"', script)
+        self.assertIn('"Learned average"', script)
+        self.assertIn('"File translation"', script)
+        self.assertIn('"Cue repair"', script)
+        self.assertIn("All series available", script)
+        self.assertIn("Protection active", script)
+        self.assertIn(
+            'failures === 1 ? "failure" : "failures"',
+            script,
+        )
+        self.assertIn('entry.state === "open" || entry.state === "half_open"', script)
+        self.assertIn("Number(entry.retryAt) * 1000", script)
+        self.assertIn('role="status"', script)
+        self.assertIn(".diagnostics-content", stylesheet)
+        self.assertIn(".timing-grid", stylesheet)
+        self.assertIn(".protection-row.is-healthy", stylesheet)
+        self.assertIn(".protection-row.is-warning", stylesheet)
+        self.assertIn("@media (max-width: 440px)", stylesheet)
+
     def test_port_conflict_raises_without_corrupting_tracker(self):
         with tempfile.TemporaryDirectory() as directory:
             tracker = self.make_tracker(directory)

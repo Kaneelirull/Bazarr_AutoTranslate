@@ -369,20 +369,60 @@
     const file = timing?.file || {};
     const repair = timing?.repair || {};
     const rate = (entry) => Number.isFinite(Number(entry.secondsPerCue))
-      ? `${Number(entry.secondsPerCue).toFixed(3)}s / cue`
+      ? `~${Number(entry.secondsPerCue).toFixed(1)} sec/cue`
       : "—";
-    const breakers = (circuits || []).map((entry) => (
-      `<div class="maintenance-item"><span class="maintenance-label">${escapeHtml(entry.seriesTitle || entry.seriesKey)} · ${escapeHtml(entry.state)}</span>`
-      + `<strong class="maintenance-value">${number(entry.failures)} failures</strong></div>`
-    )).join("");
-    return `<section class="panel">${panelHeader("Timing & protection", "Learned from accepted work; estimates are approximate.")}
-      <div class="metric-grid">
-        ${metric("File average", rate(file), "tone-accent")}
-        ${metric("File samples", number(file.sampleCount).toLocaleString())}
-        ${metric("Repair average", rate(repair), "tone-warning")}
-        ${metric("Repair samples", number(repair.sampleCount).toLocaleString())}
+    const timingBlock = (title, entry) => {
+      const samples = number(entry.sampleCount);
+      const basis = samples > 0 ? "Learned average" : "Cold-start estimate";
+      return `<article class="timing-block">
+        <div class="timing-block-copy">
+          <span class="timing-kind">${escapeHtml(title)}</span>
+          <span class="timing-basis">${basis}</span>
+        </div>
+        <div class="timing-reading">
+          <strong>${escapeHtml(rate(entry))}</strong>
+          <span>${samples.toLocaleString()} ${samples === 1 ? "sample" : "samples"}</span>
+        </div>
+      </article>`;
+    };
+    const activeCircuits = (circuits || []).filter(
+      (entry) => entry.state === "open" || entry.state === "half_open",
+    );
+    const breakerRows = activeCircuits.map((entry) => {
+      const failures = number(entry.failures);
+      const retryAt = entry.retryAt && Number.isFinite(Number(entry.retryAt))
+        ? new Date(Number(entry.retryAt) * 1000).toISOString()
+        : entry.retryAt;
+      const trial = retryAt ? ` · Next trial ${timeMarkup(retryAt)}` : "";
+      return `<div class="protection-series">
+        <strong>${escapeHtml(entry.seriesTitle || entry.seriesKey || "Unknown series")}</strong>
+        <span>${failures.toLocaleString()} consecutive ${failures === 1 ? "failure" : "failures"}${trial}</span>
+      </div>`;
+    }).join("");
+    const protection = breakerRows
+      ? `<div class="protection-row is-warning" role="status">
+          <span class="protection-badge">Protection active</span>
+          <div class="protection-copy">
+            <strong>Some series are temporarily paused</strong>
+            <span>Other translations and cue repairs continue normally.</span>
+          </div>
+          <div class="protection-series-list">${breakerRows}</div>
+        </div>`
+      : `<div class="protection-row is-healthy" role="status">
+          <span class="protection-badge">Healthy</span>
+          <div class="protection-copy">
+            <strong>All series available</strong>
+            <span>No circuit breakers are limiting translation.</span>
+          </div>
+        </div>`;
+    return `<section class="panel">${panelHeader("Timing & protection", "Adaptive estimates and series circuit-breaker status.")}
+      <div class="diagnostics-content">
+        <div class="timing-grid">
+          ${timingBlock("File translation", file)}
+          ${timingBlock("Cue repair", repair)}
+        </div>
+        ${protection}
       </div>
-      ${breakers ? `<div class="maintenance-grid circuit-grid">${breakers}</div>` : '<p class="empty-state">No open series circuits.</p>'}
     </section>`;
   };
 
