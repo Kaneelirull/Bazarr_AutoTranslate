@@ -130,7 +130,7 @@ class ServiceReliabilityTests(unittest.TestCase):
                 fetch_wanted=wanted,
                 _take_pending_prune_videos=lambda: {},
                 _drain_lingarr_queue=lambda: True,
-                _status_finish_cycle=lambda: None,
+                _status_finish_cycle=lambda _metrics=None: None,
             ),
             redirect_stdout(output),
         ):

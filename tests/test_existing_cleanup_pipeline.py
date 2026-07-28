@@ -6,7 +6,9 @@ import tempfile
 import threading
 import time
 import unittest
+import logging
 from collections import defaultdict
+from concurrent.futures import Future
 from types import SimpleNamespace
 from pathlib import Path
 from contextlib import redirect_stdout
@@ -51,6 +53,94 @@ def make_timed_srt(cue_count: int, final_second: int, text: str = "Dialogue line
 
 
 class ExistingCleanupPipelineTests(unittest.TestCase):
+    def setUp(self):
+        app._cycle_suppressions.begin_cycle(self.id())
+
+    def test_cycle_suppression_registry_is_thread_safe_and_resets(self):
+        registry = app.CycleSuppressionRegistry()
+        registry.begin_cycle("cycle-1")
+        identities = [f"show|{language}" for language in ("et", "sv")]
+        threads = [
+            threading.Thread(
+                target=registry.suppress,
+                args=(identities[index % 2],),
+                kwargs={"action": "quarantined"},
+            )
+            for index in range(20)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(registry.get("show|et")["cycleId"], "cycle-1")
+        self.assertEqual(registry.get("show|sv")["cycleId"], "cycle-1")
+        self.assertIsNone(registry.get("other-show|et"))
+        registry.begin_cycle("cycle-2")
+        self.assertIsNone(registry.get("show|et"))
+
+    def test_daily_log_formatter_adds_utc_timestamp_only_to_file_handler(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sink = app._DailyLogSink(Path(directory))
+            handler = app._DailyLogHandler(sink)
+            handler.setFormatter(
+                app._UtcLogFormatter(
+                    "%(asctime)s.%(msecs)03dZ %(message)s",
+                    datefmt="%Y-%m-%dT%H:%M:%S",
+                )
+            )
+            record = logging.LogRecord(
+                "test", logging.INFO, __file__, 1, "[INFO] Top Gear", (), None
+            )
+            record.created = 1_800_000_000.125
+            record.msecs = 125
+            handler.emit(record)
+            sink.flush()
+            persisted = sink.current_path.read_text(encoding="utf-8")
+            self.assertRegex(
+                persisted,
+                r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.125Z \[INFO\] Top Gear\n$",
+            )
+            self.assertEqual(
+                app._console_handler.format(record), "[INFO] Top Gear"
+            )
+            sink.close()
+
+    def test_async_repair_updates_series_circuit_once(self):
+        metadata = {
+            "series_key": "sonarr:77",
+            "series_title": "Top Gear",
+            "item_type": "episodes",
+            "item_id": 42,
+            "target_lang": "et",
+        }
+        for action, expected_success in (
+            ("repaired", True),
+            ("quarantined", False),
+        ):
+            future = Future()
+            future.set_result(
+                app.RepairJobResult(
+                    action,
+                    SimpleNamespace(issues=[]),
+                    "Top Gear",
+                    "et",
+                    "episodes",
+                    42,
+                )
+            )
+            state = SimpleNamespace(record_circuit_outcome=lambda **_kwargs: None)
+            with (
+                patch.object(app, "_get_validation_state", return_value=state),
+                patch.object(state, "record_circuit_outcome") as record,
+                patch.object(app, "_refresh_status_diagnostics"),
+                patch.object(app, "_status_transition"),
+            ):
+                app._publish_repair_status(future, metadata)
+            record.assert_called_once()
+            self.assertEqual(
+                record.call_args.kwargs["success"], expected_success
+            )
+
     def test_waiting_repairs_precede_translations_without_exceeding_shared_limit(self):
         for limit in (1, 2, 4):
             gate = app.SharedCapacityCoordinator(limit)
@@ -844,14 +934,13 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             state = app._validation_state
             target_hash = app._file_hash_or_none(target)
             identity = app._quarantine_identity("et", target_path=target)
-            state.record_quarantine_tombstone(
+            state.record_quarantine_event(
                 identity,
                 target_path=target,
                 target_hash=target_hash,
                 target_language="et",
                 rules=["excessive_lines"],
                 origin="lingarr",
-                hold_days=30,
             )
             self._record_lingarr_artifact(source, target)
 
@@ -879,7 +968,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertTrue(report.ai_repair_suppressed)
             queue_repair.assert_not_called()
 
-    def test_two_cycle_repeat_quarantine_creates_translation_hold(self):
+    def test_quarantine_suppresses_only_the_active_cycle(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             video = root / "movie.mkv"
@@ -898,7 +987,6 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 CLEANUP_ROOTS=[root],
                 CLEANUP_QUARANTINE_DIR=quarantine,
                 CLEANUP_REPAIR_ENABLED=False,
-                CLEANUP_QUARANTINE_HOLD_DAYS=30,
                 _validation_state=state,
             )
             with patch.multiple(app, **common):
@@ -926,10 +1014,10 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(second_action, "quarantined")
             self.assertFalse(first_report.repeat_offender)
             self.assertTrue(second_report.repeat_offender)
-            hold = state.active_quarantine_tombstone(
+            event = state.quarantine_event(
                 app._quarantine_identity("et", video_path=video)
             )
-            self.assertEqual(hold["occurrences"], 2)
+            self.assertEqual(event["occurrences"], 2)
 
             stats = defaultdict(int)
             stats["translations"] = []
@@ -952,25 +1040,28 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             ):
                 app.process_item(item, "movies", "radarrId", stats, threading.Lock())
 
-            self.assertEqual(stats["quarantine_holds"], 1)
+            self.assertEqual(stats["cycle_suppressions"], 1)
             self.assertEqual(stats["deferred"], 1)
             submit.assert_not_called()
+            app._cycle_suppressions.begin_cycle("next-cycle")
+            self.assertIsNone(
+                app._cycle_quarantine_suppression(video, "et")
+            )
 
-    def test_changed_valid_replacement_clears_quarantine_hold(self):
+    def test_changed_valid_replacement_resolves_quarantine_history(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "movie.et.srt"
             target.write_text(make_srt("Katki\nÜks\nKaks\nKolm\nNeli"), encoding="utf-8")
             state = app._validation_state
             identity = app._quarantine_identity("et", target_path=target)
-            state.record_quarantine_tombstone(
+            state.record_quarantine_event(
                 identity,
                 target_path=target,
                 target_hash=app._file_hash_or_none(target),
                 target_language="et",
                 rules=["excessive_lines"],
                 origin="unknown",
-                hold_days=30,
             )
             target.write_text(make_srt("See on korras."), encoding="utf-8")
 
@@ -990,7 +1081,9 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
 
             self.assertEqual(action, "valid")
             self.assertTrue(report.valid)
-            self.assertIsNone(state.active_quarantine_tombstone(identity))
+            self.assertIsNotNone(
+                state.quarantine_event(identity)["resolvedAt"]
+            )
 
     def test_recorded_lingarr_target_keeps_exact_alignment(self):
         with tempfile.TemporaryDirectory() as directory:

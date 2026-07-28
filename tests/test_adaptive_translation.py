@@ -274,7 +274,7 @@ class AdaptiveTranslationTests(unittest.TestCase):
                 lingarr_get_active_translations=lambda: [],
                 lingarr_submit_file=submit,
                 _get_validation_state=lambda: state,
-                _active_quarantine_hold=lambda *_args: None,
+                _cycle_quarantine_suppression=lambda *_args: None,
                 _check_cooldown=lambda *_args: None,
                 _count_dialogue_lines=lambda _path: 1,
                 _estimate_timeout=lambda *_args: timing,

@@ -58,6 +58,12 @@ class _DailyLogSink:
             if self._file is not None:
                 self._file.flush()
 
+    def close(self) -> None:
+        with self._lock:
+            if self._file is not None:
+                self._file.close()
+                self._file = None
+
 
 class _TeeStream:
     def __init__(self, primary, sink: _DailyLogSink):
@@ -91,6 +97,10 @@ class _DailyLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         self.sink.write(self.format(record) + "\n")
+
+
+class _UtcLogFormatter(logging.Formatter):
+    converter = time.gmtime
 
 
 class _QueuedLogStream:
@@ -227,9 +237,8 @@ CLEANUP_PRUNE_UNKNOWN_SIDECARS = os.getenv("CLEANUP_PRUNE_UNKNOWN_SIDECARS", "fa
 CLEANUP_SOURCELESS_LINE_ONLY_ACTION = os.getenv(
     "CLEANUP_SOURCELESS_LINE_ONLY_ACTION", "warn"
 ).strip().lower()
-CLEANUP_QUARANTINE_HOLD_DAYS = max(
-    1, int(os.getenv("CLEANUP_QUARANTINE_HOLD_DAYS", "30"))
-)
+_legacy_hold_days_raw = os.getenv("CLEANUP_QUARANTINE_HOLD_DAYS", "").strip()
+_LEGACY_QUARANTINE_HOLD_DAYS = _legacy_hold_days_raw or None
 CLEANUP_ROOT_RAW = os.getenv("CLEANUP_ROOT", "/media").strip() or "/media"
 CLEANUP_ROOTS = [Path(value.strip()) for value in CLEANUP_ROOT_RAW.split(os.pathsep) if value.strip()]
 CLEANUP_ACTION = os.getenv("CLEANUP_ACTION", "quarantine").strip().lower()
@@ -294,11 +303,17 @@ _app_logger.addHandler(_queue_handler)
 _console_handler = logging.StreamHandler(sys.stdout)
 _console_handler.setFormatter(logging.Formatter("%(message)s"))
 _daily_handler = _DailyLogHandler(_app_log_sink)
-_daily_handler.setFormatter(logging.Formatter("%(message)s"))
+_daily_handler.setFormatter(
+    _UtcLogFormatter(
+        "%(asctime)s.%(msecs)03dZ %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+)
 _log_listener = logging.handlers.QueueListener(
     _log_queue, _console_handler, _daily_handler, respect_handler_level=True
 )
 _log_listener.start()
+atexit.register(_app_log_sink.close)
 atexit.register(_log_listener.stop)
 sys.stdout = _QueuedLogStream(_app_logger, logging.INFO, _console_handler.stream)
 sys.stderr = _QueuedLogStream(_app_logger, logging.ERROR, _console_handler.stream)
@@ -343,6 +358,42 @@ class RepairJobResult:
     attempts: int = 0
     second_attempts: int = 0
     target_path: str = ""
+
+
+class CycleSuppressionRegistry:
+    """Thread-safe quarantine/delete suppression scoped to the active cycle."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._cycle_id: str | None = None
+        self._entries: dict[str, dict] = {}
+
+    def begin_cycle(self, cycle_id: str) -> None:
+        with self._lock:
+            self._cycle_id = str(cycle_id)
+            self._entries = {}
+
+    def suppress(self, identity: str | None, *, action: str) -> dict | None:
+        if identity is None:
+            return None
+        with self._lock:
+            entry = {
+                "identity": identity,
+                "action": action,
+                "cycleId": self._cycle_id,
+            }
+            self._entries[identity] = entry
+            return dict(entry)
+
+    def get(self, identity: str | None) -> dict | None:
+        if identity is None:
+            return None
+        with self._lock:
+            entry = self._entries.get(identity)
+            return dict(entry) if entry is not None else None
+
+
+_cycle_suppressions = CycleSuppressionRegistry()
 
 
 @dataclass(frozen=True)
@@ -721,11 +772,11 @@ def _status_start_cycle(cycle_id: str, cycle_number: int, jobs: list[dict]) -> N
         print(f"{YELLOW}[STATUS] Could not persist cycle start: {exc}{RESET}")
 
 
-def _status_finish_cycle() -> None:
+def _status_finish_cycle(metrics: dict | None = None) -> None:
     if _status_tracker is None:
         return
     try:
-        _status_tracker.finish_cycle()
+        _status_tracker.finish_cycle(metrics)
     except OSError as exc:
         print(f"{YELLOW}[STATUS] Could not persist cycle completion: {exc}{RESET}")
 
@@ -1894,17 +1945,15 @@ def _quarantine_identity(
     return f"{base}|{target_lang.casefold()}" if base is not None else None
 
 
-def _active_quarantine_hold(
+def _cycle_quarantine_suppression(
     video_path: str | Path,
     target_lang: str,
 ) -> dict | None:
     identity = _quarantine_identity(target_lang, video_path=video_path)
-    if identity is None:
-        return None
-    return _get_validation_state().active_quarantine_tombstone(identity)
+    return _cycle_suppressions.get(identity)
 
 
-def _clear_quarantine_hold(
+def _resolve_quarantine_history(
     target_lang: str,
     *,
     video_path: str | Path | None = None,
@@ -1915,7 +1964,7 @@ def _clear_quarantine_hold(
     )
     if identity is None:
         return False
-    return _get_validation_state().clear_quarantine_tombstone(identity)
+    return _get_validation_state().resolve_quarantine_events(identity)
 
 
 def _probe_media_duration(video_path: str | Path) -> float | None:
@@ -2181,7 +2230,7 @@ def _record_validation_result(
         if result in ("valid", "valid_with_warnings"):
             for language in LANGUAGES:
                 if _target_suffix(target_path, language) is not None:
-                    _clear_quarantine_hold(language, target_path=target_path)
+                    _resolve_quarantine_history(language, target_path=target_path)
                     break
         return True
     except (OSError, StateStoreError) as e:
@@ -2315,7 +2364,7 @@ def _is_variant_aware_adjacent_source(
     return source.name.casefold() in acceptable
 
 
-def _record_quarantine_hold(
+def _record_quarantine_event(
     target_path: str | Path,
     target_lang: str,
     target_hash: str | None,
@@ -2327,19 +2376,18 @@ def _record_quarantine_hold(
     identity = _quarantine_identity(target_lang, target_path=target_path)
     if identity is None:
         return None, False
-    entry, repeated = _get_validation_state().record_quarantine_tombstone(
+    entry, repeated = _get_validation_state().record_quarantine_event(
         identity,
         target_path=target_path,
         target_hash=target_hash,
         target_language=target_lang,
         rules=(issue.rule for issue in report.issues),
         origin=origin,
-        hold_days=CLEANUP_QUARANTINE_HOLD_DAYS,
     )
     if repeated:
         print(
             f"[CLEANUP] Repeat offender hash for {os.path.basename(str(target_path))}; "
-            f"occurrence {entry['occurrences']}, translation held until {entry['holdUntil']}"
+            f"historical occurrence {entry['occurrences']}"
         )
     return entry, repeated
 
@@ -2429,7 +2477,6 @@ def _apply_cleanup_action(
                     pending_destination=destination,
                     pending_metadata={
                         "rules": [issue.rule for issue in report.issues],
-                        "holdDays": CLEANUP_QUARANTINE_HOLD_DAYS,
                         "holdIdentity": _quarantine_identity(
                             target_lang, target_path=target
                         ),
@@ -2443,7 +2490,6 @@ def _apply_cleanup_action(
                     pending_destination=destination,
                     pending_metadata={
                         "rules": [issue.rule for issue in report.issues],
-                        "holdDays": CLEANUP_QUARANTINE_HOLD_DAYS,
                         "holdIdentity": _quarantine_identity(
                             target_lang, target_path=target
                         ),
@@ -2458,13 +2504,19 @@ def _apply_cleanup_action(
             _get_validation_state().set_artifact_disposition(
                 artifact_id, "quarantined"
             )
-            hold, repeated = _record_quarantine_hold(
+            event, repeated = _record_quarantine_event(
                 target, target_lang, target_hash, report, origin
             )
+            suppression = _cycle_suppressions.suppress(
+                _quarantine_identity(target_lang, target_path=target),
+                action="quarantined",
+            )
             setattr(report, "repeat_offender", repeated)
-            if hold is not None:
-                audit["quarantineHold"] = hold
+            if event is not None:
+                audit["quarantineEvent"] = event
                 audit["repeatOffender"] = repeated
+            if suppression is not None:
+                audit["cycleSuppression"] = suppression
             try:
                 write_validation_report(destination, audit)
             except OSError as e:
@@ -2510,7 +2562,6 @@ def _apply_cleanup_action(
                 disposition="deletion_pending",
                 pending_metadata={
                     "rules": [issue.rule for issue in report.issues],
-                    "holdDays": CLEANUP_QUARANTINE_HOLD_DAYS,
                     "holdIdentity": _quarantine_identity(
                         target_lang, target_path=target
                     ),
@@ -2523,7 +2574,6 @@ def _apply_cleanup_action(
                 "deletion_pending",
                 pending_metadata={
                     "rules": [issue.rule for issue in report.issues],
-                    "holdDays": CLEANUP_QUARANTINE_HOLD_DAYS,
                     "holdIdentity": _quarantine_identity(
                         target_lang, target_path=target
                     ),
@@ -2531,7 +2581,11 @@ def _apply_cleanup_action(
             )
         target.unlink()
         _get_validation_state().set_artifact_disposition(artifact_id, "deleted")
-        _record_quarantine_hold(target, target_lang, target_hash, report, origin)
+        _record_quarantine_event(target, target_lang, target_hash, report, origin)
+        _cycle_suppressions.suppress(
+            _quarantine_identity(target_lang, target_path=target),
+            action="deleted",
+        )
         _record_validation_result(
             target,
             source_hash,
@@ -2674,6 +2728,8 @@ def _perform_repair(
     format_recovered_cues: list[int] | None = None,
     completeness=None,
     origin: str | None = "lingarr",
+    series_key: str | None = None,
+    series_title: str | None = None,
 ) -> RepairJobResult:
     from clean_et_subs import repair_subtitle_file, target_language_for_code
 
@@ -2902,6 +2958,7 @@ def _perform_repair(
             )
             if action in ("quarantined", "deleted") and item_id is not None:
                 _clear_submission(item_id, target_lang, item_type)
+                _clear_submission_for_path(target_path, target_lang)
                 print(f"[CLEANUP] Cleared cooldown for retry: {label} '{target_lang}'")
             return RepairJobResult(
                 action, repair.report, label, target_lang, item_type, item_id,
@@ -2950,6 +3007,28 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
             reason="repair worker failed",
         )
         return
+
+    if result.action in ("repaired", "quarantined", "deleted"):
+        series_key = metadata.get("series_key")
+        series_title = metadata.get("series_title")
+        if series_key and series_title:
+            try:
+                _get_validation_state().record_circuit_outcome(
+                    series_key=series_key,
+                    series_title=series_title,
+                    success=result.action == "repaired",
+                    reason=(
+                        None
+                        if result.action == "repaired"
+                        else f"invalid subtitle {result.action}"
+                    ),
+                    threshold=CIRCUIT_FAILURE_THRESHOLD,
+                    open_seconds=CIRCUIT_OPEN_SECONDS,
+                    config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+                )
+                _refresh_status_diagnostics()
+            except StateStoreError as exc:
+                print(f"{YELLOW}[CIRCUIT] Could not record repair outcome: {exc}{RESET}")
 
     if result.action == "repaired":
         _status_transition(
@@ -3012,6 +3091,8 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             "item_id": job_kwargs.get("item_id"),
             "target_lang": job_kwargs.get("target_lang"),
             "source_lang": job_kwargs.get("source_lang"),
+            "series_key": job_kwargs.get("series_key"),
+            "series_title": job_kwargs.get("series_title"),
             "queued_monotonic": time.monotonic(),
         }
         _pending_repairs[future] = metadata
@@ -3148,6 +3229,8 @@ def _validate_translated_file(
     media_duration: float | None = None,
     origin: str | None = None,
     provenance_source_hash: str | None = None,
+    series_key: str | None = None,
+    series_title: str | None = None,
 ) -> tuple[str, object]:
     if target_lang not in CLEANUP_LANGUAGES:
         from clean_et_subs import validate_srt_structure
@@ -3179,6 +3262,14 @@ def _validate_translated_file(
             origin=origin,
             dry_run=dry_run,
         )
+        if action in ("quarantined", "deleted") and item_id is not None:
+            _clear_submission(item_id, target_lang, item_type)
+            _clear_submission_for_path(target_path, target_lang)
+            print(
+                f"[CLEANUP] Cleared submission cooldown for {label} "
+                f"'{target_lang}'; retry suppressed for the remainder of "
+                "this cycle"
+            )
         return action, report
 
     from clean_et_subs import (
@@ -3379,16 +3470,16 @@ def _validate_translated_file(
     label = title or os.path.basename(target_path)
     print(f"{YELLOW}[CLEANUP] Invalid translation {label} '{target_lang}': {report.summary()}{RESET}")
     quarantine_identity = _quarantine_identity(target_lang, target_path=target_path)
-    active_tombstone = (
-        _get_validation_state().active_quarantine_tombstone(
+    historical_event = (
+        _get_validation_state().quarantine_event(
             quarantine_identity, target_hash=expected_target_hash
         )
         if quarantine_identity is not None else None
     )
     repeat_invalid_hash = bool(
-        active_tombstone
+        historical_event
         and expected_target_hash
-        and active_tombstone.get("targetHash") == expected_target_hash
+        and historical_event.get("targetHash") == expected_target_hash
     )
     if repeat_invalid_hash:
         setattr(report, "ai_repair_suppressed", True)
@@ -3495,6 +3586,8 @@ def _validate_translated_file(
             "format_recovered_cues": format_recovered_cues,
             "completeness": completeness,
             "origin": effective_origin,
+            "series_key": series_key,
+            "series_title": series_title,
         }
         if defer_repair:
             repair_key = (
@@ -3517,10 +3610,11 @@ def _validate_translated_file(
         dry_run=dry_run,
     )
     if action in ("quarantined", "deleted") and item_id is not None:
-        _clear_submission(item_id, target_lang)
+        _clear_submission(item_id, target_lang, item_type)
+        _clear_submission_for_path(target_path, target_lang)
         print(
             f"[CLEANUP] Cleared submission cooldown for {label} '{target_lang}'; "
-            f"quarantine hold remains active"
+            "retry suppressed for the remainder of this cycle"
         )
     return action, report
 
@@ -3539,6 +3633,27 @@ def _mark_activity(stats: dict, item_type: str) -> None:
         stats["episode_activity"] = True
     else:
         stats["movie_activity"] = True
+
+
+def _record_invalid_circuit_outcome(
+    series_key: str, series_title: str, action: str, report
+) -> None:
+    if action not in ("quarantined", "deleted"):
+        return
+    rules = ",".join(issue.rule for issue in getattr(report, "issues", []))
+    try:
+        _get_validation_state().record_circuit_outcome(
+            series_key=series_key,
+            series_title=series_title,
+            success=False,
+            reason=f"invalid subtitle {action}: {rules}",
+            threshold=CIRCUIT_FAILURE_THRESHOLD,
+            open_seconds=CIRCUIT_OPEN_SECONDS,
+            config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+        )
+        _refresh_status_diagnostics()
+    except StateStoreError as exc:
+        print(f"{YELLOW}[CIRCUIT] Could not record invalid output: {exc}{RESET}")
 
 
 def _bazarr_has_repaired_path(result: RepairJobResult) -> bool:
@@ -3825,6 +3940,8 @@ def process_item(item: dict, item_type: str, id_field: str,
                 provenance_source_hash=(
                     submission.get("sourceHash") if recovered_origin else None
                 ),
+                series_key=series_key,
+                series_title=series_title,
             )
             if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
                 with stats_lock:
@@ -3841,6 +3958,9 @@ def process_item(item: dict, item_type: str, id_field: str,
                         validation_action == "repair-deferred"
                     )
             else:
+                _record_invalid_circuit_outcome(
+                    series_key, series_title, validation_action, validation_report
+                )
                 with stats_lock:
                     stats["failed"] += 1
                     stats.setdefault("cleaned", 0)
@@ -3852,22 +3972,24 @@ def process_item(item: dict, item_type: str, id_field: str,
             continue
 
         if video_path:
-            hold = _active_quarantine_hold(video_path, target_lang)
-            if hold is not None:
+            suppression = _cycle_quarantine_suppression(video_path, target_lang)
+            if suppression is not None:
                 with stats_lock:
-                    stats["quarantine_holds"] = stats.get("quarantine_holds", 0) + 1
+                    stats["cycle_suppressions"] = (
+                        stats.get("cycle_suppressions", 0) + 1
+                    )
                     stats["deferred"] = stats.get("deferred", 0) + 1
                 print(
-                    f"[SKIP] {title} '{target_lang}': quarantine hold until "
-                    f"{hold.get('holdUntil')} after {hold.get('occurrences', 1)} "
-                    "invalid occurrence(s)"
+                    f"[SKIP] {title} '{target_lang}': "
+                    f"{suppression.get('action', 'cleanup')} already occurred "
+                    "during this cycle"
                 )
                 _status_transition(
                     item_type,
                     item_id,
                     target_lang,
                     "deferred",
-                    reason="quarantine hold",
+                    reason="same-cycle quarantine suppression",
                 )
                 continue
 
@@ -3893,6 +4015,11 @@ def process_item(item: dict, item_type: str, id_field: str,
                 "deferred",
                 reason="resubmit cooldown",
             )
+            with stats_lock:
+                stats["deferred"] = stats.get("deferred", 0) + 1
+                stats["cooldown_deferrals"] = (
+                    stats.get("cooldown_deferrals", 0) + 1
+                )
             continue
 
         try:
@@ -3920,6 +4047,9 @@ def process_item(item: dict, item_type: str, id_field: str,
             )
             with stats_lock:
                 stats["deferred"] = stats.get("deferred", 0) + 1
+                stats["circuit_deferrals"] = (
+                    stats.get("circuit_deferrals", 0) + 1
+                )
             continue
 
         src_lines = _count_dialogue_lines(source_path)
@@ -3996,6 +4126,9 @@ def process_item(item: dict, item_type: str, id_field: str,
             )
             with stats_lock:
                 stats["deferred"] = stats.get("deferred", 0) + 1
+                stats["circuit_deferrals"] = (
+                    stats.get("circuit_deferrals", 0) + 1
+                )
             _status_transition(
                 item_type,
                 item_id,
@@ -4061,6 +4194,8 @@ def process_item(item: dict, item_type: str, id_field: str,
                     appeared_submission.get("sourceHash")
                     if appeared_origin else None
                 ),
+                series_key=series_key,
+                series_title=series_title,
             )
             if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
                 with stats_lock:
@@ -4077,6 +4212,9 @@ def process_item(item: dict, item_type: str, id_field: str,
                         validation_action == "repair-deferred"
                     )
             else:
+                _record_invalid_circuit_outcome(
+                    series_key, series_title, validation_action, validation_report
+                )
                 with stats_lock:
                     stats["failed"] += 1
                     _record_cleanup_stats(stats, validation_action, validation_report)
@@ -4171,6 +4309,9 @@ def process_item(item: dict, item_type: str, id_field: str,
                 )
                 with stats_lock:
                     stats["deferred"] = stats.get("deferred", 0) + 1
+                    stats["circuit_deferrals"] = (
+                        stats.get("circuit_deferrals", 0) + 1
+                    )
                 _status_transition(
                     item_type,
                     item_id,
@@ -4432,6 +4573,8 @@ def process_item(item: dict, item_type: str, id_field: str,
             defer_repair=True, item_type=item_type, media_duration=media_duration,
             origin="lingarr",
             provenance_source_hash=source_hash,
+            series_key=series_key,
+            series_title=series_title,
         )
         if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
             try:
@@ -4474,6 +4617,9 @@ def process_item(item: dict, item_type: str, id_field: str,
                     validation_action == "repair-deferred"
                 )
         else:
+            _record_invalid_circuit_outcome(
+                series_key, series_title, validation_action, validation_report
+            )
             with stats_lock:
                 stats["failed"] += 1
                 stats.setdefault("cleaned", 0)
@@ -5172,7 +5318,7 @@ def _run_existing_cleanup_scan_safely() -> dict | None:
             "pruned": stats.get("prune_quarantined", 0) + stats.get("prune_deleted", 0),
             "source_less_warnings": stats.get("source_less_warnings", 0),
             "repeat_quarantines": stats.get("repeat_quarantines", 0),
-            "quarantine_holds": stats.get("quarantine_holds", 0),
+            "cycle_suppressions": stats.get("cycle_suppressions", 0),
             "variant_outputs": (
                 stats.get("variant_outputs_discovered", 0)
                 + stats.get("recovered_pending_outputs", 0)
@@ -5258,7 +5404,9 @@ def run_cycle(cycle_num: int) -> None:
         "deferred": 0,
         "api_errors": 0,
         "degraded": False,
-        "quarantine_holds": 0,
+        "cycle_suppressions": 0,
+        "cooldown_deferrals": 0,
+        "circuit_deferrals": 0,
         "variant_outputs_discovered": 0,
         "recovered_pending_outputs": 0,
         "translations": [],
@@ -5387,7 +5535,9 @@ def run_cycle(cycle_num: int) -> None:
         print(f"  API errors : {stats['api_errors']}")
     print(f"  Variant outputs found : {stats.get('variant_outputs_discovered', 0)}")
     print(f"  Pending outputs found : {stats.get('recovered_pending_outputs', 0)}")
-    print(f"  Quarantine holds      : {stats.get('quarantine_holds', 0)}")
+    print(f"  Cycle suppressions    : {stats.get('cycle_suppressions', 0)}")
+    print(f"  Cooldown deferrals    : {stats.get('cooldown_deferrals', 0)}")
+    print(f"  Circuit deferrals     : {stats.get('circuit_deferrals', 0)}")
     if stats.get("cleaned"):
         print(f"  Cleaned    : {stats['cleaned']}")
     if stats.get("cleanup_checked"):
@@ -5456,7 +5606,7 @@ def run_cycle(cycle_num: int) -> None:
                 print(f"{YELLOW}[WARNING] Bazarr still does not list repaired subtitle for {result.title} '{result.target_lang}'{RESET}")
 
     _drain_lingarr_queue()
-    _status_finish_cycle()
+    _status_finish_cycle(stats)
 
 # ---------------------------------------------------------------------------
 # Main loop
@@ -5501,7 +5651,13 @@ def main() -> int:
     print(f"  Cleanup roots     : {', '.join(str(root) for root in CLEANUP_ROOTS)}")
     print(f"  Cleanup action    : {CLEANUP_ACTION}{' (scan dry-run)' if CLEANUP_SCAN_DRY_RUN else ''}")
     print(f"  Source-less lines : {CLEANUP_SOURCELESS_LINE_ONLY_ACTION}")
-    print(f"  Quarantine hold   : {CLEANUP_QUARANTINE_HOLD_DAYS} days")
+    print("  Quarantine retry  : suppressed for current cycle only")
+    if _LEGACY_QUARANTINE_HOLD_DAYS is not None:
+        print(
+            f"{YELLOW}[WARNING] CLEANUP_QUARANTINE_HOLD_DAYS is deprecated "
+            "and no longer controls retry eligibility"
+            f"{RESET}"
+        )
     print(f"  Sidecar pruning   : {'ON' if CLEANUP_PRUNE_EXTRA_LANGUAGES else 'off'} "
           f"({CLEANUP_PRUNE_ACTION}, unknown={'remove' if CLEANUP_PRUNE_UNKNOWN_SIDECARS else 'retain'})")
     print(f"  Max cue lines     : {CLEANUP_MAX_CUE_LINES}")
@@ -5564,14 +5720,17 @@ def main() -> int:
         trigger_bazarr_sync(True, True)
         wait_for_bazarr_sync(True, True, SYNC_TIMEOUT)
 
+    cycle = 1
+    _cycle_suppressions.begin_cycle(str(cycle))
     last_cleanup_scan = 0.0
     if not shutdown_requested and CLEANUP_SCAN_EXISTING:
         _status_set_phase("cleanup")
         _run_existing_cleanup_scan_safely()
         last_cleanup_scan = time.monotonic()
 
-    cycle = 1
     while not shutdown_requested:
+        if cycle > 1:
+            _cycle_suppressions.begin_cycle(str(cycle))
         if time.monotonic() - last_retention_check >= RETENTION_CHECK_INTERVAL:
             run_retention_housekeeping()
             last_retention_check = time.monotonic()

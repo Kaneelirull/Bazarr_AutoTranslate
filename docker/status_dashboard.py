@@ -34,9 +34,14 @@ MAINTENANCE_KEYS = (
     "pruned",
     "source_less_warnings",
     "repeat_quarantines",
-    "quarantine_holds",
+    "cycle_suppressions",
     "variant_outputs",
     "failures",
+)
+CYCLE_METRIC_KEYS = (
+    "cycle_suppressions",
+    "cooldown_deferrals",
+    "circuit_deferrals",
 )
 STATIC_DIR = Path(__file__).with_name("static")
 STATIC_ASSETS = {
@@ -339,7 +344,7 @@ class StatusTracker:
                 self._write_snapshot_locked()
             return changed
 
-    def finish_cycle(self) -> None:
+    def finish_cycle(self, metrics: dict | None = None) -> None:
         with self._lock:
             if self._cycle is None:
                 return
@@ -350,6 +355,10 @@ class StatusTracker:
                         job, "deferred", now, reason="cycle ended before completion"
                     )
             self._cycle["completedAt"] = _utc_iso(now)
+            self._cycle["metrics"] = {
+                key: max(0, int((metrics or {}).get(key, 0)))
+                for key in CYCLE_METRIC_KEYS
+            }
             self._write_snapshot_locked()
 
     def record_maintenance(self, metrics: dict) -> None:
@@ -690,14 +699,14 @@ def render_logs_page() -> str:
 <body>
 <main class="dashboard-shell log-shell">
   <header class="topbar"><div><div class="eyebrow">Diagnostics</div>
-  <h1>Service logs</h1><p class="header-meta">Sanitized, read-only operational output</p></div>
+  <h1>Service logs</h1><p class="header-meta">Sanitized, read-only operational output · New records use UTC timestamps</p></div>
   <div class="header-actions"><a class="btn btn-secondary" href="/">Status</a></div></header>
   <section class="panel">
     <form id="log-filters" class="log-filters">
       <label>Level <select name="level"><option value="">All</option><option>ERROR</option>
       <option>WARNING</option><option>FAIL</option><option>TIMEOUT</option></select></label>
-      <label>Show or job <input name="job" maxlength="100"></label>
-      <label>Text <input name="q" maxlength="100"></label>
+      <label>Show or job <input name="job" maxlength="100" placeholder="Top Gear or job ID"></label>
+      <label>Search text <input name="q" maxlength="100" placeholder="Message contains…"></label>
       <button class="btn btn-primary" type="submit">Filter</button>
     </form>
     <p id="log-status" class="section-note" role="status">Loading logs...</p>

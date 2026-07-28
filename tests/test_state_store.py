@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -22,6 +23,54 @@ class StateStoreTests(unittest.TestCase):
             validator_version="validator-test",
             **kwargs,
         )
+
+    def test_schema_v2_quarantine_hold_migrates_to_nonblocking_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "state.sqlite3"
+            old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+            future = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                """
+                CREATE TABLE quarantine_holds (
+                    identity TEXT NOT NULL,
+                    target_hash TEXT NOT NULL,
+                    target_path TEXT NOT NULL,
+                    target_language TEXT NOT NULL,
+                    rules_json TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    hold_until TEXT NOT NULL,
+                    occurrences INTEGER NOT NULL,
+                    PRIMARY KEY(identity, target_hash)
+                );
+                PRAGMA user_version = 2;
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO quarantine_holds VALUES(
+                    'show|et', 'bad-hash', 'show.et.srt', 'et',
+                    '["prompt_marker"]', 'lingarr', ?, ?, ?, 2
+                )
+                """,
+                (old, old, future),
+            )
+            connection.commit()
+            connection.close()
+
+            store = StateStore(database)
+            try:
+                event = store.quarantine_event("show|et")
+                self.assertEqual(event["occurrences"], 2)
+                self.assertIsNone(event["resolvedAt"])
+                removed = store.prune_older_than(30)
+                self.assertGreaterEqual(removed, 1)
+                self.assertIsNone(store.quarantine_event("show|et"))
+            finally:
+                store.close()
 
     def test_schema_and_state_survive_restart(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -348,7 +397,7 @@ class StateStoreTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_quarantine_recovery_restores_hold_after_interrupted_move(self):
+    def test_quarantine_recovery_restores_audit_after_interrupted_move(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "movie.et.srt"
@@ -371,7 +420,6 @@ class StateStoreTests(unittest.TestCase):
                     pending_destination=destination,
                     pending_metadata={
                         "rules": ["prompt_marker"],
-                        "holdDays": 30,
                         "holdIdentity": "movie|et",
                     },
                 )
@@ -387,11 +435,12 @@ class StateStoreTests(unittest.TestCase):
                     )["disposition"],
                     "quarantined",
                 )
-                hold = store.active_quarantine_tombstone(
+                event = store.quarantine_event(
                     "movie|et", target_hash=target_hash
                 )
-                self.assertEqual(hold["rules"], ["prompt_marker"])
-                self.assertEqual(hold["occurrences"], 1)
+                self.assertEqual(event["rules"], ["prompt_marker"])
+                self.assertEqual(event["occurrences"], 1)
+                self.assertIsNone(event["resolvedAt"])
                 self.assertEqual(
                     store.latest_artifact(target, target_hash)["id"], artifact
                 )

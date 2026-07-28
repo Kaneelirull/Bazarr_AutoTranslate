@@ -499,7 +499,7 @@
     pruned: "Pruned",
     source_less_warnings: "Source-less warnings",
     repeat_quarantines: "Repeat quarantines",
-    quarantine_holds: "Quarantine holds",
+    cycle_suppressions: "Same-cycle suppressions",
     variant_outputs: "Variant outputs",
     failures: "Failures",
   };

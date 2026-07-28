@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class StateStoreError(RuntimeError):
@@ -242,6 +242,7 @@ class StateStore:
                     last_seen TEXT NOT NULL,
                     hold_until TEXT NOT NULL,
                     occurrences INTEGER NOT NULL,
+                    resolved_at TEXT,
                     PRIMARY KEY(identity, target_hash)
                 );
 
@@ -277,6 +278,16 @@ class StateStore:
                 );
                 """
             )
+            quarantine_columns = {
+                row["name"]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(quarantine_holds)"
+                ).fetchall()
+            }
+            if "resolved_at" not in quarantine_columns:
+                self._connection.execute(
+                    "ALTER TABLE quarantine_holds ADD COLUMN resolved_at TEXT"
+                )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def record_timing_sample(
@@ -1110,7 +1121,6 @@ class StateStore:
                         )
                     except (TypeError, ValueError):
                         metadata = {}
-                    hold_days = max(1, int(metadata.get("holdDays", 30)))
                     rules = sorted({
                         str(rule) for rule in metadata.get("rules", []) if rule
                     })
@@ -1121,10 +1131,7 @@ class StateStore:
                     language = row["target_language"]
                     if identity and language and row["target_hash"]:
                         now = datetime.now(timezone.utc)
-                        hold_until = datetime.fromtimestamp(
-                            now.timestamp() + hold_days * 86400,
-                            timezone.utc,
-                        ).isoformat()
+                        hold_until = now.isoformat()
                         db.execute(
                             """
                             INSERT INTO quarantine_holds(
@@ -1135,6 +1142,7 @@ class StateStore:
                             ON CONFLICT(identity, target_hash) DO UPDATE SET
                                 last_seen = excluded.last_seen,
                                 hold_until = excluded.hold_until,
+                                resolved_at = NULL,
                                 occurrences = quarantine_holds.occurrences + 1,
                                 rules_json = excluded.rules_json
                             """,
@@ -1261,7 +1269,7 @@ class StateStore:
         details = entry.get("details")
         return dict(details) if isinstance(details, dict) else {}
 
-    def record_quarantine_tombstone(
+    def record_quarantine_event(
         self,
         identity: str,
         *,
@@ -1270,7 +1278,6 @@ class StateStore:
         target_language: str,
         rules: Iterable[str],
         origin: str | None,
-        hold_days: int,
         now: datetime | None = None,
     ) -> tuple[dict, bool]:
         timestamp = now or datetime.now(timezone.utc)
@@ -1287,10 +1294,9 @@ class StateStore:
                 previous["first_seen"] if previous else timestamp.isoformat()
             )
             occurrences = int(previous["occurrences"]) + 1 if previous else 1
-            hold_until = datetime.fromtimestamp(
-                timestamp.timestamp() + max(1, hold_days) * 86400,
-                timezone.utc,
-            ).isoformat()
+            # Kept populated for compatibility with the legacy physical schema.
+            # It is audit metadata only and is never consulted for eligibility.
+            hold_until = timestamp.isoformat()
             rule_values = sorted({str(rule) for rule in rules if rule})
             db.execute(
                 """
@@ -1306,6 +1312,7 @@ class StateStore:
                     origin = excluded.origin,
                     last_seen = excluded.last_seen,
                     hold_until = excluded.hold_until,
+                    resolved_at = NULL,
                     occurrences = excluded.occurrences
                 """,
                 (
@@ -1331,29 +1338,24 @@ class StateStore:
                 "origin": origin or "unknown",
                 "firstSeen": first_seen,
                 "lastSeen": timestamp.isoformat(),
-                "holdUntil": hold_until,
                 "occurrences": occurrences,
+                "resolvedAt": None,
             },
             repeated,
         )
 
-    def active_quarantine_tombstone(
+    def quarantine_event(
         self,
         identity: str,
         *,
         target_hash: str | None = None,
-        now: datetime | None = None,
     ) -> dict | None:
-        timestamp = now or datetime.now(timezone.utc)
-        query = (
-            "SELECT * FROM quarantine_holds "
-            "WHERE identity = ? AND hold_until > ?"
-        )
-        params: list[object] = [str(identity), timestamp.isoformat()]
+        query = "SELECT * FROM quarantine_holds WHERE identity = ?"
+        params: list[object] = [str(identity)]
         if target_hash is not None:
             query += " AND target_hash = ?"
             params.append(target_hash)
-        query += " ORDER BY hold_until DESC LIMIT 1"
+        query += " ORDER BY last_seen DESC LIMIT 1"
         row = self._fetchone(query, params)
         if not row:
             return None
@@ -1366,14 +1368,22 @@ class StateStore:
             "origin": row["origin"],
             "firstSeen": row["first_seen"],
             "lastSeen": row["last_seen"],
-            "holdUntil": row["hold_until"],
             "occurrences": int(row["occurrences"]),
+            "resolvedAt": row["resolved_at"],
         }
 
-    def clear_quarantine_tombstone(self, identity: str) -> bool:
+    def resolve_quarantine_events(
+        self, identity: str, *, now: datetime | None = None
+    ) -> bool:
+        resolved_at = (now or datetime.now(timezone.utc)).isoformat()
         with self._transaction() as db:
             cursor = db.execute(
-                "DELETE FROM quarantine_holds WHERE identity = ?", (str(identity),)
+                """
+                UPDATE quarantine_holds
+                SET resolved_at = ?
+                WHERE identity = ? AND resolved_at IS NULL
+                """,
+                (resolved_at, str(identity)),
             )
             return cursor.rowcount > 0
 
@@ -1390,8 +1400,8 @@ class StateStore:
                 "DELETE FROM validation_results WHERE validated_at < ?", (cutoff,)
             ).rowcount
             holds = db.execute(
-                "DELETE FROM quarantine_holds WHERE hold_until < ?",
-                (timestamp.isoformat(),),
+                "DELETE FROM quarantine_holds WHERE last_seen < ?",
+                (cutoff,),
             ).rowcount
             attempts = db.execute(
                 """
