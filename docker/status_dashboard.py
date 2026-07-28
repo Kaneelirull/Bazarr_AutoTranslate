@@ -34,9 +34,14 @@ MAINTENANCE_KEYS = (
     "pruned",
     "source_less_warnings",
     "repeat_quarantines",
-    "quarantine_holds",
+    "cycle_suppressions",
     "variant_outputs",
     "failures",
+)
+CYCLE_METRIC_KEYS = (
+    "cycle_suppressions",
+    "cooldown_deferrals",
+    "circuit_deferrals",
 )
 STATIC_DIR = Path(__file__).with_name("static")
 STATIC_ASSETS = {
@@ -339,7 +344,7 @@ class StatusTracker:
                 self._write_snapshot_locked()
             return changed
 
-    def finish_cycle(self) -> None:
+    def finish_cycle(self, metrics: dict | None = None) -> None:
         with self._lock:
             if self._cycle is None:
                 return
@@ -350,6 +355,10 @@ class StatusTracker:
                         job, "deferred", now, reason="cycle ended before completion"
                     )
             self._cycle["completedAt"] = _utc_iso(now)
+            self._cycle["metrics"] = {
+                key: max(0, int((metrics or {}).get(key, 0)))
+                for key in CYCLE_METRIC_KEYS
+            }
             self._write_snapshot_locked()
 
     def record_maintenance(self, metrics: dict) -> None:
@@ -583,6 +592,9 @@ class StatusTracker:
             "recentOutcomes": recent,
             "timing": self._service.get("timing", {}),
             "circuits": self._service.get("circuits", []),
+            "retryPlans": self._service.get("retryPlans", []),
+            "completedCycle": self._service.get("completedCycle", 0),
+            "retryMaxAttempts": self._service.get("retryMaxAttempts", 3),
             "history": {
                 label: self._window_counts_locked("job", seconds)
                 for label, seconds in HISTORY_WINDOWS.items()
@@ -596,10 +608,39 @@ class StatusTracker:
             },
         }
 
-    def set_diagnostics(self, *, timing: dict, circuits: list[dict]) -> None:
+    def set_diagnostics(
+        self,
+        *,
+        timing: dict,
+        circuits: list[dict],
+        retries: list[dict] | None = None,
+        completed_cycle: int | None = None,
+        retry_max_attempts: int | None = None,
+    ) -> None:
         with self._lock:
             self._service["timing"] = timing
             self._service["circuits"] = circuits
+            if retries is not None:
+                safe_retries = []
+                for plan in retries:
+                    safe_retries.append({
+                        key: plan.get(key)
+                        for key in (
+                            "id", "itemType", "itemId", "targetLanguage",
+                            "seriesTitle", "mediaTitle", "failureClass", "rules",
+                            "state", "attemptCount", "eligibleCompletedCycle",
+                            "lastFailureAt", "lastReason", "finalOutcome",
+                        )
+                    })
+                self._service["retryPlans"] = safe_retries
+            if completed_cycle is not None:
+                self._service["completedCycle"] = max(
+                    0, int(completed_cycle)
+                )
+            if retry_max_attempts is not None:
+                self._service["retryMaxAttempts"] = max(
+                    1, int(retry_max_attempts)
+                )
             self._write_snapshot_locked()
 
     def _write_snapshot_locked(self) -> None:
@@ -690,14 +731,14 @@ def render_logs_page() -> str:
 <body>
 <main class="dashboard-shell log-shell">
   <header class="topbar"><div><div class="eyebrow">Diagnostics</div>
-  <h1>Service logs</h1><p class="header-meta">Sanitized, read-only operational output</p></div>
+  <h1>Service logs</h1><p class="header-meta">Sanitized, read-only operational output · New records use UTC timestamps</p></div>
   <div class="header-actions"><a class="btn btn-secondary" href="/">Status</a></div></header>
   <section class="panel">
     <form id="log-filters" class="log-filters">
       <label>Level <select name="level"><option value="">All</option><option>ERROR</option>
       <option>WARNING</option><option>FAIL</option><option>TIMEOUT</option></select></label>
-      <label>Show or job <input name="job" maxlength="100"></label>
-      <label>Text <input name="q" maxlength="100"></label>
+      <label>Show or job <input name="job" maxlength="100" placeholder="Top Gear or job ID"></label>
+      <label>Search text <input name="q" maxlength="100" placeholder="Message contains…"></label>
       <button class="btn btn-primary" type="submit">Filter</button>
     </form>
     <p id="log-status" class="section-note" role="status">Loading logs...</p>

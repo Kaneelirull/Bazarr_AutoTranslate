@@ -468,6 +468,42 @@
     </section>`;
   };
 
+  const renderRetryPlans = (plans, completedCycle, maxAttempts) => {
+    if (!plans?.length) return "";
+    const active = plans.filter((plan) => ![
+      "accepted_after_retry", "superseded",
+    ].includes(plan.state));
+    if (!active.length) return "";
+    const rows = active.slice(0, 20).map((plan) => {
+      const title = plan.mediaTitle || plan.seriesTitle
+        || `${plan.itemType} ${plan.itemId}`;
+      const next = plan.state === "regeneration_waiting"
+        ? `Eligible after completed cycle ${plan.eligibleCompletedCycle}`
+        : plan.state === "repair_retry_queued"
+          ? "Low-priority repair at cycle end"
+          : plan.state === "retry_exhausted"
+            ? "Manual review required"
+            : plan.state.replaceAll("_", " ");
+      return `<tr>
+        <td><strong>${escapeHtml(title)}</strong><small>${escapeHtml(plan.seriesTitle || "")}</small></td>
+        <td>${escapeHtml(plan.targetLanguage || "—")}</td>
+        <td><span class="status status-${escapeHtml(plan.state)}">${escapeHtml(plan.state.replaceAll("_", " "))}</span></td>
+        <td>${escapeHtml(plan.failureClass || "—")}</td>
+        <td>${Number(plan.attemptCount || 0)} / ${Number(maxAttempts || 3)}</td>
+        <td>${escapeHtml(next)}</td>
+      </tr>`;
+    }).join("");
+    return `<section class="panel">${panelHeader(
+      "Retry queue",
+      `Persistent quarantine recovery · completed cycle ${Number(completedCycle || 0)}`,
+    )}
+      <div class="table-wrap"><table>
+        <thead><tr><th>Media</th><th>Language</th><th>State</th><th>Failure</th><th>Attempts</th><th>Next action</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+    </section>`;
+  };
+
   const renderRolling = (history) => {
     const cards = Object.entries(history || {}).map(([window, values]) => {
       const accepted = number(values.accepted);
@@ -499,7 +535,7 @@
     pruned: "Pruned",
     source_less_warnings: "Source-less warnings",
     repeat_quarantines: "Repeat quarantines",
-    quarantine_holds: "Quarantine holds",
+    cycle_suppressions: "Same-cycle suppressions",
     variant_outputs: "Variant outputs",
     failures: "Failures",
   };
@@ -531,6 +567,11 @@
       ${renderHeader(service, cycle)}
       ${renderOverview(cycle, service)}
       ${renderDiagnostics(snapshot.timing || {}, snapshot.circuits || [])}
+      ${renderRetryPlans(
+        snapshot.retryPlans || [],
+        snapshot.completedCycle || 0,
+        snapshot.retryMaxAttempts || 3,
+      )}
       <section class="panel">${panelHeader("Active now", `${active.length.toLocaleString()} in progress`)}
         ${table(active, "active", "No active translations or repairs.")}
       </section>

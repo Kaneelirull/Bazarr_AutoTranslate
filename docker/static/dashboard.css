@@ -181,40 +181,62 @@ h3 {
 .log-filters {
   display: grid;
   grid-template-columns: minmax(9rem, .7fr) repeat(2, minmax(12rem, 1fr)) auto;
-  gap: .8rem;
+  gap: var(--space-3);
   align-items: end;
-  margin-bottom: 1rem;
+  padding: var(--space-4);
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
 }
 
 .log-filters label {
   display: grid;
-  gap: .35rem;
-  color: var(--muted);
-  font-size: .8rem;
+  gap: var(--space-2);
+  color: var(--text-secondary);
+  font-size: 12px;
   font-weight: 700;
 }
 
 .log-filters input,
 .log-filters select {
-  min-height: 2.6rem;
-  border: 1px solid var(--border);
-  border-radius: .65rem;
-  background: var(--surface-strong);
-  color: var(--text);
-  padding: .55rem .7rem;
+  min-height: 44px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-overlay);
+  color: var(--text-primary);
+  padding: var(--space-2) var(--space-3);
   font: inherit;
+  transition: border-color 150ms ease, box-shadow 150ms ease,
+    background 150ms ease;
+}
+
+.log-filters input::placeholder {
+  color: var(--text-disabled);
+}
+
+.log-filters input:hover,
+.log-filters select:hover {
+  border-color: var(--text-secondary);
+}
+
+.log-filters input:focus-visible,
+.log-filters select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 .log-output {
   min-height: 24rem;
   max-height: 65vh;
   overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: .75rem;
-  background: #081019;
-  color: #c8d5df;
-  padding: 1rem;
-  font: .78rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  padding: var(--space-4);
+  font: 12px/1.55 var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

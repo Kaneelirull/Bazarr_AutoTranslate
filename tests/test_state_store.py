@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -16,12 +17,162 @@ from state_store import StateStore, StateStoreError  # noqa: E402
 
 
 class StateStoreTests(unittest.TestCase):
+    def test_retry_plan_deduplicates_hash_and_survives_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            store = StateStore(database)
+            first, repeated = store.schedule_retry_plan(
+                item_type="episodes",
+                item_id=42,
+                target_language="et",
+                source_hash="source-a",
+                failure_class="whole_file",
+                rules=["target_structure"],
+                state="regeneration_waiting",
+                failed_output_hash="bad-a",
+                eligible_completed_cycle=2,
+            )
+            second, repeated_again = store.schedule_retry_plan(
+                item_type="episodes",
+                item_id=42,
+                target_language="et",
+                source_hash="source-a",
+                failure_class="whole_file",
+                rules=["target_structure"],
+                state="regeneration_waiting",
+                failed_output_hash="bad-a",
+                eligible_completed_cycle=99,
+            )
+            self.assertFalse(repeated)
+            self.assertTrue(repeated_again)
+            self.assertEqual(first["id"], second["id"])
+            self.assertEqual(second["eligibleCompletedCycle"], 2)
+            store.close()
+
+            reopened = StateStore(database)
+            self.assertEqual(
+                reopened.active_retry_plan("episodes", 42, "et")["id"],
+                first["id"],
+            )
+            reopened.close()
+
+    def test_retry_claims_are_batched_and_limited_per_series(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            for item_id, series in ((1, "top-gear"), (2, "top-gear"), (3, "other")):
+                store.schedule_retry_plan(
+                    item_type="episodes",
+                    item_id=item_id,
+                    target_language="et",
+                    source_hash=f"source-{item_id}",
+                    failure_class="whole_file",
+                    rules=["target_structure"],
+                    state="regeneration_waiting",
+                    series_key=series,
+                    failed_output_hash=f"bad-{item_id}",
+                    eligible_completed_cycle=2,
+                    now=float(item_id),
+                )
+            self.assertEqual(store.claim_due_retry_plans(1, limit=5), [])
+            claimed = store.claim_due_retry_plans(
+                2, limit=5, per_series_limit=1
+            )
+            self.assertEqual([plan["itemId"] for plan in claimed], [1, 3])
+            store.close()
+
+    def test_source_change_supersedes_active_retry_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            old, _ = store.schedule_retry_plan(
+                item_type="movies",
+                item_id=7,
+                target_language="sv",
+                source_hash="old",
+                failure_class="whole_file",
+                rules=["cue_count_mismatch"],
+                state="regeneration_waiting",
+                eligible_completed_cycle=2,
+            )
+            new, _ = store.schedule_retry_plan(
+                item_type="movies",
+                item_id=7,
+                target_language="sv",
+                source_hash="new",
+                failure_class="whole_file",
+                rules=["cue_count_mismatch"],
+                state="regeneration_waiting",
+                eligible_completed_cycle=2,
+            )
+            plans = {plan["id"]: plan for plan in store.retry_plans()}
+            self.assertEqual(plans[old["id"]]["state"], "superseded")
+            self.assertEqual(plans[new["id"]]["state"], "regeneration_waiting")
+            store.close()
+
+    def test_completed_cycle_counter_is_durable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            store = StateStore(database)
+            self.assertEqual(store.completed_cycle(), 0)
+            self.assertEqual(store.advance_completed_cycle(), 1)
+            store.close()
+            reopened = StateStore(database)
+            self.assertEqual(reopened.completed_cycle(), 1)
+            reopened.close()
+
     def make_store(self, root: Path, **kwargs) -> StateStore:
         return StateStore(
             root / "bazarr-autotranslate.sqlite3",
             validator_version="validator-test",
             **kwargs,
         )
+
+    def test_schema_v2_quarantine_hold_migrates_to_nonblocking_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "state.sqlite3"
+            old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+            future = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                """
+                CREATE TABLE quarantine_holds (
+                    identity TEXT NOT NULL,
+                    target_hash TEXT NOT NULL,
+                    target_path TEXT NOT NULL,
+                    target_language TEXT NOT NULL,
+                    rules_json TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    hold_until TEXT NOT NULL,
+                    occurrences INTEGER NOT NULL,
+                    PRIMARY KEY(identity, target_hash)
+                );
+                PRAGMA user_version = 2;
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO quarantine_holds VALUES(
+                    'show|et', 'bad-hash', 'show.et.srt', 'et',
+                    '["prompt_marker"]', 'lingarr', ?, ?, ?, 2
+                )
+                """,
+                (old, old, future),
+            )
+            connection.commit()
+            connection.close()
+
+            store = StateStore(database)
+            try:
+                event = store.quarantine_event("show|et")
+                self.assertEqual(event["occurrences"], 2)
+                self.assertIsNone(event["resolvedAt"])
+                removed = store.prune_older_than(30)
+                self.assertGreaterEqual(removed, 1)
+                self.assertIsNone(store.quarantine_event("show|et"))
+            finally:
+                store.close()
 
     def test_schema_and_state_survive_restart(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -348,7 +499,7 @@ class StateStoreTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_quarantine_recovery_restores_hold_after_interrupted_move(self):
+    def test_quarantine_recovery_restores_audit_after_interrupted_move(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "movie.et.srt"
@@ -371,7 +522,6 @@ class StateStoreTests(unittest.TestCase):
                     pending_destination=destination,
                     pending_metadata={
                         "rules": ["prompt_marker"],
-                        "holdDays": 30,
                         "holdIdentity": "movie|et",
                     },
                 )
@@ -387,11 +537,12 @@ class StateStoreTests(unittest.TestCase):
                     )["disposition"],
                     "quarantined",
                 )
-                hold = store.active_quarantine_tombstone(
+                event = store.quarantine_event(
                     "movie|et", target_hash=target_hash
                 )
-                self.assertEqual(hold["rules"], ["prompt_marker"])
-                self.assertEqual(hold["occurrences"], 1)
+                self.assertEqual(event["rules"], ["prompt_marker"])
+                self.assertEqual(event["occurrences"], 1)
+                self.assertIsNone(event["resolvedAt"])
                 self.assertEqual(
                     store.latest_artifact(target, target_hash)["id"], artifact
                 )

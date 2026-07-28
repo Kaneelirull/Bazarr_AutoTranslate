@@ -18,6 +18,7 @@ from status_dashboard import (  # noqa: E402
     episode_identity,
     episode_identity_from_path,
     render_dashboard,
+    render_logs_page,
     read_logs,
     start_status_server,
 )
@@ -179,13 +180,20 @@ class StatusDashboardTests(unittest.TestCase):
             jobs = queue_jobs()
             tracker.start_cycle("cycle-1", 1, jobs)
             tracker.transition(jobs[0]["key"], "accepted")
-            tracker.finish_cycle()
+            tracker.finish_cycle({
+                "cycle_suppressions": 2,
+                "cooldown_deferrals": 3,
+                "circuit_deferrals": 1,
+            })
 
             cycle = tracker.snapshot()["currentCycle"]
             self.assertEqual(cycle["done"], 3)
             self.assertEqual(cycle["accepted"], 1)
             self.assertEqual(cycle["deferred"], 2)
             self.assertEqual(cycle["remaining"], 0)
+            self.assertEqual(cycle["metrics"]["cycle_suppressions"], 2)
+            self.assertEqual(cycle["metrics"]["cooldown_deferrals"], 3)
+            self.assertEqual(cycle["metrics"]["circuit_deferrals"], 1)
 
     def test_rolling_windows_and_repaired_subtype(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -301,6 +309,8 @@ class StatusDashboardTests(unittest.TestCase):
                 [
                     "generatedAt", "service", "currentCycle", "activeJobs",
                     "upNext", "recentOutcomes", "timing", "circuits",
+                    "retryPlans", "completedCycle",
+                    "retryMaxAttempts",
                     "history", "maintenance",
                 ],
             )
@@ -464,6 +474,9 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("formatRemaining", script)
         self.assertIn("Over by", script)
         self.assertIn(".live-remaining", script)
+        self.assertIn('"Retry queue"', script)
+        self.assertIn("retryPlans", script)
+        self.assertIn("Manual review required", script)
         self.assertIn(".time-exact-only", stylesheet)
 
     def test_port_conflict_raises_without_corrupting_tracker(self):
@@ -481,17 +494,33 @@ class StatusDashboardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "bazarr-autotranslate-2026-01-01.log").write_text(
-                "[INFO] Top Gear started\n"
+                "2026-01-01T12:34:56.789Z [INFO] Top Gear started\n"
                 "[ERROR] api_key=secret /media/shows/topgear/file.srt\n"
                 "[INFO] Other show\n",
                 encoding="utf-8",
             )
             page = read_logs(root, {"job": ["top gear"], "limit": ["1"]})
             self.assertEqual(len(page["lines"]), 1)
+            self.assertTrue(page["lines"][0].startswith("2026-01-01T12:34:56.789Z"))
             error = read_logs(root, {"level": ["ERROR"]})
             self.assertEqual(len(error["lines"]), 1)
             self.assertNotIn("secret", error["lines"][0])
             self.assertNotIn("/media/", error["lines"][0])
+
+    def test_log_page_uses_visible_tokenized_controls(self):
+        page = render_logs_page()
+        stylesheet = (
+            REPO_ROOT / "docker" / "static" / "dashboard.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Search text", page)
+        self.assertIn("New records use UTC timestamps", page)
+        self.assertIn('placeholder="Top Gear or job ID"', page)
+        self.assertIn("border: 1px solid var(--border-default)", stylesheet)
+        self.assertIn("background: var(--bg-overlay)", stylesheet)
+        self.assertIn(".log-filters input:focus-visible", stylesheet)
+        self.assertIn("box-shadow: 0 0 0 3px var(--accent-glow)", stylesheet)
+        for undefined in ("var(--muted)", "var(--border)", "var(--surface-strong)", "var(--text)"):
+            self.assertNotIn(undefined, stylesheet)
 
 
 if __name__ == "__main__":

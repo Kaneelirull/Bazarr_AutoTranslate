@@ -118,18 +118,27 @@ capacity failures defer work instead of submitting without a verified slot.
 | `CLEANUP_ROOT` | `/media` | Root path or path-separated roots to scan |
 | `CLEANUP_ACTION` | `quarantine` | `quarantine`, `delete`, or `report` |
 | `CLEANUP_QUARANTINE_DIR` | `/config/quarantine` | Quarantine destination |
-| `CLEANUP_QUARANTINE_HOLD_DAYS` | `30` | Repeat-invalid-output hold duration |
 | `CLEANUP_REPAIR_ENABLED` | `true` | Enable targeted Lingarr cue repair |
 | `CLEANUP_MAX_REPAIR_ATTEMPTS` | `5` | Attempts per invalid cue; attempt one uses context and attempts 2–5 do not |
 | `CLEANUP_REPAIR_CONTEXT_LINES` | `5` | Surrounding source cues supplied on the first attempt |
 | `CLEANUP_FORMAT_REPAIR_ENABLED` | `true` | Enable safe local SRT normalization |
 | `CLEANUP_UNDERSIZED_ENABLED` | `true` | Enable completeness validation |
 | `CLEANUP_PRUNE_EXTRA_LANGUAGES` | `true` | Prune recognized unmanaged languages once managed subtitles are valid |
+| `QUARANTINE_ARTIFACT_RETENTION_DAYS` | `30` | Retain quarantined files/reports without blocking retries |
+| `REGENERATION_INITIAL_DELAY_CYCLES` | `2` | Healthy completed cycles before fresh regeneration |
+| `REGENERATION_MAX_ATTEMPTS` | `3` | Fresh retries before manual review |
+| `REGENERATION_BACKOFF_MULTIPLIER` | `2.0` | Cycle backoff multiplier |
+| `RETRY_BATCH_SIZE_PER_CYCLE` | `5` | Maximum regeneration admissions per cycle |
+| `RETRY_MAX_PER_SERIES_PER_CYCLE` | `1` | Per-series admission limit |
+| `END_OF_CYCLE_REPAIR_RETRY_ENABLED` | `true` | Retry one deferred cue repair at cycle end |
 
 Every repairable cue is attempted before the file is declared unrepairable.
 Attempt one includes source context; attempts two through five run without
 context. If any cue still fails, the untouched original subtitle is handled by
 `CLEANUP_ACTION` rather than installing a partially repaired candidate.
+Quarantine is audit storage only: retry plans persist separately in SQLite,
+use completed-cycle backoff, respect the series circuit breaker, and remain
+visible on the dashboard until accepted or exhausted.
 
 Additional validation thresholds are documented in the repository's
 [`docker/README.md`](https://github.com/Kaneelirull/Bazarr_AutoTranslate/blob/main/docker/README.md)
@@ -162,7 +171,7 @@ able to correct Lingarr-created subtitle ownership to the managed
 Correctness-critical state is stored in
 `/config/bazarr-autotranslate.sqlite3`. It transactionally records submission
 cooldowns, exact source/target hashes, Lingarr outputs, validation results,
-repair lineage, and quarantine holds. Existing `submitted_cache.json` and
+repair lineage, and quarantine audit history. Existing `submitted_cache.json` and
 `validation_state.json` files are imported once and preserved as
 `.migrated.bak` backups.
 

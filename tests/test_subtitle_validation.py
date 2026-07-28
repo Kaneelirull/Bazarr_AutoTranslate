@@ -15,6 +15,8 @@ sys.path.insert(0, str(REPO_ROOT / "docker"))
 import clean_et_subs as cleanup  # noqa: E402
 from clean_et_subs import (  # noqa: E402
     SubtitleCue,
+    ValidationIssue,
+    ValidationReport,
     ValidationStateStore,
     build_detector,
     discover_target_subtitles,
@@ -30,6 +32,7 @@ from clean_et_subs import (  # noqa: E402
     validate_subtitle_pair,
     validate_subtitle_without_source,
     write_validation_report,
+    classify_validation_failure,
 )
 from state_store import StateStore  # noqa: E402
 
@@ -55,6 +58,23 @@ def make_timed_srt(cue_count: int, final_second: int, text: str = "Dialogue line
 
 
 class SubtitleValidationTests(unittest.TestCase):
+    def test_failure_classification_prefers_structural_safety(self):
+        cue_only = ValidationReport([
+            ValidationIssue("garbage", "bad", cue_index=0, cue_number=1)
+        ])
+        mixed = ValidationReport([
+            ValidationIssue("garbage", "bad", cue_index=0, cue_number=1),
+            ValidationIssue("target_structure", "broken"),
+        ])
+        source = ValidationReport([
+            ValidationIssue("source_unreadable", "missing")
+        ])
+        self.assertEqual(
+            classify_validation_failure(cue_only), "cue_repairable"
+        )
+        self.assertEqual(classify_validation_failure(mixed), "whole_file")
+        self.assertEqual(classify_validation_failure(source), "source_problem")
+
     @classmethod
     def setUpClass(cls):
         cls.detector = build_detector()
@@ -601,7 +621,7 @@ class SubtitleValidationTests(unittest.TestCase):
             target.write_text(make_srt("Muudetud"), encoding="utf-8")
             self.assertIsNone(state.current_valid_details(target, file_sha256(target)))
 
-    def test_validation_state_reuses_warning_and_tracks_quarantine_hold(self):
+    def test_validation_state_reuses_warning_and_tracks_quarantine_audit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "show.et.hi.srt"
@@ -618,24 +638,22 @@ class SubtitleValidationTests(unittest.TestCase):
             self.assertTrue(state.is_unchanged_valid(target, None, target_hash))
 
             now = datetime.now(timezone.utc)
-            first, repeated = state.record_quarantine_tombstone(
+            first, repeated = state.record_quarantine_event(
                 "show|et",
                 target_path=target,
                 target_hash=target_hash,
                 target_language="et",
                 rules=["excessive_lines"],
                 origin="unknown",
-                hold_days=30,
                 now=now,
             )
-            second, repeated_again = state.record_quarantine_tombstone(
+            second, repeated_again = state.record_quarantine_event(
                 "show|et",
                 target_path=target,
                 target_hash=target_hash,
                 target_language="et",
                 rules=["excessive_lines"],
                 origin="unknown",
-                hold_days=30,
                 now=now + timedelta(hours=1),
             )
 
@@ -643,41 +661,39 @@ class SubtitleValidationTests(unittest.TestCase):
             self.assertTrue(repeated_again)
             self.assertEqual(first["occurrences"], 1)
             self.assertEqual(second["occurrences"], 2)
-            self.assertIsNotNone(
-                state.active_quarantine_tombstone(
-                    "show|et", now=now + timedelta(days=29)
-                )
-            )
-            self.assertIsNone(
-                state.active_quarantine_tombstone(
+            self.assertIsNotNone(state.quarantine_event("show|et"))
+            self.assertTrue(
+                state.resolve_quarantine_events(
                     "show|et", now=now + timedelta(days=31)
                 )
             )
+            self.assertIsNotNone(
+                state.quarantine_event("show|et")["resolvedAt"]
+            )
 
-            changed, changed_repeat = state.record_quarantine_tombstone(
+            changed, changed_repeat = state.record_quarantine_event(
                 "show|et",
                 target_path=target,
                 target_hash="different-hash",
                 target_language="et",
                 rules=["prompt_marker"],
                 origin="unknown",
-                hold_days=30,
                 now=now + timedelta(hours=2),
             )
-            third, original_repeats_again = state.record_quarantine_tombstone(
+            third, original_repeats_again = state.record_quarantine_event(
                 "show|et",
                 target_path=target,
                 target_hash=target_hash,
                 target_language="et",
                 rules=["excessive_lines"],
                 origin="unknown",
-                hold_days=30,
                 now=now + timedelta(hours=3),
             )
             self.assertFalse(changed_repeat)
             self.assertEqual(changed["occurrences"], 1)
             self.assertTrue(original_repeats_again)
             self.assertEqual(third["occurrences"], 3)
+            self.assertIsNone(third["resolvedAt"])
 
     def test_quarantine_preserves_relative_path_and_writes_report(self):
         with tempfile.TemporaryDirectory() as directory:
