@@ -486,6 +486,23 @@ class StateStoreTests(unittest.TestCase):
                     config_fingerprint="a",
                     now=120,
                 )["allowed"])
+                preview = store.circuit_permission(
+                    series_key="sonarr:1",
+                    series_title="Top Gear",
+                    config_fingerprint="a",
+                    claim=False,
+                    now=200,
+                )
+                self.assertTrue(preview["allowed"])
+                self.assertEqual(preview["state"], "half_open")
+                second_preview = store.circuit_permission(
+                    series_key="sonarr:1",
+                    series_title="Top Gear",
+                    config_fingerprint="a",
+                    claim=False,
+                    now=201,
+                )
+                self.assertTrue(second_preview["allowed"])
                 trial = store.circuit_permission(
                     series_key="sonarr:1",
                     series_title="Top Gear",
