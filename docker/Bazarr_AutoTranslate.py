@@ -440,48 +440,93 @@ _translation_capacity = TranslationCapacityGate(PARALLEL_TRANSLATES)
 
 
 class FileLaneGate:
-    """Partition full-file work while leaving cue-repair capacity independent."""
+    """Prioritize long work while allowing its slot to stay productive."""
 
     def __init__(self, workers: int):
         self.workers = max(1, workers)
         self._condition = threading.Condition()
         self._active_long = 0
         self._active_short = 0
-        self._waiting_short = 0
+        self._waiters: dict[int, tuple[bool, float, int]] = {}
+        self._next_waiter = 0
 
-    def acquire(self, is_long: bool) -> str | None:
-        lane = "long" if is_long else "short"
+    def acquire(self, is_long: bool, estimate_seconds: float = 0.0) -> str | None:
         with self._condition:
-            if not is_long:
-                self._waiting_short += 1
+            token = self._next_waiter
+            self._next_waiter += 1
+            self._waiters[token] = (
+                bool(is_long),
+                max(0.0, float(estimate_seconds)),
+                token,
+            )
             try:
                 while not shutdown_requested:
+                    long_waiters = sorted(
+                        (
+                            (waiter_token, estimate, sequence)
+                            for waiter_token, (long_job, estimate, sequence)
+                            in self._waiters.items()
+                            if long_job
+                        ),
+                        key=lambda entry: (-entry[1], entry[2]),
+                    )
+                    short_waiters = sorted(
+                        (
+                            (waiter_token, estimate, sequence)
+                            for waiter_token, (long_job, estimate, sequence)
+                            in self._waiters.items()
+                            if not long_job
+                        ),
+                        key=lambda entry: (-entry[1], entry[2]),
+                    )
                     if self.workers == 1:
+                        preferred = short_waiters or long_waiters
                         available = (
                             self._active_long + self._active_short == 0
-                            and (not is_long or self._waiting_short == 0)
+                            and bool(preferred)
+                            and preferred[0][0] == token
                         )
+                        lane = "long" if is_long else "short"
                     elif is_long:
-                        available = self._active_long == 0
+                        available = (
+                            self._active_long == 0
+                            and bool(long_waiters)
+                            and long_waiters[0][0] == token
+                        )
+                        lane = "long"
                     else:
-                        available = self._active_short < self.workers - 1
+                        preferred_short = (
+                            bool(short_waiters) and short_waiters[0][0] == token
+                        )
+                        if preferred_short and self._active_short < self.workers - 1:
+                            available = True
+                            lane = "short"
+                        else:
+                            available = (
+                                preferred_short
+                                and self._active_long == 0
+                                and not long_waiters
+                            )
+                            lane = "short (borrowed)"
                     if available:
-                        if is_long:
+                        self._waiters.pop(token, None)
+                        if lane in {"long", "short (borrowed)"}:
                             self._active_long += 1
                         else:
                             self._active_short += 1
+                        self._condition.notify_all()
                         return lane
                     self._condition.wait(timeout=1)
             finally:
-                if not is_long:
-                    self._waiting_short -= 1
+                self._waiters.pop(token, None)
+                self._condition.notify_all()
         return None
 
     def release(self, lane: str | None) -> None:
         if lane is None:
             return
         with self._condition:
-            if lane == "long":
+            if lane in {"long", "short (borrowed)"}:
                 self._active_long = max(0, self._active_long - 1)
             else:
                 self._active_short = max(0, self._active_short - 1)
@@ -3745,6 +3790,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                 series_key=series_key,
                 series_title=series_title,
                 config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+                claim=False,
             )
         except StateStoreError as exc:
             print(f"{YELLOW}[CIRCUIT] State unavailable for {title}: {exc}{RESET}")
@@ -3762,6 +3808,8 @@ def process_item(item: dict, item_type: str, id_field: str,
                 "deferred",
                 reason=f"series circuit {circuit['state']}",
             )
+            with stats_lock:
+                stats["deferred"] = stats.get("deferred", 0) + 1
             continue
 
         src_lines = _count_dialogue_lines(source_path)
@@ -3794,10 +3842,48 @@ def process_item(item: dict, item_type: str, id_field: str,
                     "long" if timeout_override > LONG_JOB_THRESHOLD else "short"
                 ),
             }
-        lane = _file_lane_gate.acquire(timing["lane"] == "long")
+        lane = _file_lane_gate.acquire(
+            timing["lane"] == "long",
+            timing["estimatedSeconds"],
+        )
         if lane is None:
             _status_transition(
                 item_type, item_id, target_lang, "deferred", reason="file lane unavailable"
+            )
+            continue
+        if lane == "short (borrowed)":
+            print(
+                f"[LANE] {title} '{target_lang}' borrowed the idle long slot "
+                f"(estimate={timing['estimatedSeconds']:.0f}s)"
+            )
+
+        try:
+            queued_circuit = _get_validation_state().circuit_permission(
+                series_key=series_key,
+                series_title=series_title,
+                config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+                claim=False,
+            )
+        except StateStoreError as exc:
+            print(f"{YELLOW}[CIRCUIT] State unavailable for {title}: {exc}{RESET}")
+            queued_circuit = {"allowed": True, "state": "unknown", "failures": 0}
+        if not queued_circuit["allowed"]:
+            _file_lane_gate.release(lane)
+            retry_at = queued_circuit.get("retryAt")
+            print(
+                f"{YELLOW}[CIRCUIT] Released {lane} slot for {title}: protection "
+                f"opened while queued; state={queued_circuit['state']} "
+                f"failures={queued_circuit.get('failures', 0)} "
+                f"retry_at={retry_at}{RESET}"
+            )
+            with stats_lock:
+                stats["deferred"] = stats.get("deferred", 0) + 1
+            _status_transition(
+                item_type,
+                item_id,
+                target_lang,
+                "deferred",
+                reason=f"series circuit {queued_circuit['state']}",
             )
             continue
 
@@ -3942,6 +4028,34 @@ def process_item(item: dict, item_type: str, id_field: str,
         translation_started = time.monotonic()
         job_id: int | None = None
         try:
+            try:
+                circuit = _get_validation_state().circuit_permission(
+                    series_key=series_key,
+                    series_title=series_title,
+                    config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+                    claim=True,
+                )
+            except StateStoreError as exc:
+                print(f"{YELLOW}[CIRCUIT] State unavailable for {title}: {exc}{RESET}")
+                circuit = {"allowed": True, "state": "unknown", "failures": 0}
+            if not circuit["allowed"]:
+                _mark_submission_failed(attempt_id)
+                retry_at = circuit.get("retryAt")
+                print(
+                    f"{YELLOW}[CIRCUIT] Deferred {title} before submission: "
+                    f"state={circuit['state']} failures={circuit.get('failures', 0)} "
+                    f"retry_at={retry_at}; released_slot={lane}{RESET}"
+                )
+                with stats_lock:
+                    stats["deferred"] = stats.get("deferred", 0) + 1
+                _status_transition(
+                    item_type,
+                    item_id,
+                    target_lang,
+                    "deferred",
+                    reason=f"series circuit {circuit['state']}",
+                )
+                continue
             job_id = lingarr_submit_file(
                 media_id,
                 source_path,
@@ -3951,6 +4065,22 @@ def process_item(item: dict, item_type: str, id_field: str,
             )
             if job_id is None:
                 _mark_submission_failed(attempt_id)
+                if circuit.get("state") == "half_open":
+                    try:
+                        _get_validation_state().record_circuit_outcome(
+                            series_key=series_key,
+                            series_title=series_title,
+                            success=False,
+                            reason="Lingarr submission failed",
+                            threshold=CIRCUIT_FAILURE_THRESHOLD,
+                            open_seconds=CIRCUIT_OPEN_SECONDS,
+                            config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+                        )
+                    except StateStoreError as exc:
+                        print(
+                            f"{YELLOW}[CIRCUIT] Could not reopen failed "
+                            f"half-open trial: {exc}{RESET}"
+                        )
                 with stats_lock:
                     stats["failed"] += 1
                 _status_transition(

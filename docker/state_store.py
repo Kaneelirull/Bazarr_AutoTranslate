@@ -377,6 +377,7 @@ class StateStore:
         series_key: str,
         series_title: str,
         config_fingerprint: str,
+        claim: bool = True,
         now: float | None = None,
     ) -> dict:
         now = time.time() if now is None else now
@@ -386,6 +387,8 @@ class StateStore:
                 (series_key,),
             ).fetchone()
             if row is None or row["config_fingerprint"] != config_fingerprint:
+                if not claim:
+                    return {"allowed": True, "state": "closed", "failures": 0}
                 connection.execute(
                     """
                     INSERT INTO circuit_breakers(
@@ -403,6 +406,13 @@ class StateStore:
                 return {"allowed": True, "state": "closed", "failures": 0}
             state = row["state"]
             if state == "open" and row["retry_at"] and now >= row["retry_at"]:
+                if not claim:
+                    return {
+                        "allowed": True,
+                        "state": "half_open",
+                        "failures": row["consecutive_failures"],
+                        "retryAt": row["retry_at"],
+                    }
                 connection.execute(
                     """
                     UPDATE circuit_breakers
