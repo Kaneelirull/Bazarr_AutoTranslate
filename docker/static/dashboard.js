@@ -468,37 +468,127 @@
     </section>`;
   };
 
+  const retryMedia = (plan) => {
+    const basename = String(plan.mediaTitle || "").split(/[\\/]/).pop() || "";
+    let stem = basename
+      .replace(/\.srt\s*season\s*\d+$/i, "")
+      .replace(/\.srt$/i, "")
+      .replace(/[._-](?:eng|en|est|et|swe|sv)(?:[._-](?:hi|sdh|forced))?$/i, "")
+      .replace(/\[[^\]]*]/g, " ")
+      .replace(/\s+-?(?:NTb|FLUX|GLUE|BLOOM|WEB|ETHEL|YIFY|RARBG)\b.*$/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const codeMatch = stem.match(/\b(S\d{1,2}E\d{1,3})\b/i);
+    const dateMatch = stem.match(/^(.*?)\s+-\s+(\d{4}-\d{2}-\d{2})\s+-\s+(.*)$/);
+    const meaningfulSeries = String(plan.seriesTitle || "")
+      .split(/[\\/]/)
+      .pop()
+      .trim();
+    const seriesFallback = meaningfulSeries
+      && !/^season\s*\d+$/i.test(meaningfulSeries)
+      ? meaningfulSeries
+      : "";
+    let title = seriesFallback;
+    let detail = "";
+    if (dateMatch) {
+      title ||= dateMatch[1].trim();
+      detail = `${dateMatch[2]} · ${dateMatch[3]}`;
+    } else if (codeMatch) {
+      const before = stem.slice(0, codeMatch.index).replace(/[\s._-]+$/g, "").trim();
+      let after = stem.slice(codeMatch.index + codeMatch[0].length)
+        .replace(/^[\s._-]+/, "")
+        .split(/\b(?:WEB(?:DL)?|BluRay|REMUX|HDTV|1080p|720p|480p|x26[45]|h26[45])\b/i)[0]
+        .replace(/[\s._-]+$/g, "")
+        .trim();
+      title ||= before.replaceAll(".", " ").trim();
+      detail = codeMatch[1].toUpperCase() + (after ? ` · ${after}` : "");
+    }
+    if (!title) {
+      title = stem
+        .split(/\b(?:WEB(?:DL)?|BluRay|REMUX|HDTV|1080p|720p|480p|x26[45]|h26[45])\b/i)[0]
+        .replace(/[\s._-]+$/g, "")
+        .replaceAll(".", " ")
+        .trim();
+    }
+    return {
+      title: title || `${plan.itemType || "media"} ${plan.itemId ?? "—"}`,
+      detail: detail || (seriesFallback && seriesFallback !== title ? seriesFallback : ""),
+    };
+  };
+
+  const retryState = (state) => {
+    const states = {
+      regeneration_waiting: ["Regeneration waiting", "deferred"],
+      regeneration_queued: ["Regeneration queued", "translating"],
+      retry_in_progress: ["Retry in progress", "translating"],
+      repair_retry_queued: ["Repair queued", "repairing"],
+      retry_exhausted: ["Retry exhausted", "failed"],
+      source_blocked: ["Source blocked", "failed"],
+    };
+    return states[state] || [labelForState(state || "queued"), "queued"];
+  };
+
+  const retryNextAction = (plan) => {
+    const reason = String(plan.lastReason || "").toLowerCase();
+    if (reason.includes("circuit")) return "Waiting for circuit";
+    if (plan.state === "regeneration_waiting") {
+      return `After cycle ${Number(plan.eligibleCompletedCycle || 0)}`;
+    }
+    if (plan.state === "repair_retry_queued") return "Repair at cycle end";
+    if (plan.state === "retry_exhausted" || plan.state === "source_blocked") {
+      return "Manual review";
+    }
+    return labelForState(plan.state || "queued");
+  };
+
+  const retryDetails = (plan) => {
+    const rules = Array.isArray(plan.rules) && plan.rules.length
+      ? plan.rules.join(", ")
+      : "—";
+    const fields = [
+      ["Failure class", plan.failureClass || "—"],
+      ["Validation rules", rules],
+      ["Last reason", plan.lastReason || "—"],
+      ["Eligible cycle", plan.eligibleCompletedCycle ?? "—"],
+      ["Item", `${plan.itemType || "media"}:${plan.itemId ?? "—"}`],
+      ["Final outcome", plan.finalOutcome || "—"],
+    ];
+    return `<details class="retry-details">
+      <summary>View details</summary>
+      <dl>${fields.map(([label, value]) => (
+        `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`
+      )).join("")}</dl>
+    </details>`;
+  };
+
   const renderRetryPlans = (plans, completedCycle, maxAttempts) => {
-    if (!plans?.length) return "";
     const active = plans.filter((plan) => ![
       "accepted_after_retry", "superseded",
     ].includes(plan.state));
-    if (!active.length) return "";
+    const note = `Persistent quarantine recovery · completed cycle ${Number(completedCycle || 0)}`;
+    if (!active.length) {
+      return `<section class="panel">${panelHeader("Retry queue", note)}
+        <p class="empty-state">No retry work scheduled.</p>
+      </section>`;
+    }
     const rows = active.slice(0, 20).map((plan) => {
-      const title = plan.mediaTitle || plan.seriesTitle
-        || `${plan.itemType} ${plan.itemId}`;
-      const next = plan.state === "regeneration_waiting"
-        ? `Eligible after completed cycle ${plan.eligibleCompletedCycle}`
-        : plan.state === "repair_retry_queued"
-          ? "Low-priority repair at cycle end"
-          : plan.state === "retry_exhausted"
-            ? "Manual review required"
-            : plan.state.replaceAll("_", " ");
+      const media = retryMedia(plan);
+      const [stateLabel, stateTone] = retryState(plan.state);
       return `<tr>
-        <td><strong>${escapeHtml(title)}</strong><small>${escapeHtml(plan.seriesTitle || "")}</small></td>
-        <td>${escapeHtml(plan.targetLanguage || "—")}</td>
-        <td><span class="status status-${escapeHtml(plan.state)}">${escapeHtml(plan.state.replaceAll("_", " "))}</span></td>
-        <td>${escapeHtml(plan.failureClass || "—")}</td>
-        <td>${Number(plan.attemptCount || 0)} / ${Number(maxAttempts || 3)}</td>
-        <td>${escapeHtml(next)}</td>
+        <td class="cell-media" data-label="Media">
+          <span class="media-title">${escapeHtml(media.title)}</span>
+          ${media.detail ? `<span class="media-detail">${escapeHtml(media.detail)}</span>` : ""}
+        </td>
+        <td data-label="Language">${escapeHtml(plan.targetLanguage || "—")}</td>
+        <td data-label="Status"><span class="badge ${stateTone}">${escapeHtml(stateLabel)}</span></td>
+        <td data-label="Attempts"><span class="duration">${Number(plan.attemptCount || 0)} / ${Number(maxAttempts || 3)}</span></td>
+        <td data-label="Next action">${escapeHtml(retryNextAction(plan))}</td>
+        <td class="cell-details" data-label="Details">${retryDetails(plan)}</td>
       </tr>`;
     }).join("");
-    return `<section class="panel">${panelHeader(
-      "Retry queue",
-      `Persistent quarantine recovery · completed cycle ${Number(completedCycle || 0)}`,
-    )}
-      <div class="table-wrap"><table>
-        <thead><tr><th>Media</th><th>Language</th><th>State</th><th>Failure</th><th>Attempts</th><th>Next action</th></tr></thead>
+    return `<section class="panel">${panelHeader("Retry queue", note)}
+      <div class="table-wrap"><table class="data-table retry-table">
+        <thead><tr><th scope="col">Media</th><th scope="col">Language</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Next action</th><th scope="col">Details</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>
     </section>`;
