@@ -46,7 +46,7 @@ docker compose up -d
 | `LINGARR_URL` | `http://lingarr:8080` | Lingarr URL |
 | `LINGARR_API_KEY` | empty | Optional Lingarr API key |
 | `LANGUAGES` | `en,et,sv` | Managed languages in source-priority order |
-| `PARALLEL_TRANSLATES` | `1` | Verified global active-translation limit |
+| `PARALLEL_TRANSLATES` | `1` | Shared maximum for active full-file translations and cue repairs |
 | `CHECK_INTERVAL` | `1200` | Seconds between wanted-subtitle cycles |
 | `POLL_TIMEOUT` | `900` | Minimum per-file translation timeout |
 | `RESUBMIT_COOLDOWN` | `3600` | Minimum delay before resubmitting an item/language pair |
@@ -80,7 +80,6 @@ Existing-library cleanup runs after startup synchronization and then on its own 
 | `CLEANUP_MAX_REPAIR_ATTEMPTS` | `5` | Maximum attempts per invalid cue; every repairable cue is tried before file-level failure |
 | `CLEANUP_REPAIR_CONTEXT_LINES` | `5` | Context cues on attempt one; later attempts use no context |
 | `CLEANUP_FORMAT_REPAIR_ENABLED` | `true` | Repair source-anchored SRT formatting damage without AI |
-| `CLEANUP_REPAIR_WORKERS` | `1` | Dedicated line-repair workers in addition to `PARALLEL_TRANSLATES` |
 | `CLEANUP_REPAIR_QUEUE_MAX` | `100` | Maximum queued cue-repair files; overflow is deferred |
 | `CLEANUP_UNDERSIZED_ENABLED` | `true` | Check every regular sidecar SRT against media duration |
 | `CLEANUP_MIN_MEDIA_DURATION` | `900` | Minimum media duration in seconds before density checks apply |
@@ -105,11 +104,12 @@ seconds-per-cue estimate for each language pair. New installations start at
 estimate, `TRANSLATION_TIMEOUT_MULTIPLIER`, and
 `TRANSLATION_TIMEOUT_CAP` (three hours by default).
 
-`PARALLEL_TRANSLATES` continues to control full-file work only. With two or
-more workers, one lane is reserved for files estimated above
+`PARALLEL_TRANSLATES` is the single shared capacity limit for full-file
+translations and cue repairs. Pending repairs have priority over new file
+submissions, and a file that needs repair hands its slot directly to that
+repair. With two or more workers, one file lane is reserved for files estimated above
 `LONG_JOB_THRESHOLD` and the remaining lanes serve short files. With one
-worker, short files have priority. `CLEANUP_REPAIR_WORKERS` remains an
-independent cue-repair executor.
+worker, short files have priority whenever no repair is pending.
 
 Failed Lingarr jobs are inspected for positioned line results. Valid completed
 lines are retained and unresolved cues are retried individually instead of
@@ -167,7 +167,7 @@ When a subtitle is quarantined or deleted, a media/language tombstone records th
 
 Source-anchored recovery normalizes BOMs, newlines, trailing whitespace, timestamp spacing, repeated separators, and blank lines inside cues. Orphan text is folded into its preceding cue only when every numbered timestamp anchor still matches the source in order. Missing, duplicate, reordered, or mismatched anchors are never guessed.
 
-`CLEANUP_REPAIR_WORKERS=1` provides one additional repair lane: with `PARALLEL_TRANSLATES=1`, one complete subtitle job and one small line repair may run concurrently. Repair logs show queueing, worker, cue number, attempt, context counts, safe HTTP status, duration, validation rejection, and the no-context retry. Subtitle text, context contents, and credentials are never logged.
+Cue repairs share `PARALLEL_TRANSLATES` with full-file work. A waiting repair is admitted before a new translation, and the combined active count never exceeds that limit. Repair logs show queueing, worker, cue number, attempt, context counts, safe HTTP status, duration, validation rejection, and the no-context retry. Subtitle text, context contents, and credentials are never logged.
 
 ## Quarantine recovery
 

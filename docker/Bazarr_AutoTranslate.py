@@ -208,7 +208,6 @@ CLEANUP_REPAIR_ENABLED = os.getenv("CLEANUP_REPAIR_ENABLED", "true").lower() in 
 CLEANUP_MAX_REPAIR_ATTEMPTS = max(1, int(os.getenv("CLEANUP_MAX_REPAIR_ATTEMPTS", "5")))
 CLEANUP_REPAIR_CONTEXT_LINES = max(0, int(os.getenv("CLEANUP_REPAIR_CONTEXT_LINES", "5")))
 CLEANUP_FORMAT_REPAIR_ENABLED = os.getenv("CLEANUP_FORMAT_REPAIR_ENABLED", "true").lower() in ("1", "true", "yes")
-CLEANUP_REPAIR_WORKERS = max(1, int(os.getenv("CLEANUP_REPAIR_WORKERS", "1")))
 CLEANUP_REPAIR_QUEUE_MAX = max(1, int(os.getenv("CLEANUP_REPAIR_QUEUE_MAX", "100")))
 CLEANUP_UNDERSIZED_ENABLED = os.getenv("CLEANUP_UNDERSIZED_ENABLED", "true").lower() in ("1", "true", "yes")
 CLEANUP_MIN_MEDIA_DURATION = max(0.0, float(os.getenv("CLEANUP_MIN_MEDIA_DURATION", "900")))
@@ -316,7 +315,7 @@ _validation_state_lock = threading.Lock()
 _cleanup_scan_lock = threading.Lock()
 _repair_executor = None
 _repair_executor_lock = threading.Lock()
-_repair_capacity = threading.BoundedSemaphore(CLEANUP_REPAIR_WORKERS + CLEANUP_REPAIR_QUEUE_MAX)
+_repair_capacity = threading.BoundedSemaphore(PARALLEL_TRANSLATES + CLEANUP_REPAIR_QUEUE_MAX)
 _pending_repairs: dict[Future, dict] = {}
 _pending_repairs_lock = threading.Lock()
 _repair_keys: set[tuple] = set()
@@ -437,6 +436,97 @@ class TranslationCapacityGate:
 
 
 _translation_capacity = TranslationCapacityGate(PARALLEL_TRANSLATES)
+
+
+class SharedCapacityCoordinator:
+    """Coordinate file translations and repairs with repair-first admission."""
+
+    def __init__(self, limit: int):
+        self.limit = max(1, limit)
+        self._condition = threading.Condition()
+        self._active = 0
+        self._waiting_repairs = 0
+        self._next_token = 1
+        self._tokens: dict[int, str] = {}
+        self._local = threading.local()
+
+    def acquire_translation(self) -> int | None:
+        with self._condition:
+            while not shutdown_requested:
+                if self._active < self.limit and self._waiting_repairs == 0:
+                    token = self._next_token
+                    self._next_token += 1
+                    self._tokens[token] = "translation"
+                    self._active += 1
+                    self._local.translation_token = token
+                    return token
+                self._condition.wait(timeout=1)
+        return None
+
+    def reserve_repair(self) -> int | None:
+        """Reserve repair priority, transferring the caller's file slot if held."""
+        with self._condition:
+            translation_token = getattr(self._local, "translation_token", None)
+            if self._tokens.get(translation_token) == "translation":
+                self._tokens[translation_token] = "repair-reserved"
+                self._local.translation_token = None
+                return translation_token
+            token = self._next_token
+            self._next_token += 1
+            self._tokens[token] = "repair-waiting"
+            self._waiting_repairs += 1
+            self._condition.notify_all()
+            return token
+
+    def start_repair(self, token: int) -> bool:
+        with self._condition:
+            while not shutdown_requested:
+                state = self._tokens.get(token)
+                if state == "repair-reserved":
+                    self._tokens[token] = "repair"
+                    return True
+                if state != "repair-waiting":
+                    return False
+                if self._active < self.limit:
+                    self._waiting_repairs -= 1
+                    self._active += 1
+                    self._tokens[token] = "repair"
+                    return True
+                self._condition.wait(timeout=1)
+            self._cancel_waiter(token)
+            return False
+
+    def _cancel_waiter(self, token: int) -> None:
+        if self._tokens.pop(token, None) == "repair-waiting":
+            self._waiting_repairs -= 1
+        self._condition.notify_all()
+
+    def release(self, token: int | None) -> None:
+        if token is None:
+            return
+        with self._condition:
+            state = self._tokens.pop(token, None)
+            if state in ("translation", "repair", "repair-reserved"):
+                self._active = max(0, self._active - 1)
+            elif state == "repair-waiting":
+                self._waiting_repairs = max(0, self._waiting_repairs - 1)
+            if getattr(self._local, "translation_token", None) == token:
+                self._local.translation_token = None
+            self._condition.notify_all()
+
+    def release_current_translation(self) -> None:
+        self.release(getattr(self._local, "translation_token", None))
+
+    def reset(self) -> None:
+        with self._condition:
+            self._tokens.clear()
+            self._active = 0
+            self._waiting_repairs = 0
+            self._local.translation_token = None
+            self._condition.notify_all()
+
+
+_shared_capacity = SharedCapacityCoordinator(PARALLEL_TRANSLATES)
 
 
 class FileLaneGate:
@@ -2825,10 +2915,21 @@ def _get_repair_executor() -> ThreadPoolExecutor:
     with _repair_executor_lock:
         if _repair_executor is None:
             _repair_executor = ThreadPoolExecutor(
-                max_workers=CLEANUP_REPAIR_WORKERS,
+                max_workers=PARALLEL_TRANSLATES,
                 thread_name_prefix="repair-worker",
             )
         return _repair_executor
+
+
+def _run_repair_with_capacity(capacity_token: int, job_kwargs: dict) -> RepairJobResult:
+    """Run one repair after its priority reservation obtains shared capacity."""
+    if not _shared_capacity.start_repair(capacity_token):
+        _shared_capacity.release(capacity_token)
+        raise RuntimeError("shared repair capacity unavailable during shutdown")
+    try:
+        return _perform_repair(**job_kwargs)
+    finally:
+        _shared_capacity.release(capacity_token)
 
 
 def _publish_repair_status(future: Future, metadata: dict) -> None:
@@ -2888,10 +2989,14 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             print(f"[REPAIR] Queue full; deferred {label} '{target_lang}' to the next scan")
             return "repair-deferred"
         _repair_keys.add(repair_key)
+        capacity_token = _shared_capacity.reserve_repair()
         try:
-            future = _get_repair_executor().submit(_perform_repair, **job_kwargs)
+            future = _get_repair_executor().submit(
+                _run_repair_with_capacity, capacity_token, job_kwargs
+            )
         except Exception:
             _repair_keys.discard(repair_key)
+            _shared_capacity.release(capacity_token)
             _repair_capacity.release()
             raise
         metadata = {
@@ -3842,11 +3947,18 @@ def process_item(item: dict, item_type: str, id_field: str,
                     "long" if timeout_override > LONG_JOB_THRESHOLD else "short"
                 ),
             }
+        shared_token = _shared_capacity.acquire_translation()
+        if shared_token is None:
+            _status_transition(
+                item_type, item_id, target_lang, "deferred", reason="shared capacity unavailable"
+            )
+            continue
         lane = _file_lane_gate.acquire(
             timing["lane"] == "long",
             timing["estimatedSeconds"],
         )
         if lane is None:
+            _shared_capacity.release(shared_token)
             _status_transition(
                 item_type, item_id, target_lang, "deferred", reason="file lane unavailable"
             )
@@ -3869,6 +3981,7 @@ def process_item(item: dict, item_type: str, id_field: str,
             queued_circuit = {"allowed": True, "state": "unknown", "failures": 0}
         if not queued_circuit["allowed"]:
             _file_lane_gate.release(lane)
+            _shared_capacity.release(shared_token)
             retry_at = queued_circuit.get("retryAt")
             print(
                 f"{YELLOW}[CIRCUIT] Released {lane} slot for {title}: protection "
@@ -3890,6 +4003,7 @@ def process_item(item: dict, item_type: str, id_field: str,
         capacity_token = _translation_capacity.acquire(media_id, lingarr_media_type)
         if capacity_token is None:
             _file_lane_gate.release(lane)
+            _shared_capacity.release(shared_token)
             with stats_lock:
                 stats["api_errors"] = stats.get("api_errors", 0) + 1
                 stats["deferred"] = stats.get("deferred", 0) + 1
@@ -3964,12 +4078,14 @@ def process_item(item: dict, item_type: str, id_field: str,
                     if validation_action in ("quarantined", "deleted"):
                         _mark_activity(stats, item_type)
             _status_finish_validation(item_type, item_id, target_lang, validation_action)
+            _shared_capacity.release(shared_token)
             continue
 
         src_lines = _count_dialogue_lines(source_path)
         if src_lines is None:
             _translation_capacity.release(capacity_token)
             _file_lane_gate.release(lane)
+            _shared_capacity.release(shared_token)
             print(f"{YELLOW}[SKIP] {title} '{target_lang}': source not readable — deferring{RESET}")
             with stats_lock:
                 stats.setdefault("deferred", 0)
@@ -3981,6 +4097,7 @@ def process_item(item: dict, item_type: str, id_field: str,
         if src_lines == 0:
             _translation_capacity.release(capacity_token)
             _file_lane_gate.release(lane)
+            _shared_capacity.release(shared_token)
             print(f"{YELLOW}[SKIP] {title} '{target_lang}': source has no dialogue lines{RESET}")
             with stats_lock:
                 stats.setdefault("deferred", 0)
@@ -4013,6 +4130,7 @@ def process_item(item: dict, item_type: str, id_field: str,
         except (StateStoreError, OSError) as exc:
             _translation_capacity.release(capacity_token)
             _file_lane_gate.release(lane)
+            _shared_capacity.release(shared_token)
             print(
                 f"{YELLOW}[DEFER] Could not reserve durable translation "
                 f"state for {title} '{target_lang}': {exc}{RESET}"
@@ -4055,6 +4173,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                     "deferred",
                     reason=f"series circuit {circuit['state']}",
                 )
+                _shared_capacity.release(shared_token)
                 continue
             job_id = lingarr_submit_file(
                 media_id,
@@ -4090,6 +4209,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                     "failed",
                     reason="Lingarr submission failed",
                 )
+                _shared_capacity.release(shared_token)
                 continue
 
             try:
@@ -4105,6 +4225,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                     item_type, item_id, target_lang, "deferred",
                     reason="Lingarr job persistence failed",
                 )
+                _shared_capacity.release(shared_token)
                 continue
             _status_transition(
                 item_type,
@@ -4229,6 +4350,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                     reason=f"Lingarr job {status.lower()}",
                     details={"failureDetails": _safe_failure_details(job_id)},
                 )
+            _shared_capacity.release(shared_token)
             continue
 
         actual_target_path = (
@@ -4256,6 +4378,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                 "timed_out",
                 reason="completed output missing",
             )
+            _shared_capacity.release(shared_token)
             continue
         if not _normalize_managed_output(actual_target_path, title):
             with stats_lock:
@@ -4267,6 +4390,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                 "deferred",
                 reason="managed file ownership failed",
             )
+            _shared_capacity.release(shared_token)
             continue
         actual_suffix = _target_suffix(actual_target_path, target_lang)
         actual_variant = actual_suffix[1] if actual_suffix is not None else ""
@@ -4294,6 +4418,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                 item_type, item_id, target_lang, "deferred",
                 reason="completed output provenance persistence failed",
             )
+            _shared_capacity.release(shared_token)
             continue
 
         _status_transition(item_type, item_id, target_lang, "validating")
@@ -4350,6 +4475,7 @@ def process_item(item: dict, item_type: str, id_field: str,
                 stats["cleaned"] += 1
                 _record_cleanup_stats(stats, validation_action, validation_report)
         _status_finish_validation(item_type, item_id, target_lang, validation_action)
+        _shared_capacity.release(shared_token)
 
 # ---------------------------------------------------------------------------
 # Existing-library cleanup
@@ -5179,9 +5305,18 @@ def run_cycle(cycle_num: int) -> None:
         # several long items appear first; the lane and Lingarr gates still cap
         # actual full-file translations at PARALLEL_TRANSLATES.
         dispatch_workers = max(PARALLEL_TRANSLATES * 4, PARALLEL_TRANSLATES + 1)
+        def run_item_with_capacity_cleanup(*args):
+            try:
+                return process_item(*args)
+            finally:
+                _shared_capacity.release_current_translation()
+
         with ThreadPoolExecutor(max_workers=dispatch_workers) as executor:
             futures = {
-                executor.submit(process_item, item, itype, ifield, stats, stats_lock):
+                executor.submit(
+                    run_item_with_capacity_cleanup,
+                    item, itype, ifield, stats, stats_lock,
+                ):
                 (item, itype, ifield)
                 for item, itype, ifield in work
             }
@@ -5366,7 +5501,7 @@ def main() -> int:
           f"({CLEANUP_PRUNE_ACTION}, unknown={'remove' if CLEANUP_PRUNE_UNKNOWN_SIDECARS else 'retain'})")
     print(f"  Max cue lines     : {CLEANUP_MAX_CUE_LINES}")
     print(f"  Format recovery   : {'ON' if CLEANUP_FORMAT_REPAIR_ENABLED else 'off'}")
-    print(f"  Repair workers    : {CLEANUP_REPAIR_WORKERS} (+{CLEANUP_REPAIR_WORKERS} beyond file workers)")
+    print(f"  Shared capacity   : {PARALLEL_TRANSLATES} (translations + repairs; repairs first)")
     print(f"  Repair queue max  : {CLEANUP_REPAIR_QUEUE_MAX}")
     print(f"  Size validation   : {'ON' if CLEANUP_UNDERSIZED_ENABLED else 'off'} "
           f"({CLEANUP_UNDERSIZED_REQUIRED_SIGNALS}/4 signals, media >= {CLEANUP_MIN_MEDIA_DURATION:.0f}s)")
@@ -5378,7 +5513,6 @@ def main() -> int:
     print(f"  Status dashboard  : {'ON' if STATUS_ENABLED else 'off'}"
           + (f" on {STATUS_BIND}:{STATUS_PORT}" if STATUS_ENABLED else ""))
     print(f"  Status retention  : {STATUS_HISTORY_RETENTION_DAYS} days")
-    print(f"  Parallel workers  : {PARALLEL_TRANSLATES}")
     print(
         f"  Adaptive timeout  : x{TRANSLATION_TIMEOUT_MULTIPLIER:g}, "
         f"cap {TRANSLATION_TIMEOUT_CAP}s, cold "

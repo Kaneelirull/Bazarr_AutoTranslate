@@ -20,6 +20,42 @@ from clean_et_subs import parse_srt_cues  # noqa: E402
 
 
 class AdaptiveTranslationTests(unittest.TestCase):
+    def test_shared_capacity_handoff_is_atomic_for_all_supported_limits(self):
+        for limit in (1, 2, 4):
+            gate = app.SharedCapacityCoordinator(limit)
+            occupied = [gate.acquire_translation() for _ in range(limit)]
+            token = occupied.pop()
+            repair_token = gate.reserve_repair()
+            self.assertEqual(repair_token, token)
+
+            repair_started = threading.Event()
+            release_repair = threading.Event()
+            translation_started = threading.Event()
+
+            def repair():
+                self.assertTrue(gate.start_repair(repair_token))
+                repair_started.set()
+                release_repair.wait(1)
+                gate.release(repair_token)
+
+            def translation():
+                next_token = gate.acquire_translation()
+                translation_started.set()
+                gate.release(next_token)
+
+            repair_thread = threading.Thread(target=repair)
+            translation_thread = threading.Thread(target=translation)
+            repair_thread.start()
+            translation_thread.start()
+            self.assertTrue(repair_started.wait(1))
+            self.assertFalse(translation_started.wait(0.05))
+            release_repair.set()
+            repair_thread.join(1)
+            self.assertTrue(translation_started.wait(1))
+            translation_thread.join(1)
+            for occupied_token in occupied:
+                gate.release(occupied_token)
+
     def test_file_lanes_keep_one_long_and_remaining_short(self):
         for workers in (2, 4):
             gate = app.FileLaneGate(workers)

@@ -51,6 +51,68 @@ def make_timed_srt(cue_count: int, final_second: int, text: str = "Dialogue line
 
 
 class ExistingCleanupPipelineTests(unittest.TestCase):
+    def test_waiting_repairs_precede_translations_without_exceeding_shared_limit(self):
+        for limit in (1, 2, 4):
+            gate = app.SharedCapacityCoordinator(limit)
+            occupied = []
+            active = 0
+            maximum = 0
+            counter_lock = threading.Lock()
+            for _ in range(limit):
+                occupied.append(gate.acquire_translation())
+                active += 1
+                maximum = max(maximum, active)
+
+            repair_reserved = threading.Event()
+            repair_started = threading.Event()
+            translation_started = threading.Event()
+            release_repair = threading.Event()
+
+            def repair():
+                nonlocal active, maximum
+                repair_token = gate.reserve_repair()
+                repair_reserved.set()
+                self.assertTrue(gate.start_repair(repair_token))
+                with counter_lock:
+                    active += 1
+                    maximum = max(maximum, active)
+                repair_started.set()
+                release_repair.wait(1)
+                with counter_lock:
+                    active -= 1
+                gate.release(repair_token)
+
+            def translation():
+                nonlocal active, maximum
+                token = gate.acquire_translation()
+                with counter_lock:
+                    active += 1
+                    maximum = max(maximum, active)
+                translation_started.set()
+                with counter_lock:
+                    active -= 1
+                gate.release(token)
+
+            repair_thread = threading.Thread(target=repair)
+            repair_thread.start()
+            self.assertTrue(repair_reserved.wait(1))
+            translation_thread = threading.Thread(target=translation)
+            translation_thread.start()
+            with counter_lock:
+                active -= 1
+            gate.release(occupied.pop())
+            self.assertTrue(repair_started.wait(1))
+            self.assertFalse(translation_started.wait(0.05))
+            release_repair.set()
+            repair_thread.join(1)
+            self.assertTrue(translation_started.wait(1))
+            translation_thread.join(1)
+            for token in occupied:
+                with counter_lock:
+                    active -= 1
+                gate.release(token)
+            self.assertLessEqual(maximum, limit)
+
     def setUp(self):
         self._state_directory = tempfile.TemporaryDirectory()
         app._validation_state = StateStore(
