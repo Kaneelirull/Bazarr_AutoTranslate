@@ -732,7 +732,11 @@ def render_logs_page() -> str:
 <main class="dashboard-shell log-shell">
   <header class="topbar"><div><div class="eyebrow">Diagnostics</div>
   <h1>Service logs</h1><p class="header-meta">Sanitized, read-only operational output · New records use UTC timestamps</p></div>
-  <div class="header-actions"><a class="btn btn-secondary" href="/">Status</a></div></header>
+  <div class="header-actions">
+    <a class="btn btn-secondary" href="/">Status</a>
+    <button class="btn btn-secondary" id="theme-toggle" type="button" aria-label="Switch color theme">Theme</button>
+    <button class="btn btn-primary" id="refresh-button" type="button">Refresh now</button>
+  </div></header>
   <section class="panel">
     <form id="log-filters" class="log-filters">
       <label>Level <select name="level"><option value="">All</option><option>ERROR</option>

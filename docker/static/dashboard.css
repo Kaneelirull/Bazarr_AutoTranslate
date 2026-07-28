@@ -768,6 +768,65 @@ progress::-moz-progress-bar {
   color: var(--danger);
 }
 
+.retry-table .cell-media {
+  min-width: 260px;
+}
+
+.retry-table .cell-details {
+  width: 1%;
+}
+
+.retry-details {
+  position: relative;
+}
+
+.retry-details summary {
+  width: max-content;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.retry-details summary:focus-visible {
+  border-radius: var(--radius-sm);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.retry-details dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(130px, 1fr));
+  gap: var(--space-3);
+  min-width: min(520px, calc(100vw - 64px));
+  margin: var(--space-3) 0 0;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  background: var(--bg-overlay);
+  box-shadow: 0 8px 24px var(--shadow-panel);
+}
+
+.retry-details dl div {
+  min-width: 0;
+}
+
+.retry-details dt {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.retry-details dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
 .empty-state {
   margin: 0;
   padding: var(--space-5) var(--space-6) var(--space-6);
@@ -984,6 +1043,15 @@ progress::-moz-progress-bar {
     grid-column: 1 / -1;
   }
 
+  .retry-table td.cell-details {
+    grid-column: 1 / -1;
+  }
+
+  .retry-details dl {
+    grid-template-columns: 1fr 1fr;
+    min-width: 0;
+  }
+
   .rolling-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     padding-right: var(--space-4);
@@ -1019,6 +1087,10 @@ progress::-moz-progress-bar {
   }
 
   .rolling-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .retry-details dl {
     grid-template-columns: 1fr;
   }
 }
