@@ -96,7 +96,7 @@ docker run -d \
 | `LINGARR_URL` | Yes | — | Lingarr base URL, including scheme and port |
 | `LINGARR_API_KEY` | No | empty | Lingarr API key when authentication is enabled |
 | `LANGUAGES` | No | `en,et,sv` | Managed languages in source-priority order |
-| `PARALLEL_TRANSLATES` | No | `1` | Maximum verified active translations |
+| `PARALLEL_TRANSLATES` | No | `1` | Shared maximum for active full-file translations and cue repairs; repairs have admission priority |
 | `CHECK_INTERVAL` | No | `1200` | Seconds between wanted-queue cycles |
 | `CONNECT_TIMEOUT` | No | `10` | External API timeout in seconds |
 | `POLL_INTERVAL` | No | `20` | Lingarr job polling interval |
