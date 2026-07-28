@@ -440,10 +440,15 @@ _translation_capacity = TranslationCapacityGate(PARALLEL_TRANSLATES)
 
 
 class FileLaneGate:
-    """Prioritize long work while allowing its slot to stay productive."""
+    """Alternate short and long lanes while allowing idle long lanes to lend."""
 
     def __init__(self, workers: int):
         self.workers = max(1, workers)
+        # Lane numbers start at one: odd lanes handle short jobs and even lanes
+        # handle long jobs.  A lone worker remains a short lane, although long
+        # work may use it when no short job is waiting.
+        self.short_capacity = (self.workers + 1) // 2
+        self.long_capacity = self.workers // 2
         self._condition = threading.Condition()
         self._active_long = 0
         self._active_short = 0
@@ -489,7 +494,7 @@ class FileLaneGate:
                         lane = "long" if is_long else "short"
                     elif is_long:
                         available = (
-                            self._active_long == 0
+                            self._active_long < self.long_capacity
                             and bool(long_waiters)
                             and long_waiters[0][0] == token
                         )
@@ -498,13 +503,13 @@ class FileLaneGate:
                         preferred_short = (
                             bool(short_waiters) and short_waiters[0][0] == token
                         )
-                        if preferred_short and self._active_short < self.workers - 1:
+                        if preferred_short and self._active_short < self.short_capacity:
                             available = True
                             lane = "short"
                         else:
                             available = (
                                 preferred_short
-                                and self._active_long == 0
+                                and self._active_long < self.long_capacity
                                 and not long_waiters
                             )
                             lane = "short (borrowed)"
@@ -5384,7 +5389,11 @@ def main() -> int:
         f"cap {TRANSLATION_TIMEOUT_CAP}s, cold "
         f"{TRANSLATION_COLD_SECONDS_PER_CUE:g}s/cue"
     )
-    print(f"  Long-job threshold: {LONG_JOB_THRESHOLD}s (one dedicated file lane)")
+    print(
+        f"  Long-job threshold: {LONG_JOB_THRESHOLD}s "
+        f"({_file_lane_gate.short_capacity} short / "
+        f"{_file_lane_gate.long_capacity} long file lanes)"
+    )
     print(
         f"  Circuit breaker   : {CIRCUIT_FAILURE_THRESHOLD} failures / "
         f"{CIRCUIT_OPEN_SECONDS}s"

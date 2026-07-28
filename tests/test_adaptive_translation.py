@@ -21,13 +21,23 @@ from clean_et_subs import parse_srt_cues  # noqa: E402
 
 class AdaptiveTranslationTests(unittest.TestCase):
     def test_file_lanes_keep_one_long_and_remaining_short(self):
-        for workers in (2, 4):
+        expected_allocations = {
+            1: (1, 0),
+            2: (1, 1),
+            3: (2, 1),
+            4: (2, 2),
+        }
+        for workers, (short_capacity, long_capacity) in expected_allocations.items():
             gate = app.FileLaneGate(workers)
-            self.assertEqual(gate.acquire(True), "long")
-            for _ in range(workers - 1):
+            self.assertEqual(gate.short_capacity, short_capacity)
+            self.assertEqual(gate.long_capacity, long_capacity)
+            for _ in range(short_capacity):
                 self.assertEqual(gate.acquire(False), "short")
-            gate.release("long")
-            for _ in range(workers - 1):
+            for _ in range(long_capacity):
+                self.assertEqual(gate.acquire(True), "long")
+            for _ in range(long_capacity):
+                gate.release("long")
+            for _ in range(short_capacity):
                 gate.release("short")
 
     def test_single_worker_prioritizes_waiting_short_job(self):
@@ -110,12 +120,71 @@ class AdaptiveTranslationTests(unittest.TestCase):
 
     def test_four_workers_borrow_only_the_preferred_long_slot(self):
         gate = app.FileLaneGate(4)
-        for estimate in (100, 200, 300):
+        for estimate in (100, 200):
             self.assertEqual(gate.acquire(False, estimate), "short")
-        self.assertEqual(gate.acquire(False, 400), "short (borrowed)")
+        for estimate in (400, 300):
+            self.assertEqual(gate.acquire(False, estimate), "short (borrowed)")
+
+        admitted = []
+
+        def acquire_short():
+            lane = gate.acquire(False, 500)
+            admitted.append(lane)
+            gate.release(lane)
+
+        waiting = threading.Thread(target=acquire_short)
+        waiting.start()
+        time.sleep(0.05)
+        self.assertEqual(admitted, [])
         gate.release("short (borrowed)")
-        for _ in range(3):
+        waiting.join(1)
+        self.assertEqual(admitted, ["short (borrowed)"])
+        gate.release("short (borrowed)")
+        for _ in range(2):
             gate.release("short")
+
+    def test_four_workers_run_two_long_jobs_concurrently(self):
+        gate = app.FileLaneGate(4)
+        self.assertEqual(gate.acquire(True, 900), "long")
+        self.assertEqual(gate.acquire(True, 800), "long")
+        gate.release("long")
+        gate.release("long")
+
+    def test_four_workers_give_freed_long_lane_to_long_waiter(self):
+        gate = app.FileLaneGate(4)
+        self.assertEqual(gate.acquire(True, 1000), "long")
+        self.assertEqual(gate.acquire(True, 900), "long")
+        self.assertEqual(gate.acquire(False, 100), "short")
+        self.assertEqual(gate.acquire(False, 200), "short")
+        admitted = []
+        release_waiter = threading.Event()
+
+        def acquire_long():
+            lane = gate.acquire(True, 800)
+            admitted.append(("long", lane))
+            release_waiter.wait(1)
+            gate.release(lane)
+
+        def acquire_short():
+            lane = gate.acquire(False, 700)
+            admitted.append(("short", lane))
+            gate.release(lane)
+
+        long_thread = threading.Thread(target=acquire_long)
+        short_thread = threading.Thread(target=acquire_short)
+        long_thread.start()
+        short_thread.start()
+        time.sleep(0.05)
+        gate.release("long")
+        time.sleep(0.05)
+        self.assertEqual(admitted, [("long", "long")])
+        release_waiter.set()
+        gate.release("long")
+        gate.release("short")
+        gate.release("short")
+        long_thread.join(1)
+        short_thread.join(1)
+        self.assertEqual({name for name, _lane in admitted}, {"long", "short"})
 
     def test_final_circuit_check_blocks_job_that_was_allowed_before_lane_wait(self):
         with tempfile.TemporaryDirectory() as directory:
