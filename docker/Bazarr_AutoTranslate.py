@@ -251,6 +251,27 @@ VALIDATION_STATE_FILE = Path(STATE_DIR) / "validation_state.json"
 STATE_DB_FILE = Path(STATE_DIR) / "bazarr-autotranslate.sqlite3"
 LOG_DIR = Path(os.getenv("LOG_DIR", "/var/log/bazarr-autotranslate"))
 RETENTION_DAYS = max(1, int(os.getenv("RETENTION_DAYS", "30")))
+QUARANTINE_ARTIFACT_RETENTION_DAYS = max(
+    1, int(os.getenv("QUARANTINE_ARTIFACT_RETENTION_DAYS", str(RETENTION_DAYS)))
+)
+REGENERATION_INITIAL_DELAY_CYCLES = max(
+    1, int(os.getenv("REGENERATION_INITIAL_DELAY_CYCLES", "2"))
+)
+REGENERATION_MAX_ATTEMPTS = max(
+    1, int(os.getenv("REGENERATION_MAX_ATTEMPTS", "3"))
+)
+REGENERATION_BACKOFF_MULTIPLIER = max(
+    1.0, float(os.getenv("REGENERATION_BACKOFF_MULTIPLIER", "2.0"))
+)
+RETRY_BATCH_SIZE_PER_CYCLE = max(
+    1, int(os.getenv("RETRY_BATCH_SIZE_PER_CYCLE", "5"))
+)
+RETRY_MAX_PER_SERIES_PER_CYCLE = max(
+    1, int(os.getenv("RETRY_MAX_PER_SERIES_PER_CYCLE", "1"))
+)
+END_OF_CYCLE_REPAIR_RETRY_ENABLED = os.getenv(
+    "END_OF_CYCLE_REPAIR_RETRY_ENABLED", "true"
+).lower() in ("1", "true", "yes")
 RETENTION_CHECK_INTERVAL = max(300, int(os.getenv("RETENTION_CHECK_INTERVAL", "3600")))
 STATUS_ENABLED = os.getenv("STATUS_ENABLED", "true").lower() in ("1", "true", "yes")
 STATUS_BIND = os.getenv("STATUS_BIND", "0.0.0.0").strip() or "0.0.0.0"
@@ -341,6 +362,7 @@ _duration_cache_lock = threading.Lock()
 _pending_prune_videos: dict[str, str | None] = {}
 _pending_prune_lock = threading.Lock()
 _status_tracker: StatusTracker | None = None
+_completed_cycle = 0
 
 _episode_cache: dict[int, int] = {}
 _movie_cache: dict[int, int] = {}
@@ -749,6 +771,9 @@ def _refresh_status_diagnostics() -> None:
         _status_tracker.set_diagnostics(
             timing={"file": file_timing, "repair": repair_timing},
             circuits=_get_validation_state().circuit_breakers(),
+            retries=_get_validation_state().retry_plans(),
+            completed_cycle=_get_validation_state().completed_cycle(),
+            retry_max_attempts=REGENERATION_MAX_ATTEMPTS,
         )
     except (OSError, StateStoreError) as exc:
         print(f"{YELLOW}[STATUS] Could not refresh diagnostics: {exc}{RESET}")
@@ -807,6 +832,7 @@ def _status_finish_validation(
     action: str,
 ) -> None:
     if action in ("valid", "valid-warning", "formatted", "repaired"):
+        _resolve_retry_success(item_type, item_id, target_lang)
         _status_transition(
             item_type,
             item_id,
@@ -871,6 +897,47 @@ def _initialize_state_store() -> StateStore:
         )
         reconciliation = store.reconcile_pending_operations()
         _validation_state = store
+        retry_migration = {"migrated": 0, "unresolved": 0, "ignored": 0}
+        candidates = store.legacy_retry_candidates()
+        for candidate in candidates:
+            source_path = candidate.get("sourcePath")
+            if (
+                not source_path
+                or not os.path.exists(source_path)
+                or _file_hash_or_none(source_path) != candidate.get("sourceHash")
+            ):
+                retry_migration["unresolved"] += 1
+                continue
+            rules = set(candidate.get("rules") or [])
+            if rules & {"source_unreadable", "source_structure", "undersized_source"}:
+                retry_migration["ignored"] += 1
+                continue
+            series_key = (
+                f"path:{os.path.normcase(os.path.dirname(source_path))}"
+                if candidate["itemType"] == "episodes" else None
+            )
+            store.schedule_retry_plan(
+                item_type=candidate["itemType"],
+                item_id=candidate["itemId"],
+                target_language=candidate["targetLanguage"],
+                source_hash=candidate["sourceHash"],
+                source_path=source_path,
+                source_language=candidate.get("sourceLanguage"),
+                target_path=candidate.get("targetPath"),
+                series_key=series_key,
+                series_title=os.path.basename(os.path.dirname(source_path)),
+                media_title=os.path.basename(source_path),
+                failure_class="whole_file",
+                rules=rules,
+                state="regeneration_waiting",
+                failed_output_hash=candidate.get("targetHash"),
+                eligible_completed_cycle=(
+                    store.completed_cycle() + REGENERATION_INITIAL_DELAY_CYCLES
+                ),
+                reason="migrated legacy quarantine tombstone",
+            )
+            retry_migration["migrated"] += 1
+        store.mark_legacy_retry_migration_complete()
     imported = sum(migration[key] for key in ("submissions", "artifacts", "holds"))
     if imported or migration["skipped"]:
         print(
@@ -883,6 +950,15 @@ def _initialize_state_store() -> StateStore:
         print(
             f"[STATE] Reconciled {reconciliation['completed']} pending "
             f"operation(s); abandoned {reconciliation['abandoned']}"
+        )
+    if any(retry_migration.values()):
+        print(
+            f"[STATE] Quarantine retry migration: "
+            f"{retry_migration['migrated']} scheduled, "
+            f"{retry_migration['unresolved']} unresolved, "
+            f"{retry_migration['ignored']} ignored; admissions remain limited to "
+            f"{RETRY_BATCH_SIZE_PER_CYCLE}/cycle and "
+            f"{RETRY_MAX_PER_SERIES_PER_CYCLE}/series"
         )
     return store
 
@@ -3031,6 +3107,9 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
                 print(f"{YELLOW}[CIRCUIT] Could not record repair outcome: {exc}{RESET}")
 
     if result.action == "repaired":
+        _resolve_retry_success(
+            result.item_type, result.item_id, result.target_lang
+        )
         _status_transition(
             result.item_type,
             result.item_id,
@@ -3039,6 +3118,19 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
             repaired=True,
         )
     elif result.action in ("quarantined", "deleted"):
+        _schedule_validation_retry(
+            report=result.report,
+            action=result.action,
+            source_path=metadata.get("source_path") or "",
+            source_lang=metadata.get("source_lang") or "",
+            target_path=result.target_path,
+            target_lang=result.target_lang,
+            item_type=result.item_type,
+            item_id=result.item_id,
+            title=result.title,
+            series_key=metadata.get("series_key"),
+            series_title=metadata.get("series_title"),
+        )
         _status_transition(
             result.item_type,
             result.item_id,
@@ -3047,6 +3139,19 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
             reason=result.action,
         )
     elif result.action == "repair-deferred":
+        _schedule_validation_retry(
+            report=result.report,
+            action=result.action,
+            source_path=metadata.get("source_path") or "",
+            source_lang=metadata.get("source_lang") or "",
+            target_path=result.target_path,
+            target_lang=result.target_lang,
+            item_type=result.item_type,
+            item_id=result.item_id,
+            title=result.title,
+            series_key=metadata.get("series_key"),
+            series_title=metadata.get("series_title"),
+        )
         _status_transition(
             result.item_type,
             result.item_id,
@@ -3091,6 +3196,7 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             "item_id": job_kwargs.get("item_id"),
             "target_lang": job_kwargs.get("target_lang"),
             "source_lang": job_kwargs.get("source_lang"),
+            "source_path": job_kwargs.get("source_path"),
             "series_key": job_kwargs.get("series_key"),
             "series_title": job_kwargs.get("series_title"),
             "queued_monotonic": time.monotonic(),
@@ -3215,6 +3321,117 @@ def _shutdown_repair_executor() -> None:
         executor.shutdown(wait=True, cancel_futures=False)
 
 
+def _schedule_validation_retry(
+    *,
+    report,
+    action: str,
+    source_path: str,
+    source_lang: str,
+    target_path: str,
+    target_lang: str,
+    item_type: str | None,
+    item_id: int | None,
+    title: str,
+    series_key: str | None,
+    series_title: str | None,
+) -> dict | None:
+    if item_type not in ("episodes", "movies") or item_id is None:
+        return None
+    if report is None or not hasattr(report, "valid"):
+        return None
+    from clean_et_subs import classify_validation_failure
+
+    failure_class = classify_validation_failure(report)
+    source_hash = _file_hash_or_none(source_path)
+    if source_hash is None:
+        failure_class = "source_problem"
+        source_hash = f"unavailable:{item_type}:{item_id}"
+    target_hash = _file_hash_or_none(target_path)
+    try:
+        state_store = _get_validation_state()
+        existing_plan = (
+            state_store.active_retry_plan(item_type, item_id, target_lang)
+            if hasattr(state_store, "active_retry_plan") else None
+        )
+    except StateStoreError:
+        existing_plan = None
+    if failure_class == "cue_repairable" and action == "repair-deferred":
+        state = "repair_retry_queued"
+        eligible_cycle = _completed_cycle
+    elif failure_class == "source_problem":
+        state = "source_blocked"
+        eligible_cycle = _completed_cycle
+    elif action in ("quarantined", "deleted"):
+        attempts = int((existing_plan or {}).get("attemptCount", 0))
+        if attempts >= REGENERATION_MAX_ATTEMPTS:
+            state = "retry_exhausted"
+            eligible_cycle = _completed_cycle
+        else:
+            state = "regeneration_waiting"
+            delay = round(
+                REGENERATION_INITIAL_DELAY_CYCLES
+                * (REGENERATION_BACKOFF_MULTIPLIER ** attempts)
+            )
+            eligible_cycle = _completed_cycle + max(1, delay)
+        failure_class = "whole_file"
+    else:
+        return None
+    try:
+        if not hasattr(state_store, "schedule_retry_plan"):
+            return None
+        plan, repeated = state_store.schedule_retry_plan(
+            item_type=item_type,
+            item_id=item_id,
+            target_language=target_lang,
+            source_hash=source_hash,
+            source_path=source_path,
+            source_language=source_lang,
+            target_path=target_path,
+            series_key=series_key,
+            series_title=series_title,
+            media_title=title,
+            failure_class=failure_class,
+            rules=(issue.rule for issue in getattr(report, "issues", [])),
+            state=state,
+            failed_output_hash=target_hash,
+            eligible_completed_cycle=eligible_cycle,
+            reason=getattr(report, "summary", lambda: action)(),
+        )
+        print(
+            f"[RETRY] {'Observed unchanged' if repeated else 'Scheduled'} "
+            f"{title} '{target_lang}': state={plan['state']} "
+            f"eligible_cycle={plan['eligibleCompletedCycle']} "
+            f"attempt={plan['attemptCount']}/{REGENERATION_MAX_ATTEMPTS}"
+        )
+        _refresh_status_diagnostics()
+        return plan
+    except StateStoreError as exc:
+        print(f"{YELLOW}[RETRY] Could not persist retry plan: {exc}{RESET}")
+        return None
+
+
+def _resolve_retry_success(
+    item_type: str | None, item_id: int | None, target_lang: str
+) -> None:
+    if item_type not in ("episodes", "movies") or item_id is None:
+        return
+    try:
+        state = _get_validation_state()
+        if not hasattr(state, "resolve_retry_plans"):
+            return
+        resolved = state.resolve_retry_plans(
+            item_type, item_id, target_lang
+        )
+        if resolved:
+            print(
+                f"[RETRY] Accepted retry for {item_type}:{item_id} "
+                f"'{target_lang}'; resolved {resolved} plan(s)"
+            )
+            _refresh_status_diagnostics()
+    except StateStoreError as exc:
+        print(f"{YELLOW}[RETRY] Could not resolve retry plan: {exc}{RESET}")
+
+
 def _validate_translated_file(
     source_path: str,
     target_path: str,
@@ -3270,6 +3487,19 @@ def _validate_translated_file(
                 f"'{target_lang}'; retry suppressed for the remainder of "
                 "this cycle"
             )
+        _schedule_validation_retry(
+            report=report,
+            action=action,
+            source_path=source_path,
+            source_lang=source_lang,
+            target_path=target_path,
+            target_lang=target_lang,
+            item_type=item_type,
+            item_id=item_id,
+            title=label,
+            series_key=series_key,
+            series_title=series_title,
+        )
         return action, report
 
     from clean_et_subs import (
@@ -3594,7 +3824,24 @@ def _validate_translated_file(
                 os.path.normcase(os.path.abspath(target_path)), source_hash, expected_target_hash,
                 target_lang, tuple(report.repairable_cue_indexes),
             )
-            return _queue_repair(repair_key, job_kwargs, report, label, target_lang), report
+            queued_action = _queue_repair(
+                repair_key, job_kwargs, report, label, target_lang
+            )
+            if queued_action == "repair-deferred":
+                _schedule_validation_retry(
+                    report=report,
+                    action=queued_action,
+                    source_path=source_path,
+                    source_lang=source_lang,
+                    target_path=target_path,
+                    target_lang=target_lang,
+                    item_type=item_type,
+                    item_id=item_id,
+                    title=label,
+                    series_key=series_key,
+                    series_title=series_title,
+                )
+            return queued_action, report
         result = _perform_repair(**job_kwargs)
         return result.action, result.report
 
@@ -3616,6 +3863,19 @@ def _validate_translated_file(
             f"[CLEANUP] Cleared submission cooldown for {label} '{target_lang}'; "
             "retry suppressed for the remainder of this cycle"
         )
+    _schedule_validation_retry(
+        report=report,
+        action=action,
+        source_path=source_path,
+        source_lang=source_lang,
+        target_path=target_path,
+        target_lang=target_lang,
+        item_type=item_type,
+        item_id=item_id,
+        title=label,
+        series_key=series_key,
+        series_title=series_title,
+    )
     return action, report
 
 # ---------------------------------------------------------------------------
@@ -3737,8 +3997,14 @@ def _source_is_usable(
     return False
 
 
-def process_item(item: dict, item_type: str, id_field: str,
-                 stats: dict, stats_lock: threading.Lock) -> None:
+def process_item(
+    item: dict,
+    item_type: str,
+    id_field: str,
+    stats: dict,
+    stats_lock: threading.Lock,
+    retry_plan: dict | None = None,
+) -> None:
     if shutdown_requested:
         return
 
@@ -3888,6 +4154,65 @@ def process_item(item: dict, item_type: str, id_field: str,
                 reason="target path unavailable",
             )
             continue
+        if retry_plan is None:
+            try:
+                scheduled = _get_validation_state().active_retry_plan(
+                    item_type, item_id, target_lang
+                )
+            except StateStoreError as exc:
+                print(f"{YELLOW}[RETRY] Could not check retry plan: {exc}{RESET}")
+                scheduled = None
+            if isinstance(scheduled, dict):
+                current_source_hash = _file_hash_or_none(source_path)
+                if (
+                    current_source_hash
+                    and current_source_hash != scheduled.get("sourceHash")
+                ):
+                    try:
+                        scheduled, _ = _get_validation_state().schedule_retry_plan(
+                            item_type=item_type,
+                            item_id=item_id,
+                            target_language=target_lang,
+                            source_hash=current_source_hash,
+                            source_path=source_path,
+                            source_language=source_lang,
+                            target_path=target_path,
+                            series_key=series_key,
+                            series_title=series_title,
+                            media_title=title,
+                            failure_class=scheduled.get("failureClass") or "whole_file",
+                            rules=scheduled.get("rules") or [],
+                            state="regeneration_waiting",
+                            eligible_completed_cycle=(
+                                _completed_cycle
+                                + REGENERATION_INITIAL_DELAY_CYCLES
+                            ),
+                            reason="source changed; retry plan reset",
+                        )
+                        print(
+                            f"[RETRY] Source changed for {title} '{target_lang}'; "
+                            "superseded the old plan and reset attempts"
+                        )
+                    except StateStoreError as exc:
+                        print(
+                            f"{YELLOW}[RETRY] Could not reset changed-source "
+                            f"plan: {exc}{RESET}"
+                        )
+                with stats_lock:
+                    stats["deferred"] = stats.get("deferred", 0) + 1
+                print(
+                    f"[RETRY] Deferred normal queue for {title} '{target_lang}': "
+                    f"state={scheduled['state']} "
+                    f"eligible_cycle={scheduled['eligibleCompletedCycle']}"
+                )
+                _status_transition(
+                    item_type,
+                    item_id,
+                    target_lang,
+                    "deferred",
+                    reason=f"scheduled retry {scheduled['state']}",
+                )
+                continue
         target_suffix = _target_suffix(target_path, target_lang)
         target_variant = target_suffix[1] if target_suffix is not None else ""
         print(
@@ -4567,6 +4892,17 @@ def process_item(item: dict, item_type: str, id_field: str,
             _shared_capacity.release(shared_token)
             continue
 
+        if retry_plan is not None:
+            try:
+                retry_plan = _get_validation_state().update_retry_plan(
+                    retry_plan["id"],
+                    state="retry_in_progress",
+                    completed_cycle=_completed_cycle,
+                    increment_attempt=True,
+                    reason="fresh Lingarr output received",
+                )
+            except StateStoreError as exc:
+                print(f"{YELLOW}[RETRY] Could not record retry attempt: {exc}{RESET}")
         _status_transition(item_type, item_id, target_lang, "validating")
         validation_action, validation_report = _validate_translated_file(
             source_path, actual_target_path, source_lang, target_lang, item_id, title=title,
@@ -5342,7 +5678,9 @@ def run_retention_housekeeping() -> dict:
     from clean_et_subs import purge_old_files
 
     current_log = [_app_log_sink.current_path] if _app_log_sink.current_path is not None else []
-    quarantine_removed = purge_old_files(CLEANUP_QUARANTINE_DIR, RETENTION_DAYS)
+    quarantine_removed = purge_old_files(
+        CLEANUP_QUARANTINE_DIR, QUARANTINE_ARTIFACT_RETENTION_DAYS
+    )
     logs_removed = purge_old_files(LOG_DIR, RETENTION_DAYS, exclude=current_log)
     try:
         state_removed = _get_validation_state().prune_older_than(RETENTION_DAYS)
@@ -5392,7 +5730,135 @@ def _drain_lingarr_queue() -> bool:
     return False
 
 
-def run_cycle(cycle_num: int) -> None:
+def _run_end_cycle_repair_retries(stats: dict) -> None:
+    if not END_OF_CYCLE_REPAIR_RETRY_ENABLED or shutdown_requested:
+        return
+    try:
+        plans = [
+            plan for plan in _get_validation_state().retry_plans(include_terminal=False)
+            if plan["state"] == "repair_retry_queued"
+            and not plan["endCycleRepairAttempted"]
+            and plan["eligibleCompletedCycle"] <= _completed_cycle
+        ]
+    except StateStoreError as exc:
+        print(f"{YELLOW}[RETRY] Could not load repair retries: {exc}{RESET}")
+        stats["degraded"] = True
+        return
+    for plan in plans:
+        if shutdown_requested:
+            break
+        source_path = plan.get("sourcePath")
+        target_path = plan.get("targetPath")
+        try:
+            _get_validation_state().update_retry_plan(
+                plan["id"],
+                state="retry_in_progress",
+                completed_cycle=_completed_cycle,
+                end_cycle_repair_attempted=True,
+                reason="end-of-cycle repair retry",
+            )
+            if not source_path or not target_path or not os.path.exists(target_path):
+                raise OSError("repair source or target is no longer available")
+            action, report = _validate_translated_file(
+                source_path,
+                target_path,
+                plan.get("sourceLanguage") or "",
+                plan["targetLanguage"],
+                plan["itemId"],
+                title=plan.get("mediaTitle") or "",
+                defer_repair=False,
+                item_type=plan["itemType"],
+                origin="lingarr",
+                provenance_source_hash=plan["sourceHash"],
+                series_key=plan.get("seriesKey"),
+                series_title=plan.get("seriesTitle"),
+            )
+            if action in ("valid", "valid-warning", "formatted", "repaired"):
+                _resolve_retry_success(
+                    plan["itemType"], plan["itemId"], plan["targetLanguage"]
+                )
+                stats["retry_repairs_accepted"] = (
+                    stats.get("retry_repairs_accepted", 0) + 1
+                )
+            elif action == "repair-deferred":
+                _get_validation_state().update_retry_plan(
+                    plan["id"],
+                    state="retry_exhausted",
+                    final_outcome="manual_review",
+                    reason="end-of-cycle repair remained deferred",
+                )
+        except (OSError, StateStoreError) as exc:
+            print(f"{YELLOW}[RETRY] Repair retry deferred: {exc}{RESET}")
+            try:
+                _get_validation_state().update_retry_plan(
+                    plan["id"],
+                    state="retry_exhausted",
+                    final_outcome="manual_review",
+                    reason=str(exc),
+                )
+            except StateStoreError:
+                stats["degraded"] = True
+
+
+def _run_regeneration_retries(stats: dict) -> None:
+    if shutdown_requested:
+        return
+    try:
+        plans = _get_validation_state().claim_due_retry_plans(
+            _completed_cycle,
+            limit=RETRY_BATCH_SIZE_PER_CYCLE,
+            per_series_limit=RETRY_MAX_PER_SERIES_PER_CYCLE,
+        )
+    except StateStoreError as exc:
+        print(f"{YELLOW}[RETRY] Could not claim regeneration retries: {exc}{RESET}")
+        stats["degraded"] = True
+        return
+    stats["regeneration_queued"] = len(plans)
+    retry_lock = threading.Lock()
+    for plan in plans:
+        if shutdown_requested:
+            break
+        item_type = plan["itemType"]
+        id_field = "sonarrEpisodeId" if item_type == "episodes" else "radarrId"
+        item = {
+            id_field: plan["itemId"],
+            "title": plan.get("mediaTitle") or "Scheduled retry",
+            "seriesTitle": plan.get("seriesTitle") or plan.get("mediaTitle") or "Scheduled retry",
+            "missing_subtitles": [{"code2": plan["targetLanguage"]}],
+        }
+        if plan.get("seriesKey", "").startswith("sonarr:"):
+            try:
+                item["sonarrSeriesId"] = int(plan["seriesKey"].split(":", 1)[1])
+            except (TypeError, ValueError):
+                pass
+        print(
+            f"[RETRY] Admitting regeneration plan {plan['id']} "
+            f"for {item_type}:{plan['itemId']} '{plan['targetLanguage']}' "
+            f"attempt={plan['attemptCount'] + 1}/{REGENERATION_MAX_ATTEMPTS}"
+        )
+        process_item(
+            item, item_type, id_field, stats, retry_lock, retry_plan=plan
+        )
+        try:
+            current = next(
+                (
+                    entry for entry in _get_validation_state().retry_plans()
+                    if entry["id"] == plan["id"]
+                ),
+                None,
+            )
+            if current and current["state"] == "regeneration_queued":
+                _get_validation_state().update_retry_plan(
+                    plan["id"],
+                    state="regeneration_waiting",
+                    reason="retry admission deferred before Lingarr output",
+                )
+        except StateStoreError as exc:
+            print(f"{YELLOW}[RETRY] Could not release deferred plan: {exc}{RESET}")
+            stats["degraded"] = True
+
+
+def run_cycle(cycle_num: int) -> bool:
     print(f"\n{BOLD}{CYAN}===== Cycle #{cycle_num} ====={RESET}")
     _status_set_phase("translating")
 
@@ -5481,6 +5947,7 @@ def run_cycle(cycle_num: int) -> None:
                     future.result()
                 except Exception as e:
                     print(f"{RED}[ERROR] Worker exception: {e}{RESET}")
+                    stats["degraded"] = True
                     item, item_type, id_field = futures[future]
                     item_id = item.get(id_field)
                     missing = {
@@ -5503,6 +5970,9 @@ def run_cycle(cycle_num: int) -> None:
     if pending_count:
         print(f"[REPAIR] Waiting for {pending_count} queued repair job(s) before Bazarr sync")
         repair_results = _drain_pending_repairs(stats)
+
+    _run_end_cycle_repair_retries(stats)
+    _run_regeneration_retries(stats)
 
     pending_prune = _take_pending_prune_videos()
     if pending_prune:
@@ -5605,16 +6075,24 @@ def run_cycle(cycle_num: int) -> None:
             for result in still_missing:
                 print(f"{YELLOW}[WARNING] Bazarr still does not list repaired subtitle for {result.title} '{result.target_lang}'{RESET}")
 
-    _drain_lingarr_queue()
+    queue_drained = _drain_lingarr_queue()
+    if not queue_drained:
+        stats["degraded"] = True
     _status_finish_cycle(stats)
+    return bool(
+        not shutdown_requested
+        and not stats.get("degraded")
+        and not stats.get("api_errors")
+    )
 
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    global _status_tracker
+    global _status_tracker, _completed_cycle
     state_store = _initialize_state_store()
+    _completed_cycle = state_store.completed_cycle()
     status_server = None
     if STATUS_ENABLED:
         try:
@@ -5651,7 +6129,11 @@ def main() -> int:
     print(f"  Cleanup roots     : {', '.join(str(root) for root in CLEANUP_ROOTS)}")
     print(f"  Cleanup action    : {CLEANUP_ACTION}{' (scan dry-run)' if CLEANUP_SCAN_DRY_RUN else ''}")
     print(f"  Source-less lines : {CLEANUP_SOURCELESS_LINE_ONLY_ACTION}")
-    print("  Quarantine retry  : suppressed for current cycle only")
+    print(
+        f"  Quarantine retry  : {REGENERATION_MAX_ATTEMPTS} attempts after "
+        f"{REGENERATION_INITIAL_DELAY_CYCLES} completed cycle(s), "
+        f"batch {RETRY_BATCH_SIZE_PER_CYCLE}"
+    )
     if _LEGACY_QUARANTINE_HOLD_DAYS is not None:
         print(
             f"{YELLOW}[WARNING] CLEANUP_QUARANTINE_HOLD_DAYS is deprecated "
@@ -5670,7 +6152,11 @@ def main() -> int:
           f"{CLEANUP_MIN_TEXT_CHARS_PER_MINUTE:g} chars/min, "
           f"{CLEANUP_MIN_BYTES_PER_MINUTE:g} bytes/min, "
           f"{CLEANUP_MIN_TIMELINE_COVERAGE:.0%} timeline")
-    print(f"  Retention         : {RETENTION_DAYS} days (checked every {RETENTION_CHECK_INTERVAL}s)")
+    print(
+        f"  Retention         : state/logs {RETENTION_DAYS} days; quarantine "
+        f"{QUARANTINE_ARTIFACT_RETENTION_DAYS} days "
+        f"(checked every {RETENTION_CHECK_INTERVAL}s)"
+    )
     print(f"  Status dashboard  : {'ON' if STATUS_ENABLED else 'off'}"
           + (f" on {STATUS_BIND}:{STATUS_PORT}" if STATUS_ENABLED else ""))
     print(f"  Status retention  : {STATUS_HISTORY_RETENTION_DAYS} days")
@@ -5720,7 +6206,7 @@ def main() -> int:
         trigger_bazarr_sync(True, True)
         wait_for_bazarr_sync(True, True, SYNC_TIMEOUT)
 
-    cycle = 1
+    cycle = _completed_cycle + 1
     _cycle_suppressions.begin_cycle(str(cycle))
     last_cleanup_scan = 0.0
     if not shutdown_requested and CLEANUP_SCAN_EXISTING:
@@ -5742,7 +6228,20 @@ def main() -> int:
             _status_set_phase("cleanup")
             _run_existing_cleanup_scan_safely()
             last_cleanup_scan = time.monotonic()
-        run_cycle(cycle)
+        healthy = run_cycle(cycle)
+        if healthy:
+            try:
+                _completed_cycle = state_store.advance_completed_cycle()
+                print(f"[CYCLE] Persisted completed cycle {_completed_cycle}")
+            except StateStoreError as exc:
+                print(f"{YELLOW}[CYCLE] Could not persist completion: {exc}{RESET}")
+        else:
+            print(
+                f"{YELLOW}[CYCLE] Cycle #{cycle} was degraded or interrupted; "
+                "completed-cycle counter was not advanced"
+                f"{RESET}"
+            )
+        _refresh_status_diagnostics()
         cycle += 1
         if shutdown_requested:
             break

@@ -157,6 +157,24 @@ REPAIRABLE_CUE_RULES = {
     "excessive_lines",
 }
 
+SOURCE_FAILURE_RULES = {
+    "source_unreadable",
+    "source_structure",
+    "undersized_source",
+}
+
+
+def classify_validation_failure(report: "ValidationReport") -> str:
+    """Return the scheduler-safe retry class for a validation report."""
+    if report.valid:
+        return "valid"
+    rules = {issue.rule for issue in report.issues}
+    if rules and rules <= REPAIRABLE_CUE_RULES and report.repairable_cue_indexes:
+        return "cue_repairable"
+    if rules & SOURCE_FAILURE_RULES:
+        return "source_problem"
+    return "whole_file"
+
 VALIDATOR_VERSION = "source-aware-v4-completeness-provenance"
 
 

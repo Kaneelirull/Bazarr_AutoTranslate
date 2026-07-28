@@ -592,6 +592,9 @@ class StatusTracker:
             "recentOutcomes": recent,
             "timing": self._service.get("timing", {}),
             "circuits": self._service.get("circuits", []),
+            "retryPlans": self._service.get("retryPlans", []),
+            "completedCycle": self._service.get("completedCycle", 0),
+            "retryMaxAttempts": self._service.get("retryMaxAttempts", 3),
             "history": {
                 label: self._window_counts_locked("job", seconds)
                 for label, seconds in HISTORY_WINDOWS.items()
@@ -605,10 +608,39 @@ class StatusTracker:
             },
         }
 
-    def set_diagnostics(self, *, timing: dict, circuits: list[dict]) -> None:
+    def set_diagnostics(
+        self,
+        *,
+        timing: dict,
+        circuits: list[dict],
+        retries: list[dict] | None = None,
+        completed_cycle: int | None = None,
+        retry_max_attempts: int | None = None,
+    ) -> None:
         with self._lock:
             self._service["timing"] = timing
             self._service["circuits"] = circuits
+            if retries is not None:
+                safe_retries = []
+                for plan in retries:
+                    safe_retries.append({
+                        key: plan.get(key)
+                        for key in (
+                            "id", "itemType", "itemId", "targetLanguage",
+                            "seriesTitle", "mediaTitle", "failureClass", "rules",
+                            "state", "attemptCount", "eligibleCompletedCycle",
+                            "lastFailureAt", "lastReason", "finalOutcome",
+                        )
+                    })
+                self._service["retryPlans"] = safe_retries
+            if completed_cycle is not None:
+                self._service["completedCycle"] = max(
+                    0, int(completed_cycle)
+                )
+            if retry_max_attempts is not None:
+                self._service["retryMaxAttempts"] = max(
+                    1, int(retry_max_attempts)
+                )
             self._write_snapshot_locked()
 
     def _write_snapshot_locked(self) -> None:

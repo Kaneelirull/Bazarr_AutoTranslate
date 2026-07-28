@@ -17,6 +17,108 @@ from state_store import StateStore, StateStoreError  # noqa: E402
 
 
 class StateStoreTests(unittest.TestCase):
+    def test_retry_plan_deduplicates_hash_and_survives_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            store = StateStore(database)
+            first, repeated = store.schedule_retry_plan(
+                item_type="episodes",
+                item_id=42,
+                target_language="et",
+                source_hash="source-a",
+                failure_class="whole_file",
+                rules=["target_structure"],
+                state="regeneration_waiting",
+                failed_output_hash="bad-a",
+                eligible_completed_cycle=2,
+            )
+            second, repeated_again = store.schedule_retry_plan(
+                item_type="episodes",
+                item_id=42,
+                target_language="et",
+                source_hash="source-a",
+                failure_class="whole_file",
+                rules=["target_structure"],
+                state="regeneration_waiting",
+                failed_output_hash="bad-a",
+                eligible_completed_cycle=99,
+            )
+            self.assertFalse(repeated)
+            self.assertTrue(repeated_again)
+            self.assertEqual(first["id"], second["id"])
+            self.assertEqual(second["eligibleCompletedCycle"], 2)
+            store.close()
+
+            reopened = StateStore(database)
+            self.assertEqual(
+                reopened.active_retry_plan("episodes", 42, "et")["id"],
+                first["id"],
+            )
+            reopened.close()
+
+    def test_retry_claims_are_batched_and_limited_per_series(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            for item_id, series in ((1, "top-gear"), (2, "top-gear"), (3, "other")):
+                store.schedule_retry_plan(
+                    item_type="episodes",
+                    item_id=item_id,
+                    target_language="et",
+                    source_hash=f"source-{item_id}",
+                    failure_class="whole_file",
+                    rules=["target_structure"],
+                    state="regeneration_waiting",
+                    series_key=series,
+                    failed_output_hash=f"bad-{item_id}",
+                    eligible_completed_cycle=2,
+                    now=float(item_id),
+                )
+            self.assertEqual(store.claim_due_retry_plans(1, limit=5), [])
+            claimed = store.claim_due_retry_plans(
+                2, limit=5, per_series_limit=1
+            )
+            self.assertEqual([plan["itemId"] for plan in claimed], [1, 3])
+            store.close()
+
+    def test_source_change_supersedes_active_retry_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            old, _ = store.schedule_retry_plan(
+                item_type="movies",
+                item_id=7,
+                target_language="sv",
+                source_hash="old",
+                failure_class="whole_file",
+                rules=["cue_count_mismatch"],
+                state="regeneration_waiting",
+                eligible_completed_cycle=2,
+            )
+            new, _ = store.schedule_retry_plan(
+                item_type="movies",
+                item_id=7,
+                target_language="sv",
+                source_hash="new",
+                failure_class="whole_file",
+                rules=["cue_count_mismatch"],
+                state="regeneration_waiting",
+                eligible_completed_cycle=2,
+            )
+            plans = {plan["id"]: plan for plan in store.retry_plans()}
+            self.assertEqual(plans[old["id"]]["state"], "superseded")
+            self.assertEqual(plans[new["id"]]["state"], "regeneration_waiting")
+            store.close()
+
+    def test_completed_cycle_counter_is_durable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            store = StateStore(database)
+            self.assertEqual(store.completed_cycle(), 0)
+            self.assertEqual(store.advance_completed_cycle(), 1)
+            store.close()
+            reopened = StateStore(database)
+            self.assertEqual(reopened.completed_cycle(), 1)
+            reopened.close()
+
     def make_store(self, root: Path, **kwargs) -> StateStore:
         return StateStore(
             root / "bazarr-autotranslate.sqlite3",

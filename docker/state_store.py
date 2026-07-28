@@ -12,7 +12,14 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+ACTIVE_RETRY_STATES = {
+    "repair_retry_queued",
+    "regeneration_waiting",
+    "regeneration_queued",
+    "retry_in_progress",
+}
 
 
 class StateStoreError(RuntimeError):
@@ -276,6 +283,41 @@ class StateStore:
                     last_reason TEXT,
                     updated_at REAL NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS retry_plans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_type TEXT NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    target_language TEXT NOT NULL,
+                    source_hash TEXT NOT NULL,
+                    source_path TEXT,
+                    source_language TEXT,
+                    target_path TEXT,
+                    series_key TEXT,
+                    series_title TEXT,
+                    media_title TEXT,
+                    failure_class TEXT NOT NULL,
+                    rules_json TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    first_failure_at REAL NOT NULL,
+                    last_failure_at REAL NOT NULL,
+                    failed_output_hash TEXT,
+                    eligible_completed_cycle INTEGER NOT NULL,
+                    last_attempt_cycle INTEGER,
+                    end_cycle_repair_attempted INTEGER NOT NULL DEFAULT 0,
+                    final_outcome TEXT,
+                    artifact_path TEXT,
+                    report_path TEXT,
+                    last_reason TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(item_type, item_id, target_language, source_hash)
+                );
+                CREATE INDEX IF NOT EXISTS idx_retry_plans_due
+                    ON retry_plans(state, eligible_completed_cycle, first_failure_at);
+                CREATE INDEX IF NOT EXISTS idx_retry_plans_identity
+                    ON retry_plans(item_type, item_id, target_language, updated_at DESC);
                 """
             )
             quarantine_columns = {
@@ -288,7 +330,385 @@ class StateStore:
                 self._connection.execute(
                     "ALTER TABLE quarantine_holds ADD COLUMN resolved_at TEXT"
                 )
+            retry_columns = {
+                row["name"]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(retry_plans)"
+                ).fetchall()
+            }
+            if "source_language" not in retry_columns:
+                self._connection.execute(
+                    "ALTER TABLE retry_plans ADD COLUMN source_language TEXT"
+                )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def completed_cycle(self) -> int:
+        value = self._metadata("completed_cycle")
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def advance_completed_cycle(self) -> int:
+        with self._transaction() as db:
+            row = db.execute(
+                "SELECT value FROM state_metadata WHERE key = 'completed_cycle'"
+            ).fetchone()
+            try:
+                current = max(0, int(row["value"])) if row else 0
+            except (TypeError, ValueError):
+                current = 0
+            completed = current + 1
+            db.execute(
+                """
+                INSERT INTO state_metadata(key, value) VALUES('completed_cycle', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (str(completed),),
+            )
+            return completed
+
+    @staticmethod
+    def _retry_plan_dict(row: sqlite3.Row | None) -> dict | None:
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "itemType": row["item_type"],
+            "itemId": int(row["item_id"]),
+            "targetLanguage": row["target_language"],
+            "sourceHash": row["source_hash"],
+            "sourcePath": row["source_path"],
+            "sourceLanguage": row["source_language"],
+            "targetPath": row["target_path"],
+            "seriesKey": row["series_key"],
+            "seriesTitle": row["series_title"],
+            "mediaTitle": row["media_title"],
+            "failureClass": row["failure_class"],
+            "rules": json.loads(row["rules_json"]),
+            "state": row["state"],
+            "attemptCount": int(row["attempt_count"]),
+            "firstFailureAt": float(row["first_failure_at"]),
+            "lastFailureAt": float(row["last_failure_at"]),
+            "failedOutputHash": row["failed_output_hash"],
+            "eligibleCompletedCycle": int(row["eligible_completed_cycle"]),
+            "lastAttemptCycle": row["last_attempt_cycle"],
+            "endCycleRepairAttempted": bool(row["end_cycle_repair_attempted"]),
+            "finalOutcome": row["final_outcome"],
+            "artifactPath": row["artifact_path"],
+            "reportPath": row["report_path"],
+            "lastReason": row["last_reason"],
+            "createdAt": float(row["created_at"]),
+            "updatedAt": float(row["updated_at"]),
+        }
+
+    def schedule_retry_plan(
+        self,
+        *,
+        item_type: str,
+        item_id: int,
+        target_language: str,
+        source_hash: str,
+        failure_class: str,
+        rules: Iterable[str],
+        eligible_completed_cycle: int,
+        state: str,
+        failed_output_hash: str | None = None,
+        source_path: str | Path | None = None,
+        source_language: str | None = None,
+        target_path: str | Path | None = None,
+        series_key: str | None = None,
+        series_title: str | None = None,
+        media_title: str | None = None,
+        artifact_path: str | Path | None = None,
+        report_path: str | Path | None = None,
+        reason: str | None = None,
+        now: float | None = None,
+    ) -> tuple[dict, bool]:
+        """Create/update a retry plan and return (plan, repeated_same_output)."""
+        timestamp = time.time() if now is None else float(now)
+        identity = (str(item_type), int(item_id), str(target_language).lower())
+        source_hash = str(source_hash or "")
+        if not source_hash:
+            raise StateStoreError("retry plans require a source hash")
+        rule_values = sorted({str(rule) for rule in rules if rule})
+        with self._transaction() as db:
+            db.execute(
+                """
+                UPDATE retry_plans
+                SET state = 'superseded', final_outcome = 'source_changed',
+                    updated_at = ?
+                WHERE item_type = ? AND item_id = ? AND target_language = ?
+                  AND source_hash <> ?
+                  AND state IN (
+                    'repair_retry_queued', 'regeneration_waiting',
+                    'regeneration_queued', 'retry_in_progress'
+                  )
+                """,
+                (timestamp, *identity, source_hash),
+            )
+            previous = db.execute(
+                """
+                SELECT * FROM retry_plans
+                WHERE item_type = ? AND item_id = ? AND target_language = ?
+                  AND source_hash = ?
+                """,
+                (*identity, source_hash),
+            ).fetchone()
+            repeated = bool(
+                previous
+                and failed_output_hash
+                and previous["failed_output_hash"] == failed_output_hash
+            )
+            if previous:
+                db.execute(
+                    """
+                    UPDATE retry_plans SET
+                        source_path = COALESCE(?, source_path),
+                        source_language = COALESCE(?, source_language),
+                        target_path = COALESCE(?, target_path),
+                        series_key = COALESCE(?, series_key),
+                        series_title = COALESCE(?, series_title),
+                        media_title = COALESCE(?, media_title),
+                        failure_class = ?, rules_json = ?,
+                        state = CASE WHEN ? THEN state ELSE ? END,
+                        last_failure_at = ?,
+                        failed_output_hash = COALESCE(?, failed_output_hash),
+                        eligible_completed_cycle =
+                            CASE WHEN ? THEN eligible_completed_cycle ELSE ? END,
+                        artifact_path = COALESCE(?, artifact_path),
+                        report_path = COALESCE(?, report_path),
+                        last_reason = COALESCE(?, last_reason),
+                        final_outcome = NULL, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        _path_key(source_path), source_language, _path_key(target_path),
+                        series_key, series_title, media_title,
+                        failure_class, json.dumps(rule_values), repeated, state,
+                        timestamp, failed_output_hash, repeated,
+                        max(0, int(eligible_completed_cycle)),
+                        _path_key(artifact_path), _path_key(report_path),
+                        reason, timestamp, previous["id"],
+                    ),
+                )
+                plan_id = int(previous["id"])
+            else:
+                cursor = db.execute(
+                    """
+                    INSERT INTO retry_plans(
+                        item_type, item_id, target_language, source_hash,
+                        source_path, source_language, target_path, series_key, series_title,
+                        media_title, failure_class, rules_json, state,
+                        first_failure_at, last_failure_at, failed_output_hash,
+                        eligible_completed_cycle, artifact_path, report_path,
+                        last_reason, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        *identity, source_hash, _path_key(source_path),
+                        source_language, _path_key(target_path), series_key, series_title,
+                        media_title, failure_class, json.dumps(rule_values), state,
+                        timestamp, timestamp, failed_output_hash,
+                        max(0, int(eligible_completed_cycle)),
+                        _path_key(artifact_path), _path_key(report_path), reason,
+                        timestamp, timestamp,
+                    ),
+                )
+                plan_id = int(cursor.lastrowid)
+            row = db.execute(
+                "SELECT * FROM retry_plans WHERE id = ?", (plan_id,)
+            ).fetchone()
+        return self._retry_plan_dict(row), repeated
+
+    def claim_due_retry_plans(
+        self,
+        completed_cycle: int,
+        *,
+        limit: int,
+        per_series_limit: int = 1,
+    ) -> list[dict]:
+        selected: list[sqlite3.Row] = []
+        series_counts: dict[str, int] = {}
+        with self._transaction() as db:
+            rows = db.execute(
+                """
+                SELECT * FROM retry_plans
+                WHERE state = 'regeneration_waiting'
+                  AND eligible_completed_cycle <= ?
+                ORDER BY eligible_completed_cycle, first_failure_at,
+                         attempt_count, item_type, item_id, target_language
+                """,
+                (max(0, int(completed_cycle)),),
+            ).fetchall()
+            for row in rows:
+                series_bucket = row["series_key"] or f"{row['item_type']}:{row['item_id']}"
+                if series_counts.get(series_bucket, 0) >= max(1, per_series_limit):
+                    continue
+                selected.append(row)
+                series_counts[series_bucket] = series_counts.get(series_bucket, 0) + 1
+                if len(selected) >= max(1, limit):
+                    break
+            for row in selected:
+                db.execute(
+                    """
+                    UPDATE retry_plans
+                    SET state = 'regeneration_queued', updated_at = ?
+                    WHERE id = ? AND state = 'regeneration_waiting'
+                    """,
+                    (time.time(), row["id"]),
+                )
+            claimed = [
+                db.execute(
+                    "SELECT * FROM retry_plans WHERE id = ?", (row["id"],)
+                ).fetchone()
+                for row in selected
+            ]
+        return [self._retry_plan_dict(row) for row in claimed if row is not None]
+
+    def update_retry_plan(
+        self,
+        plan_id: int,
+        *,
+        state: str,
+        completed_cycle: int | None = None,
+        eligible_completed_cycle: int | None = None,
+        increment_attempt: bool = False,
+        final_outcome: str | None = None,
+        reason: str | None = None,
+        end_cycle_repair_attempted: bool | None = None,
+    ) -> dict | None:
+        with self._transaction() as db:
+            db.execute(
+                """
+                UPDATE retry_plans SET
+                    state = ?,
+                    attempt_count = attempt_count + ?,
+                    last_attempt_cycle = COALESCE(?, last_attempt_cycle),
+                    eligible_completed_cycle =
+                        COALESCE(?, eligible_completed_cycle),
+                    final_outcome = ?,
+                    last_reason = COALESCE(?, last_reason),
+                    end_cycle_repair_attempted =
+                        COALESCE(?, end_cycle_repair_attempted),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    state, 1 if increment_attempt else 0, completed_cycle,
+                    eligible_completed_cycle, final_outcome, reason,
+                    (
+                        int(end_cycle_repair_attempted)
+                        if end_cycle_repair_attempted is not None else None
+                    ),
+                    time.time(), int(plan_id),
+                ),
+            )
+            row = db.execute(
+                "SELECT * FROM retry_plans WHERE id = ?", (int(plan_id),)
+            ).fetchone()
+        return self._retry_plan_dict(row)
+
+    def resolve_retry_plans(
+        self,
+        item_type: str,
+        item_id: int,
+        target_language: str,
+        *,
+        outcome: str = "accepted_after_retry",
+    ) -> int:
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                UPDATE retry_plans
+                SET state = ?, final_outcome = ?, updated_at = ?
+                WHERE item_type = ? AND item_id = ? AND target_language = ?
+                  AND state IN (
+                    'repair_retry_queued', 'regeneration_waiting',
+                    'regeneration_queued', 'retry_in_progress'
+                  )
+                """,
+                (
+                    outcome, outcome, time.time(), str(item_type), int(item_id),
+                    str(target_language).lower(),
+                ),
+            )
+            return cursor.rowcount
+
+    def retry_plans(self, *, include_terminal: bool = True) -> list[dict]:
+        query = "SELECT * FROM retry_plans"
+        params: tuple = ()
+        if not include_terminal:
+            placeholders = ",".join("?" for _ in ACTIVE_RETRY_STATES)
+            query += f" WHERE state IN ({placeholders})"
+            params = tuple(sorted(ACTIVE_RETRY_STATES))
+        query += " ORDER BY updated_at DESC"
+        with self._lock:
+            rows = self._connection.execute(query, params).fetchall()
+        return [self._retry_plan_dict(row) for row in rows]
+
+    def active_retry_plan(
+        self, item_type: str, item_id: int, target_language: str
+    ) -> dict | None:
+        placeholders = ",".join("?" for _ in ACTIVE_RETRY_STATES)
+        params = (
+            str(item_type), int(item_id), str(target_language).lower(),
+            *sorted(ACTIVE_RETRY_STATES),
+        )
+        with self._lock:
+            row = self._connection.execute(
+                f"""
+                SELECT * FROM retry_plans
+                WHERE item_type = ? AND item_id = ? AND target_language = ?
+                  AND state IN ({placeholders})
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        return self._retry_plan_dict(row)
+
+    def legacy_retry_candidates(self) -> list[dict]:
+        """Return legacy holds with enough immutable provenance for safe migration."""
+        if self._metadata("quarantine_retry_migrated_v4") == "1":
+            return []
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT q.*, a.item_type, a.item_id, a.source_path,
+                       a.source_language, a.source_hash
+                FROM quarantine_holds q
+                JOIN subtitle_artifacts a
+                  ON a.target_hash = q.target_hash
+                 AND a.target_language = q.target_language
+                WHERE q.resolved_at IS NULL
+                  AND a.item_type IN ('episodes', 'movies')
+                  AND a.item_id IS NOT NULL
+                  AND a.source_path IS NOT NULL
+                  AND a.source_hash IS NOT NULL
+                GROUP BY q.identity, q.target_hash
+                ORDER BY q.first_seen
+                """
+            ).fetchall()
+        return [
+            {
+                "identity": row["identity"],
+                "targetPath": row["target_path"],
+                "targetHash": row["target_hash"],
+                "targetLanguage": row["target_language"],
+                "rules": json.loads(row["rules_json"]),
+                "origin": row["origin"],
+                "itemType": row["item_type"],
+                "itemId": int(row["item_id"]),
+                "sourcePath": row["source_path"],
+                "sourceLanguage": row["source_language"],
+                "sourceHash": row["source_hash"],
+            }
+            for row in rows
+        ]
+
+    def mark_legacy_retry_migration_complete(self) -> None:
+        with self._transaction() as db:
+            self._set_metadata(db, "quarantine_retry_migrated_v4", "1")
 
     def record_timing_sample(
         self,

@@ -15,6 +15,8 @@ sys.path.insert(0, str(REPO_ROOT / "docker"))
 import clean_et_subs as cleanup  # noqa: E402
 from clean_et_subs import (  # noqa: E402
     SubtitleCue,
+    ValidationIssue,
+    ValidationReport,
     ValidationStateStore,
     build_detector,
     discover_target_subtitles,
@@ -30,6 +32,7 @@ from clean_et_subs import (  # noqa: E402
     validate_subtitle_pair,
     validate_subtitle_without_source,
     write_validation_report,
+    classify_validation_failure,
 )
 from state_store import StateStore  # noqa: E402
 
@@ -55,6 +58,23 @@ def make_timed_srt(cue_count: int, final_second: int, text: str = "Dialogue line
 
 
 class SubtitleValidationTests(unittest.TestCase):
+    def test_failure_classification_prefers_structural_safety(self):
+        cue_only = ValidationReport([
+            ValidationIssue("garbage", "bad", cue_index=0, cue_number=1)
+        ])
+        mixed = ValidationReport([
+            ValidationIssue("garbage", "bad", cue_index=0, cue_number=1),
+            ValidationIssue("target_structure", "broken"),
+        ])
+        source = ValidationReport([
+            ValidationIssue("source_unreadable", "missing")
+        ])
+        self.assertEqual(
+            classify_validation_failure(cue_only), "cue_repairable"
+        )
+        self.assertEqual(classify_validation_failure(mixed), "whole_file")
+        self.assertEqual(classify_validation_failure(source), "source_problem")
+
     @classmethod
     def setUpClass(cls):
         cls.detector = build_detector()

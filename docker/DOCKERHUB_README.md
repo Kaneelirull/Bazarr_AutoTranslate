@@ -124,11 +124,21 @@ capacity failures defer work instead of submitting without a verified slot.
 | `CLEANUP_FORMAT_REPAIR_ENABLED` | `true` | Enable safe local SRT normalization |
 | `CLEANUP_UNDERSIZED_ENABLED` | `true` | Enable completeness validation |
 | `CLEANUP_PRUNE_EXTRA_LANGUAGES` | `true` | Prune recognized unmanaged languages once managed subtitles are valid |
+| `QUARANTINE_ARTIFACT_RETENTION_DAYS` | `30` | Retain quarantined files/reports without blocking retries |
+| `REGENERATION_INITIAL_DELAY_CYCLES` | `2` | Healthy completed cycles before fresh regeneration |
+| `REGENERATION_MAX_ATTEMPTS` | `3` | Fresh retries before manual review |
+| `REGENERATION_BACKOFF_MULTIPLIER` | `2.0` | Cycle backoff multiplier |
+| `RETRY_BATCH_SIZE_PER_CYCLE` | `5` | Maximum regeneration admissions per cycle |
+| `RETRY_MAX_PER_SERIES_PER_CYCLE` | `1` | Per-series admission limit |
+| `END_OF_CYCLE_REPAIR_RETRY_ENABLED` | `true` | Retry one deferred cue repair at cycle end |
 
 Every repairable cue is attempted before the file is declared unrepairable.
 Attempt one includes source context; attempts two through five run without
 context. If any cue still fails, the untouched original subtitle is handled by
 `CLEANUP_ACTION` rather than installing a partially repaired candidate.
+Quarantine is audit storage only: retry plans persist separately in SQLite,
+use completed-cycle backoff, respect the series circuit breaker, and remain
+visible on the dashboard until accepted or exhausted.
 
 Additional validation thresholds are documented in the repository's
 [`docker/README.md`](https://github.com/Kaneelirull/Bazarr_AutoTranslate/blob/main/docker/README.md)

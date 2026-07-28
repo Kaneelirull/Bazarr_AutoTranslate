@@ -309,6 +309,8 @@ class StatusDashboardTests(unittest.TestCase):
                 [
                     "generatedAt", "service", "currentCycle", "activeJobs",
                     "upNext", "recentOutcomes", "timing", "circuits",
+                    "retryPlans", "completedCycle",
+                    "retryMaxAttempts",
                     "history", "maintenance",
                 ],
             )
@@ -472,6 +474,9 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("formatRemaining", script)
         self.assertIn("Over by", script)
         self.assertIn(".live-remaining", script)
+        self.assertIn('"Retry queue"', script)
+        self.assertIn("retryPlans", script)
+        self.assertIn("Manual review required", script)
         self.assertIn(".time-exact-only", stylesheet)
 
     def test_port_conflict_raises_without_corrupting_tracker(self):

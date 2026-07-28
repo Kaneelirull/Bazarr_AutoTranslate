@@ -89,7 +89,14 @@ Existing-library cleanup runs after startup synchronization and then on its own 
 | `CLEANUP_UNDERSIZED_REQUIRED_SIGNALS` | `3` | Failed completeness signals required for quarantine |
 | `CLEANUP_FFPROBE_TIMEOUT` | `15` | Maximum seconds for one duration probe |
 | `SYNC_START_TIMEOUT` | `30` | Seconds to wait for a triggered Bazarr scan to appear |
-| `RETENTION_DAYS` | `30` | Maximum age for quarantine files, reports, application logs, and validation-state records |
+| `RETENTION_DAYS` | `30` | Maximum age for application logs and validation-state audit records |
+| `QUARANTINE_ARTIFACT_RETENTION_DAYS` | `30` | Maximum age for quarantined subtitle files and reports; never controls retry eligibility |
+| `REGENERATION_INITIAL_DELAY_CYCLES` | `2` | Healthy completed cycles before the first fresh translation retry |
+| `REGENERATION_MAX_ATTEMPTS` | `3` | Maximum fresh translation attempts before manual review |
+| `REGENERATION_BACKOFF_MULTIPLIER` | `2.0` | Completed-cycle backoff multiplier, producing 2/4/8 with defaults |
+| `RETRY_BATCH_SIZE_PER_CYCLE` | `5` | Maximum regeneration admissions per completed cycle |
+| `RETRY_MAX_PER_SERIES_PER_CYCLE` | `1` | Maximum regeneration admissions from one series per cycle |
+| `END_OF_CYCLE_REPAIR_RETRY_ENABLED` | `true` | Allow one low-priority retry for a deferred cue repair |
 | `RETENTION_CHECK_INTERVAL` | `3600` | Seconds between retention checks; cleanup also runs at startup |
 | `LOG_DIR` | `/var/log/bazarr-autotranslate` | Daily application log directory |
 
@@ -162,7 +169,9 @@ Only one Bazarr AutoTranslate container may use a given `/config` directory. A s
 
 A source-less subtitle whose only validation issue is `excessive_lines` is retained as `valid_with_warnings` by default and skipped on later scans while its hash is unchanged. Prompt leakage, malformed structure, wrong language/script, repetition, undersized content, or any other strong rule still makes it eligible for the configured cleanup action. No dialogue lines are joined automatically.
 
-When a subtitle is quarantined or deleted, its media/language identity is suppressed for the remainder of the current translation cycle. The next cycle (and a service restart) may submit it again, subject to the normal resubmit cooldown and series circuit breaker. Historical invalid hashes remain in SQLite for audit and duplicate AI-repair suppression; accepting a valid replacement resolves that history without deleting it. Dry-run and report scans never create retry suppression. The legacy `CLEANUP_QUARANTINE_HOLD_DAYS` variable is accepted with a warning but no longer affects eligibility.
+Quarantine retention and retry eligibility are independent. Invalid artifacts and reports remain available for audit for `QUARANTINE_ARTIFACT_RETENTION_DAYS`, including after a later success. Cue-local failures use the bounded repair path and may receive one end-of-cycle retry. Structurally unsafe target output is regenerated from the current source after persistent completed-cycle backoff. Service failures use normal cooldown and circuit protection and do not create subtitle quarantine plans. Retry state survives restart, unchanged failed hashes do not consume attempts, and exhausted plans remain visible for manual review. The legacy `CLEANUP_QUARANTINE_HOLD_DAYS` variable is accepted with a warning but no longer affects eligibility.
+
+Schema v4 migrates only legacy quarantine records with resolvable media and source provenance. Existing files are untouched, and migrated retries are throttled by the batch and per-series limits. Before upgrading, back up `/config/bazarr-autotranslate.sqlite3`; rolling back to an older image requires restoring that backup.
 
 Source-anchored recovery normalizes BOMs, newlines, trailing whitespace, timestamp spacing, repeated separators, and blank lines inside cues. Orphan text is folded into its preceding cue only when every numbered timestamp anchor still matches the source in order. Missing, duplicate, reordered, or mismatched anchors are never guessed.
 
