@@ -15,7 +15,10 @@ from typing import Callable
 from urllib.parse import parse_qs, urlsplit
 
 
-TERMINAL_STATES = {"accepted", "failed", "timed_out", "deferred", "quarantined"}
+WAIT_STATES = {"waiting_retry", "series_protected", "missing_source"}
+TERMINAL_STATES = {
+    "accepted", "failed", "timed_out", "deferred", "quarantined", *WAIT_STATES,
+}
 ACTIVE_STATES = {"translating", "validating", "repairing"}
 HISTORY_WINDOWS = {
     "1h": 3600,
@@ -24,7 +27,10 @@ HISTORY_WINDOWS = {
     "24h": 24 * 3600,
     "7d": 7 * 86400,
 }
-OUTCOME_KEYS = ("accepted", "repaired", "failed", "timed_out", "deferred", "quarantined")
+OUTCOME_KEYS = (
+    "accepted", "repaired", "failed", "timed_out", "waiting_retry",
+    "series_protected", "missing_source", "deferred", "quarantined",
+)
 MAINTENANCE_KEYS = (
     "formatted",
     "repaired",
@@ -538,6 +544,9 @@ class StatusTracker:
             "accepted": states["accepted"],
             "failed": states["failed"],
             "timedOut": states["timed_out"],
+            "waitingRetry": states["waiting_retry"],
+            "seriesProtected": states["series_protected"],
+            "missingSource": states["missing_source"],
             "deferred": states["deferred"],
             "quarantined": states["quarantined"],
             "remaining": max(0, self._cycle.get("initial", len(jobs)) - done),

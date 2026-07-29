@@ -246,6 +246,40 @@ class SubtitleValidationTests(unittest.TestCase):
         self.assertFalse(recovery.safe)
         self.assertIn("anchor count differs", recovery.reason)
 
+    def test_source_anchored_recovery_repairs_one_missing_number(self):
+        source = make_srt("One", "Two", "Three")
+        target = (
+            "1\n00:00:01,000 --> 00:00:01,900\nÜks\n\n"
+            "00:00:02,000 --> 00:00:02,900\nKaks\n\n"
+            "3\n00:00:03,000 --> 00:00:03,900\nKolm\n"
+        )
+        recovery = recover_srt_structure(source, target)
+        self.assertTrue(recovery.safe, recovery.reason)
+        self.assertEqual(recovery.recovered_cues, [2])
+        cues, errors = parse_srt_cues(recovery.raw)
+        self.assertEqual(errors, [])
+        self.assertEqual(cues[1].lines, ["Kaks"])
+
+    def test_source_anchored_recovery_rejects_two_bad_anchors(self):
+        source = make_srt("One", "Two")
+        target = (
+            "00:00:01,000 --> 00:00:01,900\nÜks\n\n"
+            "2\nnot a timestamp\nKaks\n"
+        )
+        recovery = recover_srt_structure(source, target)
+        self.assertFalse(recovery.safe)
+
+    def test_source_anchored_recovery_repairs_one_malformed_timestamp(self):
+        source = make_srt("One", "Two")
+        target = (
+            "1\n00:00:01,000 --> 00:00:01,900\nÜks\n\n"
+            "2\n00:00:02,000 -> 00:00:02,900\nKaks\n"
+        )
+        recovery = recover_srt_structure(source, target)
+        self.assertTrue(recovery.safe, recovery.reason)
+        self.assertEqual(recovery.recovered_cues, [2])
+        self.assertIn("00:00:02,000 --> 00:00:02,900", recovery.raw)
+
     def test_repair_retries_without_context_and_replaces_atomically(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

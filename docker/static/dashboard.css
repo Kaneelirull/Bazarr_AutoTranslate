@@ -756,7 +756,10 @@ progress::-moz-progress-bar {
   color: var(--success);
 }
 
-.badge.deferred {
+.badge.deferred,
+.badge.waiting_retry,
+.badge.series_protected,
+.badge.missing_source {
   background: var(--warning-subtle);
   color: var(--warning);
 }

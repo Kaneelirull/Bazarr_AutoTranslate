@@ -195,6 +195,25 @@ class StatusDashboardTests(unittest.TestCase):
             self.assertEqual(cycle["metrics"]["cooldown_deferrals"], 3)
             self.assertEqual(cycle["metrics"]["circuit_deferrals"], 1)
 
+    def test_wait_states_are_terminal_and_do_not_inflate_deferred(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self.make_tracker(directory)
+            jobs = queue_jobs()
+            tracker.start_cycle("cycle-1", 1, jobs)
+            tracker.transition(jobs[0]["key"], "waiting_retry")
+            tracker.transition(jobs[1]["key"], "series_protected")
+            tracker.transition(jobs[2]["key"], "missing_source")
+            snapshot = tracker.snapshot()
+            cycle = snapshot["currentCycle"]
+            self.assertEqual(cycle["done"], 3)
+            self.assertEqual(cycle["deferred"], 0)
+            self.assertEqual(cycle["waitingRetry"], 1)
+            self.assertEqual(cycle["seriesProtected"], 1)
+            self.assertEqual(cycle["missingSource"], 1)
+            self.assertEqual(snapshot["history"]["1h"]["waiting_retry"], 1)
+            self.assertEqual(snapshot["history"]["1h"]["series_protected"], 1)
+            self.assertEqual(snapshot["history"]["1h"]["missing_source"], 1)
+
     def test_rolling_windows_and_repaired_subtype(self):
         with tempfile.TemporaryDirectory() as directory:
             clock = FakeClock()
@@ -486,6 +505,10 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn('"Retry exhausted"', script)
         self.assertIn('"Source blocked"', script)
         self.assertIn("No retry work scheduled.", script)
+        self.assertIn('"Waiting for retry"', script)
+        self.assertIn('"Circuit protected"', script)
+        self.assertIn('"Missing source"', script)
+        self.assertIn("detail.category", script)
         self.assertIn("retryMedia", script)
         self.assertIn(r"\.srt\s*season\s*\d+", script)
         self.assertIn("After cycle", script)

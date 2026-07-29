@@ -927,6 +927,7 @@ def _initialize_state_store() -> StateStore:
                 series_key=series_key,
                 series_title=os.path.basename(os.path.dirname(source_path)),
                 media_title=os.path.basename(source_path),
+                source_cue_count=_count_srt_cues(source_path),
                 failure_class="whole_file",
                 rules=rules,
                 state="regeneration_waiting",
@@ -1045,8 +1046,17 @@ def _mark_submission_submitted(attempt_id: int, job_id: int) -> None:
     _get_validation_state().mark_submission_submitted(attempt_id, job_id)
 
 
-def _mark_submission_failed(attempt_id: int) -> None:
-    _get_validation_state().mark_submission_failed(attempt_id)
+def _mark_submission_failed(
+    attempt_id: int,
+    *,
+    failure_category: str | None = None,
+    failure_details: dict | None = None,
+) -> None:
+    _get_validation_state().mark_submission_failed(
+        attempt_id,
+        failure_category=failure_category,
+        failure_details=failure_details,
+    )
 
 
 def _update_submission_actual_path(
@@ -1588,23 +1598,81 @@ def lingarr_cancel_job(job_id: int) -> bool:
         return False
 
 
-def _safe_failure_details(job_id: int | None) -> dict:
+def _classify_lingarr_failure(status: str | None, text: str) -> str:
+    folded = f"{status or ''} {text}".casefold()
+    if "cancel" in folded or "interrupt" in folded:
+        return "cancelled"
+    if any(token in folded for token in ("context length", "context window", "token limit", "too many tokens")):
+        return "context_limit"
+    if any(token in folded for token in ("parse", "invalid json", "deserialize", "format")):
+        return "parser"
+    if any(token in folded for token in ("disk", "storage", "permission denied", "no space", "read-only")):
+        return "storage"
+    if any(token in folded for token in ("model", "provider", "rate limit", "content filter")):
+        return "model"
+    if any(token in folded for token in ("timeout", "http", "network", "connection", "service unavailable")):
+        return "service"
+    return "unknown"
+
+
+def _sanitize_failure_message(value: object, limit: int = 500) -> str:
+    message = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    for secret in (BAZARR_API_KEY, LINGARR_API_KEY):
+        if secret:
+            message = message.replace(secret, "[redacted]")
+    message = _re.sub(
+        r"(?i)(?:[a-z]:\\|/)(?:[^\\/\s]+[\\/])+[^\\/\s]+",
+        "[path]",
+        message,
+    )
+    if any(marker in message.casefold() for marker in (
+        "[source]", "[target]", "subtitle text", "translated text", "prompt:",
+    )):
+        return "[redacted content event]"
+    return message[:limit]
+
+
+def _safe_failure_details(
+    job_id: int | None,
+    *,
+    terminal_job: dict | None = None,
+    elapsed_seconds: float | None = None,
+) -> dict:
     if job_id is None:
         return {}
-    job = lingarr_get_job(job_id) or {}
+    job = terminal_job if isinstance(terminal_job, dict) else (lingarr_get_job(job_id) or {})
     messages = [
-        str(event.get("message"))[:500]
+        _sanitize_failure_message(event.get("message"))
         for event in job.get("events", [])
         if isinstance(event, dict) and event.get("message")
     ]
+    error_message = _sanitize_failure_message(job.get("errorMessage"), 1000) or None
+    safe_scalars = {}
+    blocked = ("source", "target", "subtitle", "prompt", "text", "path", "key", "token")
+    for key, value in job.items():
+        if (
+            len(safe_scalars) >= 12
+            or any(part in str(key).casefold() for part in blocked)
+            or key in {"events", "errorMessage", "provider", "model", "status", "progress"}
+            or not isinstance(value, (str, int, float, bool, type(None)))
+        ):
+            continue
+        safe_scalars[str(key)[:80]] = (
+            _sanitize_failure_message(value, 300)
+            if isinstance(value, str) else value
+        )
+    combined = " ".join(filter(None, [error_message, *messages]))
     return {
         "jobId": job_id,
         "status": job.get("status"),
         "progress": job.get("progress"),
-        "errorMessage": str(job.get("errorMessage") or "")[:1000] or None,
+        "category": _classify_lingarr_failure(job.get("status"), combined),
+        "errorMessage": error_message,
         "events": messages[-10:],
         "provider": job.get("provider") or "unknown",
         "model": job.get("model") or "unknown",
+        "elapsedSeconds": round(elapsed_seconds, 3) if elapsed_seconds is not None else None,
+        "safePayload": safe_scalars,
     }
 
 
@@ -3390,6 +3458,7 @@ def _schedule_validation_retry(
             series_key=series_key,
             series_title=series_title,
             media_title=title,
+            source_cue_count=_count_srt_cues(source_path),
             failure_class=failure_class,
             rules=(issue.rule for issue in getattr(report, "issues", [])),
             state=state,
@@ -4081,7 +4150,7 @@ def process_item(
         print(f"[SKIP] {title}: no source subtitle available from {LANGUAGES}")
         for target_lang in target_langs:
             _status_transition(
-                item_type, item_id, target_lang, "deferred", reason="no source subtitle"
+                item_type, item_id, target_lang, "missing_source", reason="no source subtitle"
             )
         return
     if not target_langs:
@@ -4109,7 +4178,7 @@ def process_item(
                 item_type,
                 item_id,
                 target_lang,
-                "deferred",
+                "missing_source",
                 reason="no complete source subtitle",
             )
         return
@@ -4180,6 +4249,7 @@ def process_item(
                             series_key=series_key,
                             series_title=series_title,
                             media_title=title,
+                            source_cue_count=_count_srt_cues(source_path),
                             failure_class=scheduled.get("failureClass") or "whole_file",
                             rules=scheduled.get("rules") or [],
                             state="regeneration_waiting",
@@ -4209,7 +4279,7 @@ def process_item(
                     item_type,
                     item_id,
                     target_lang,
-                    "deferred",
+                    "waiting_retry",
                     reason=f"scheduled retry {scheduled['state']}",
                 )
                 continue
@@ -4367,7 +4437,7 @@ def process_item(
                 item_type,
                 item_id,
                 target_lang,
-                "deferred",
+                "series_protected",
                 reason=f"series circuit {circuit['state']}",
             )
             with stats_lock:
@@ -4384,7 +4454,7 @@ def process_item(
             with stats_lock:
                 stats["deferred"] = stats.get("deferred", 0) + 1
             _status_transition(
-                item_type, item_id, target_lang, "deferred", reason=reason
+                item_type, item_id, target_lang, "missing_source", reason=reason
             )
             continue
         try:
@@ -4458,7 +4528,7 @@ def process_item(
                 item_type,
                 item_id,
                 target_lang,
-                "deferred",
+                "series_protected",
                 reason=f"series circuit {queued_circuit['state']}",
             )
             continue
@@ -4559,7 +4629,7 @@ def process_item(
                 stats.setdefault("deferred", 0)
                 stats["deferred"] += 1
             _status_transition(
-                item_type, item_id, target_lang, "deferred", reason="source unreadable"
+                item_type, item_id, target_lang, "missing_source", reason="source unreadable"
             )
             continue
         if src_lines == 0:
@@ -4571,7 +4641,7 @@ def process_item(
                 stats.setdefault("deferred", 0)
                 stats["deferred"] += 1
             _status_transition(
-                item_type, item_id, target_lang, "deferred", reason="source has no dialogue"
+                item_type, item_id, target_lang, "missing_source", reason="source has no dialogue"
             )
             continue
 
@@ -4641,7 +4711,7 @@ def process_item(
                     item_type,
                     item_id,
                     target_lang,
-                    "deferred",
+                    "series_protected",
                     reason=f"series circuit {circuit['state']}",
                 )
                 _shared_capacity.release(shared_token)
@@ -4752,6 +4822,16 @@ def process_item(
             _translation_capacity.release(capacity_token)
             _file_lane_gate.release(lane)
         translation_elapsed = time.monotonic() - translation_started
+        terminal_job = (
+            lingarr_get_job(job_id)
+            if status != "Completed" and job_id is not None
+            else None
+        )
+        failure_details = _safe_failure_details(
+            job_id,
+            terminal_job=terminal_job,
+            elapsed_seconds=translation_elapsed,
+        )
 
         if status != "Completed":
             safe_to_recover = status is not None
@@ -4776,6 +4856,22 @@ def process_item(
         if status != "Completed":
             failure_reason = (
                 "Lingarr timeout" if status is None else f"Lingarr job {status.lower()}"
+            )
+            try:
+                _mark_submission_failed(
+                    attempt_id,
+                    failure_category=failure_details.get("category"),
+                    failure_details=failure_details,
+                )
+            except StateStoreError as exc:
+                print(f"{YELLOW}[FAIL] Could not persist Lingarr failure details: {exc}{RESET}")
+            print(
+                f"[FAILURE] Lingarr job {job_id}: "
+                f"category={failure_details.get('category', 'unknown')} "
+                f"status={failure_details.get('status') or status or 'timeout'} "
+                f"provider={failure_details.get('provider', 'unknown')} "
+                f"model={failure_details.get('model', 'unknown')} "
+                f"message={failure_details.get('errorMessage') or 'not supplied'}"
             )
             try:
                 _get_validation_state().record_circuit_outcome(
@@ -4810,7 +4906,7 @@ def process_item(
                     target_lang,
                     "timed_out",
                     reason="Lingarr timeout",
-                    details={"failureDetails": _safe_failure_details(job_id)},
+                    details={"failureDetails": failure_details},
                 )
             else:
                 _status_transition(
@@ -4819,7 +4915,7 @@ def process_item(
                     target_lang,
                     "failed",
                     reason=f"Lingarr job {status.lower()}",
-                    details={"failureDetails": _safe_failure_details(job_id)},
+                    details={"failureDetails": failure_details},
                 )
             _shared_capacity.release(shared_token)
             continue
@@ -5804,6 +5900,7 @@ def _run_regeneration_retries(stats: dict) -> None:
     if shutdown_requested:
         return
     try:
+        due_before = _get_validation_state().due_retry_count(_completed_cycle)
         plans = _get_validation_state().claim_due_retry_plans(
             _completed_cycle,
             limit=RETRY_BATCH_SIZE_PER_CYCLE,
@@ -5814,6 +5911,11 @@ def _run_regeneration_retries(stats: dict) -> None:
         stats["degraded"] = True
         return
     stats["regeneration_queued"] = len(plans)
+    print(
+        f"[RETRY] Due={due_before} admitted={len(plans)} "
+        f"remaining={max(0, due_before - len(plans))} "
+        f"completed_cycle={_completed_cycle}"
+    )
     retry_lock = threading.Lock()
     for plan in plans:
         if shutdown_requested:
@@ -6093,6 +6195,19 @@ def main() -> int:
     global _status_tracker, _completed_cycle
     state_store = _initialize_state_store()
     _completed_cycle = state_store.completed_cycle()
+    recovered_claims = state_store.recover_retry_claims()
+    backfilled_retry_sizes = 0
+    for plan in state_store.retry_plans(include_terminal=False):
+        if plan.get("sourceCueCount") is not None or not plan.get("sourcePath"):
+            continue
+        cue_count = _count_srt_cues(plan["sourcePath"])
+        if cue_count and state_store.set_retry_source_cue_count(plan["id"], cue_count):
+            backfilled_retry_sizes += 1
+    print(
+        f"[CYCLE] Restored completed-cycle sequence {_completed_cycle}; "
+        f"released {recovered_claims} orphaned retry claim(s); "
+        f"backfilled {backfilled_retry_sizes} retry size(s)"
+    )
     status_server = None
     if STATUS_ENABLED:
         try:
