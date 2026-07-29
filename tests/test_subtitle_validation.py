@@ -798,6 +798,109 @@ class SubtitleValidationTests(unittest.TestCase):
 
             self.assertEqual(removed, 1)
 
+    def test_invariant_names_and_models_do_not_hide_untranslated_prose(self):
+        cases = (
+            ("Ferrari 575, Aston Martin Vanquish!", "Ferrari 575, Aston Martin Vanquish!", False),
+            ("Land Rover Discovery and Subaru Legacy", "Land Rover Discovery ja Subaru Legacy", False),
+            ("This Is Ordinary Untranslated Prose", "This Is Ordinary Untranslated Prose", True),
+            ("This Is Ordinary, Untranslated Prose", "This Is Ordinary, Untranslated Prose", True),
+        )
+        for source_text, target_text, copied in cases:
+            with self.subTest(source=source_text):
+                issues = cleanup.validate_cue_pair(
+                    SubtitleCue(1, "00:00:01,000 --> 00:00:01,900", [source_text]),
+                    SubtitleCue(1, "00:00:01,000 --> 00:00:01,900", [target_text]),
+                    cue_index=0,
+                    target_lang="et",
+                )
+                self.assertEqual(
+                    "copied_source" in {issue.rule for issue in issues}, copied
+                )
+
+    def test_top_gear_prompt_and_expansion_examples_are_rejected(self):
+        bad_targets = (
+            "One\nTwo\nThree\nFour\nFive",
+            "Here is the translation with context. " * 20,
+            "[SOURCE] leaked prompt material [/SOURCE]",
+        )
+        for cue_number, target_text in zip((25, 497, 581), bad_targets):
+            issues = cleanup.validate_cue_pair(
+                SubtitleCue(
+                    cue_number,
+                    "00:00:01,000 --> 00:00:01,900",
+                    ["Short source dialogue"],
+                ),
+                SubtitleCue(
+                    cue_number,
+                    "00:00:01,000 --> 00:00:01,900",
+                    target_text.splitlines(),
+                ),
+                cue_index=cue_number - 1,
+                target_lang="et",
+            )
+            self.assertTrue(issues, cue_number)
+
+    def test_donor_recovery_uses_current_validator_and_publishes_atomically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "episode.eng.srt"
+            target = root / "episode.et.srt"
+            donor = root / "attempt-1.et.srt"
+            contaminated = root / "attempt-2.et.srt"
+            stale = root / "attempt-3.et.srt"
+            source.write_text(
+                make_srt("This is a normal dialogue sentence"),
+                encoding="utf-8",
+            )
+            original = make_srt("This is a normal dialogue sentence")
+            target.write_text(original, encoding="utf-8")
+            donor.write_text(make_srt("See on tavaline dialoogilause"), encoding="utf-8")
+            contaminated.write_text(original, encoding="utf-8")
+            stale.write_text(make_srt("Aegunud doonorlause"), encoding="utf-8")
+            signatures = cleanup.source_cue_signatures(source)
+            stale_signatures = json.loads(json.dumps(signatures))
+            stale_signatures[0]["startMs"] += 501
+
+            result = repair_subtitle_file(
+                source,
+                target,
+                self.detector,
+                self.estonian,
+                lambda *_args: "[SOURCE] rejected [/SOURCE]",
+                target_lang="et",
+                max_attempts=1,
+                donor_attempts=[
+                    {
+                        "id": 9,
+                        "attemptNumber": 3,
+                        "artifactPath": str(stale),
+                        "targetHash": file_sha256(stale),
+                        "cueSignatures": stale_signatures,
+                        "createdAt": 3,
+                    },
+                    {
+                        "id": 8,
+                        "attemptNumber": 2,
+                        "artifactPath": str(contaminated),
+                        "targetHash": file_sha256(contaminated),
+                        "cueSignatures": signatures,
+                        "createdAt": 2,
+                    },
+                    {
+                        "id": 7,
+                        "attemptNumber": 1,
+                        "artifactPath": str(donor),
+                        "targetHash": file_sha256(donor),
+                        "cueSignatures": signatures,
+                        "createdAt": 1,
+                    },
+                ],
+            )
+
+            self.assertTrue(result.success, result.reason)
+            self.assertEqual(result.donor_history[0]["sourceAttempt"], 1)
+            self.assertIn("See on tavaline", target.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

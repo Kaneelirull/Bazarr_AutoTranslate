@@ -126,7 +126,9 @@ capacity failures defer work instead of submitting without a verified slot.
 | `CLEANUP_PRUNE_EXTRA_LANGUAGES` | `true` | Prune recognized unmanaged languages once managed subtitles are valid |
 | `QUARANTINE_ARTIFACT_RETENTION_DAYS` | `30` | Retain quarantined files/reports without blocking retries |
 | `REGENERATION_INITIAL_DELAY_CYCLES` | `2` | Healthy completed cycles before fresh regeneration |
-| `REGENERATION_MAX_ATTEMPTS` | `3` | Fresh retries before manual review |
+| `REGENERATION_MAX_ATTEMPTS` | `0` | Fresh retry limit; `0` retries indefinitely |
+| `REGENERATION_MAX_DELAY_CYCLES` | `16` | Maximum completed-cycle delay between retries |
+| `DONOR_RECOVERY_ENABLED` | `true` | Revalidate and reuse matching cues from quarantine attempts |
 | `REGENERATION_BACKOFF_MULTIPLIER` | `2.0` | Cycle backoff multiplier |
 | `RETRY_BATCH_SIZE_PER_CYCLE` | `5` | Maximum regeneration admissions per cycle |
 | `RETRY_MAX_PER_SERIES_PER_CYCLE` | `1` | Per-series admission limit |

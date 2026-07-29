@@ -258,11 +258,18 @@ REGENERATION_INITIAL_DELAY_CYCLES = max(
     1, int(os.getenv("REGENERATION_INITIAL_DELAY_CYCLES", "2"))
 )
 REGENERATION_MAX_ATTEMPTS = max(
-    1, int(os.getenv("REGENERATION_MAX_ATTEMPTS", "3"))
+    0, int(os.getenv("REGENERATION_MAX_ATTEMPTS", "0"))
+)
+REGENERATION_MAX_DELAY_CYCLES = max(
+    REGENERATION_INITIAL_DELAY_CYCLES,
+    int(os.getenv("REGENERATION_MAX_DELAY_CYCLES", "16")),
 )
 REGENERATION_BACKOFF_MULTIPLIER = max(
     1.0, float(os.getenv("REGENERATION_BACKOFF_MULTIPLIER", "2.0"))
 )
+DONOR_RECOVERY_ENABLED = os.getenv(
+    "DONOR_RECOVERY_ENABLED", "true"
+).lower() in ("1", "true", "yes")
 RETRY_BATCH_SIZE_PER_CYCLE = max(
     1, int(os.getenv("RETRY_BATCH_SIZE_PER_CYCLE", "5"))
 )
@@ -291,6 +298,24 @@ _CIRCUIT_CONFIG_FINGERPRINT = hashlib.sha256(
             "timeoutMultiplier": TRANSLATION_TIMEOUT_MULTIPLIER,
             "timeoutCap": TRANSLATION_TIMEOUT_CAP,
             "parallel": PARALLEL_TRANSLATES,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+).hexdigest()[:16]
+_VALIDATION_CONFIG_FINGERPRINT = hashlib.sha256(
+    json.dumps(
+        {
+            "maxCueLines": CLEANUP_MAX_CUE_LINES,
+            "maxCueChars": CLEANUP_MAX_CUE_CHARS,
+            "maxExpansionRatio": CLEANUP_MAX_EXPANSION_RATIO,
+            "maxExpansionChars": CLEANUP_MAX_EXPANSION_CHARS,
+            "maxSourceSimilarity": CLEANUP_MAX_SOURCE_SIMILARITY,
+            "maxCyrillicRatio": CLEANUP_MAX_CYRILLIC_RATIO,
+            "maxCjkRatio": CLEANUP_MAX_CJK_RATIO,
+            "maxLatinRatio": CLEANUP_MAX_LATIN_RATIO,
+            "donorEnabled": DONOR_RECOVERY_ENABLED,
+            "donorSimilarity": 0.95,
+            "donorTimestampToleranceMs": 500,
         },
         sort_keys=True,
     ).encode("utf-8")
@@ -380,6 +405,7 @@ class RepairJobResult:
     attempts: int = 0
     second_attempts: int = 0
     target_path: str = ""
+    donor_source_attempt: int | None = None
 
 
 class CycleSuppressionRegistry:
@@ -768,10 +794,23 @@ def _refresh_status_diagnostics() -> None:
             cold_seconds_per_cue=TRANSLATION_COLD_SECONDS_PER_CUE,
             alpha=TRANSLATION_TIMING_ALPHA,
         )
+        retry_plans = _get_validation_state().retry_plans()
+        for plan in retry_plans:
+            attempts = _get_validation_state().quarantine_attempts(
+                plan["itemType"], plan["itemId"], plan["targetLanguage"]
+            )
+            plan["archivedAttemptCount"] = len(attempts)
+            donor_sources = [
+                donor.get("sourceAttempt")
+                for attempt in attempts
+                for donor in attempt.get("donorProvenance", [])
+                if donor.get("sourceAttempt") is not None
+            ]
+            plan["latestDonorAttempt"] = donor_sources[0] if donor_sources else None
         _status_tracker.set_diagnostics(
             timing={"file": file_timing, "repair": repair_timing},
             circuits=_get_validation_state().circuit_breakers(),
-            retries=_get_validation_state().retry_plans(),
+            retries=retry_plans,
             completed_cycle=_get_validation_state().completed_cycle(),
             retry_max_attempts=REGENERATION_MAX_ATTEMPTS,
         )
@@ -874,7 +913,9 @@ def _get_validation_state():
         if _validation_state is None:
             from clean_et_subs import VALIDATOR_VERSION
             _validation_state = StateStore(
-                STATE_DB_FILE, validator_version=VALIDATOR_VERSION
+                STATE_DB_FILE,
+                validator_version=VALIDATOR_VERSION,
+                config_fingerprint=_VALIDATION_CONFIG_FINGERPRINT,
             )
         return _validation_state
 
@@ -889,6 +930,7 @@ def _initialize_state_store() -> StateStore:
             STATE_DB_FILE,
             acquire_process_lock=True,
             validator_version=VALIDATOR_VERSION,
+            config_fingerprint=_VALIDATION_CONFIG_FINGERPRINT,
         )
         migration = store.migrate_legacy(
             SUBMIT_CACHE_FILE,
@@ -2549,6 +2591,9 @@ def _apply_cleanup_action(
     format_recovered_cues: list[int] | None = None,
     completeness=None,
     origin: str | None = None,
+    item_type: str | None = None,
+    item_id: int | None = None,
+    donor_history: list[dict] | None = None,
     dry_run: bool = False,
 ) -> str:
     from clean_et_subs import (
@@ -2661,10 +2706,45 @@ def _apply_cleanup_action(
                 audit["repeatOffender"] = repeated
             if suppression is not None:
                 audit["cycleSuppression"] = suppression
+            report_path = None
             try:
-                write_validation_report(destination, audit)
+                report_path = write_validation_report(destination, audit)
             except OSError as e:
                 print(f"{YELLOW}[WARNING] Quarantined file but could not write report: {e}{RESET}")
+            if (
+                item_type in ("episodes", "movies")
+                and item_id is not None
+                and source_hash is not None
+                and target_hash is not None
+            ):
+                from clean_et_subs import source_cue_signatures
+                try:
+                    state_store = _get_validation_state()
+                    active_plan = state_store.active_retry_plan(
+                        item_type, item_id, target_lang
+                    )
+                    state_store.record_quarantine_attempt(
+                        item_type=item_type,
+                        item_id=item_id,
+                        target_language=target_lang,
+                        source_hash=source_hash,
+                        target_hash=target_hash,
+                        attempt_number=(
+                            int(active_plan["attemptCount"]) + 1
+                            if active_plan else 1
+                        ),
+                        artifact_path=destination,
+                        report_path=report_path,
+                        failure_rules=(issue.rule for issue in report.issues),
+                        cue_signatures=source_cue_signatures(source_path),
+                        repair_provenance=attempt_history or [],
+                        donor_provenance=donor_history or [],
+                    )
+                except StateStoreError as exc:
+                    print(
+                        f"{YELLOW}[WARNING] Quarantined file but could not "
+                        f"archive donor metadata: {exc}{RESET}"
+                    )
             _record_validation_result(
                 target,
                 source_hash,
@@ -2916,6 +2996,12 @@ def _perform_repair(
         def attempt_logger(event: dict) -> None:
             attempt_state.clear()
             attempt_state.update(event)
+            if event["event"] == "donor_accepted":
+                print(
+                    f"[DONOR] Cue {event.get('cueNumber')} recovered from "
+                    f"quarantine attempt {event.get('sourceAttempt')}"
+                )
+                return
             cue = event.get("cueNumber")
             attempt = event.get("attempt")
             maximum = event.get("maxAttempts")
@@ -2956,6 +3042,15 @@ def _perform_repair(
         cue_list = ", ".join(str(i + 1) for i in initial_report.repairable_cue_indexes)
         print(f"[REPAIR] Retrying {label} '{target_lang}' cue position(s): {cue_list}")
         try:
+            donor_attempts = []
+            if (
+                DONOR_RECOVERY_ENABLED
+                and item_type in ("episodes", "movies")
+                and item_id is not None
+            ):
+                donor_attempts = _get_validation_state().quarantine_attempts(
+                    item_type, item_id, target_lang
+                )
             repair = repair_subtitle_file(
                 Path(source_path),
                 working_path,
@@ -2966,6 +3061,7 @@ def _perform_repair(
                 max_attempts=CLEANUP_MAX_REPAIR_ATTEMPTS,
                 context_lines=CLEANUP_REPAIR_CONTEXT_LINES,
                 attempt_logger=attempt_logger,
+                donor_attempts=donor_attempts,
                 **_validation_kwargs(),
             )
             second_attempts = sum(
@@ -3066,6 +3162,7 @@ def _perform_repair(
                     repairedCues=repair.repaired_cues,
                     repairAttempts=repair.attempts,
                     repairAttemptHistory=repair.attempt_history,
+                    donorRecovery=repair.donor_history,
                     formatFixes=format_fixes or [],
                     formatRecoveredCues=format_recovered_cues or [],
                     lingarrOutcome="repaired",
@@ -3084,6 +3181,10 @@ def _perform_repair(
                 return RepairJobResult(
                     "repaired", repair.report, label, target_lang, item_type, item_id,
                     repair.attempts, second_attempts, str(target_path),
+                    (
+                        repair.donor_history[0].get("sourceAttempt")
+                        if repair.donor_history else None
+                    ),
                 )
 
             print(f"{YELLOW}[REPAIR] Could not repair {label} '{target_lang}': {repair.reason}{RESET}")
@@ -3099,6 +3200,9 @@ def _perform_repair(
                 format_recovered_cues=format_recovered_cues,
                 completeness=completeness,
                 origin=origin,
+                item_type=item_type,
+                item_id=item_id,
+                donor_history=repair.donor_history,
             )
             if action in ("quarantined", "deleted") and item_id is not None:
                 _clear_submission(item_id, target_lang, item_type)
@@ -3176,7 +3280,14 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
 
     if result.action == "repaired":
         _resolve_retry_success(
-            result.item_type, result.item_id, result.target_lang
+            result.item_type,
+            result.item_id,
+            result.target_lang,
+            outcome=(
+                "accepted_after_donor_recovery"
+                if result.donor_source_attempt is not None
+                else "accepted_after_retry"
+            ),
         )
         _status_transition(
             result.item_type,
@@ -3389,6 +3500,19 @@ def _shutdown_repair_executor() -> None:
         executor.shutdown(wait=True, cancel_futures=False)
 
 
+def _regeneration_delay_cycles(attempts: int) -> int:
+    return min(
+        REGENERATION_MAX_DELAY_CYCLES,
+        max(
+            1,
+            round(
+                REGENERATION_INITIAL_DELAY_CYCLES
+                * (REGENERATION_BACKOFF_MULTIPLIER ** max(0, int(attempts)))
+            ),
+        ),
+    )
+
+
 def _schedule_validation_retry(
     *,
     report,
@@ -3415,6 +3539,7 @@ def _schedule_validation_retry(
         failure_class = "source_problem"
         source_hash = f"unavailable:{item_type}:{item_id}"
     target_hash = _file_hash_or_none(target_path)
+    archived_attempt = None
     try:
         state_store = _get_validation_state()
         existing_plan = (
@@ -3422,7 +3547,17 @@ def _schedule_validation_retry(
             if hasattr(state_store, "active_retry_plan") else None
         )
     except StateStoreError:
-        existing_plan = None
+        return None
+    if target_hash is None and item_type in ("episodes", "movies"):
+        try:
+            archived = state_store.quarantine_attempts(
+                item_type, item_id, target_lang
+            )
+            if archived:
+                archived_attempt = archived[0]
+                target_hash = archived_attempt["targetHash"]
+        except StateStoreError:
+            pass
     if failure_class == "cue_repairable" and action == "repair-deferred":
         state = "repair_retry_queued"
         eligible_cycle = _completed_cycle
@@ -3431,15 +3566,12 @@ def _schedule_validation_retry(
         eligible_cycle = _completed_cycle
     elif action in ("quarantined", "deleted"):
         attempts = int((existing_plan or {}).get("attemptCount", 0))
-        if attempts >= REGENERATION_MAX_ATTEMPTS:
+        if REGENERATION_MAX_ATTEMPTS > 0 and attempts >= REGENERATION_MAX_ATTEMPTS:
             state = "retry_exhausted"
             eligible_cycle = _completed_cycle
         else:
             state = "regeneration_waiting"
-            delay = round(
-                REGENERATION_INITIAL_DELAY_CYCLES
-                * (REGENERATION_BACKOFF_MULTIPLIER ** attempts)
-            )
+            delay = _regeneration_delay_cycles(attempts)
             eligible_cycle = _completed_cycle + max(1, delay)
         failure_class = "whole_file"
     else:
@@ -3463,6 +3595,14 @@ def _schedule_validation_retry(
             rules=(issue.rule for issue in getattr(report, "issues", [])),
             state=state,
             failed_output_hash=target_hash,
+            artifact_path=(
+                archived_attempt.get("artifactPath")
+                if archived_attempt else None
+            ),
+            report_path=(
+                archived_attempt.get("reportPath")
+                if archived_attempt else None
+            ),
             eligible_completed_cycle=eligible_cycle,
             reason=getattr(report, "summary", lambda: action)(),
         )
@@ -3470,7 +3610,8 @@ def _schedule_validation_retry(
             f"[RETRY] {'Observed unchanged' if repeated else 'Scheduled'} "
             f"{title} '{target_lang}': state={plan['state']} "
             f"eligible_cycle={plan['eligibleCompletedCycle']} "
-            f"attempt={plan['attemptCount']}/{REGENERATION_MAX_ATTEMPTS}"
+            f"attempt={plan['attemptCount']}/"
+            f"{REGENERATION_MAX_ATTEMPTS or 'unlimited'}"
         )
         _refresh_status_diagnostics()
         return plan
@@ -3480,7 +3621,11 @@ def _schedule_validation_retry(
 
 
 def _resolve_retry_success(
-    item_type: str | None, item_id: int | None, target_lang: str
+    item_type: str | None,
+    item_id: int | None,
+    target_lang: str,
+    *,
+    outcome: str = "accepted_after_retry",
 ) -> None:
     if item_type not in ("episodes", "movies") or item_id is None:
         return
@@ -3489,7 +3634,7 @@ def _resolve_retry_success(
         if not hasattr(state, "resolve_retry_plans"):
             return
         resolved = state.resolve_retry_plans(
-            item_type, item_id, target_lang
+            item_type, item_id, target_lang, outcome=outcome
         )
         if resolved:
             print(
@@ -3546,6 +3691,8 @@ def _validate_translated_file(
             lingarr_outcome="not attempted: file-level issue is not cue-repairable",
             completeness=completeness,
             origin=origin,
+            item_type=item_type,
+            item_id=item_id,
             dry_run=dry_run,
         )
         if action in ("quarantined", "deleted") and item_id is not None:
@@ -3923,6 +4070,8 @@ def _validate_translated_file(
         format_recovered_cues=format_recovered_cues,
         completeness=completeness,
         origin=effective_origin,
+        item_type=item_type,
+        item_id=item_id,
         dry_run=dry_run,
     )
     if action in ("quarantined", "deleted") and item_id is not None:
@@ -5057,6 +5206,16 @@ def process_item(
                 stats.setdefault("cleaned", 0)
                 stats["cleaned"] += 1
                 _record_cleanup_stats(stats, validation_action, validation_report)
+        if (
+            retry_plan is not None
+            and validation_action in ("valid", "valid-warning", "formatted", "repaired")
+        ):
+            _resolve_retry_success(
+                item_type,
+                item_id,
+                target_lang,
+                outcome="accepted_after_regeneration",
+            )
         _status_finish_validation(item_type, item_id, target_lang, validation_action)
         _shared_capacity.release(shared_token)
 
@@ -5936,7 +6095,8 @@ def _run_regeneration_retries(stats: dict) -> None:
         print(
             f"[RETRY] Admitting regeneration plan {plan['id']} "
             f"for {item_type}:{plan['itemId']} '{plan['targetLanguage']}' "
-            f"attempt={plan['attemptCount'] + 1}/{REGENERATION_MAX_ATTEMPTS}"
+            f"attempt={plan['attemptCount'] + 1}/"
+            f"{REGENERATION_MAX_ATTEMPTS or 'unlimited'}"
         )
         process_item(
             item, item_type, id_field, stats, retry_lock, retry_plan=plan
