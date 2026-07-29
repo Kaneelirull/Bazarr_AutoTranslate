@@ -20,6 +20,28 @@ from clean_et_subs import parse_srt_cues  # noqa: E402
 
 
 class AdaptiveTranslationTests(unittest.TestCase):
+    def test_lingarr_failure_details_are_classified_and_sanitized(self):
+        payload = {
+            "status": "Failed",
+            "progress": 40,
+            "errorMessage": "model context length exceeded",
+            "provider": "example",
+            "model": "large",
+            "sourceText": "secret subtitle",
+            "apiKey": "secret-key",
+            "requestCode": 413,
+            "events": [{"message": "too many tokens"}],
+        }
+        details = app._safe_failure_details(
+            42, terminal_job=payload, elapsed_seconds=12.3456
+        )
+        self.assertEqual(details["category"], "context_limit")
+        self.assertEqual(details["elapsedSeconds"], 12.346)
+        serialized = str(details)
+        self.assertNotIn("secret subtitle", serialized)
+        self.assertNotIn("secret-key", serialized)
+        self.assertEqual(details["safePayload"]["requestCode"], 413)
+
     def test_shared_capacity_handoff_is_atomic_for_all_supported_limits(self):
         for limit in (1, 2, 4):
             gate = app.SharedCapacityCoordinator(limit)

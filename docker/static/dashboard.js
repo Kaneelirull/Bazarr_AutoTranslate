@@ -87,7 +87,14 @@
       + `<span class="time-exact">${escapeHtml(exactTime(value))}</span>`;
   };
 
-  const labelForState = (state) => String(state || "unknown").replaceAll("_", " ");
+  const labelForState = (state) => {
+    const clean = String(state || "unknown");
+    return {
+      waiting_retry: "Waiting for retry",
+      series_protected: "Circuit protected",
+      missing_source: "Missing source",
+    }[clean] || clean.replaceAll("_", " ");
+  };
 
   const mediaDetail = (row) => {
     const parts = [row.episodeCode, row.episodeTitle].filter(Boolean);
@@ -129,6 +136,9 @@
     const detail = row?.failureDetails || {};
     const parts = [
       row?.reason,
+      detail.category ? `Category: ${detail.category}` : null,
+      detail.provider && detail.provider !== "unknown" ? `Provider: ${detail.provider}` : null,
+      detail.model && detail.model !== "unknown" ? `Model: ${detail.model}` : null,
       detail.errorMessage,
       ...(Array.isArray(detail.events) ? detail.events.slice(-2) : []),
     ].filter(Boolean);
@@ -398,6 +408,9 @@
               ${metric("Accepted", number(cycle.accepted).toLocaleString(), "tone-success")}
               ${metric("Failed", number(cycle.failed).toLocaleString(), "tone-danger")}
               ${metric("Timed out", number(cycle.timedOut).toLocaleString(), "tone-danger")}
+              ${metric("Waiting for retry", number(cycle.waitingRetry).toLocaleString(), "tone-warning")}
+              ${metric("Circuit protected", number(cycle.seriesProtected).toLocaleString(), "tone-warning")}
+              ${metric("Missing source", number(cycle.missingSource).toLocaleString(), "tone-warning")}
               ${metric("Deferred", number(cycle.deferred).toLocaleString(), "tone-warning")}
               ${metric("Quarantined", number(cycle.quarantined).toLocaleString(), "tone-danger")}
             </div>
@@ -607,6 +620,9 @@
         <div class="accepted-summary">${accepted.toLocaleString()} accepted<small>(${repaired.toLocaleString()} repaired)</small></div>
         ${line("Failed", "failed", "tone-danger")}
         ${line("Timed out", "timed_out", "tone-danger")}
+        ${line("Waiting for retry", "waiting_retry", "tone-warning")}
+        ${line("Circuit protected", "series_protected", "tone-warning")}
+        ${line("Missing source", "missing_source", "tone-warning")}
         ${line("Deferred", "deferred", "tone-warning")}
         ${line("Quarantined", "quarantined", "tone-danger")}
       </article>`;

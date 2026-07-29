@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 ACTIVE_RETRY_STATES = {
     "repair_retry_queued",
@@ -181,6 +181,8 @@ class StateStore:
                     status TEXT NOT NULL,
                     submitted_at REAL NOT NULL,
                     cooldown_until REAL NOT NULL,
+                    failure_category TEXT,
+                    failure_details_json TEXT,
                     updated_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_attempt_cooldown
@@ -296,6 +298,7 @@ class StateStore:
                     series_key TEXT,
                     series_title TEXT,
                     media_title TEXT,
+                    source_cue_count INTEGER,
                     failure_class TEXT NOT NULL,
                     rules_json TEXT NOT NULL,
                     state TEXT NOT NULL,
@@ -339,6 +342,24 @@ class StateStore:
             if "source_language" not in retry_columns:
                 self._connection.execute(
                     "ALTER TABLE retry_plans ADD COLUMN source_language TEXT"
+                )
+            if "source_cue_count" not in retry_columns:
+                self._connection.execute(
+                    "ALTER TABLE retry_plans ADD COLUMN source_cue_count INTEGER"
+                )
+            attempt_columns = {
+                row["name"]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(translation_attempts)"
+                ).fetchall()
+            }
+            if "failure_category" not in attempt_columns:
+                self._connection.execute(
+                    "ALTER TABLE translation_attempts ADD COLUMN failure_category TEXT"
+                )
+            if "failure_details_json" not in attempt_columns:
+                self._connection.execute(
+                    "ALTER TABLE translation_attempts ADD COLUMN failure_details_json TEXT"
                 )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -384,6 +405,7 @@ class StateStore:
             "seriesKey": row["series_key"],
             "seriesTitle": row["series_title"],
             "mediaTitle": row["media_title"],
+            "sourceCueCount": row["source_cue_count"],
             "failureClass": row["failure_class"],
             "rules": json.loads(row["rules_json"]),
             "state": row["state"],
@@ -420,6 +442,7 @@ class StateStore:
         series_key: str | None = None,
         series_title: str | None = None,
         media_title: str | None = None,
+        source_cue_count: int | None = None,
         artifact_path: str | Path | None = None,
         report_path: str | Path | None = None,
         reason: str | None = None,
@@ -470,6 +493,7 @@ class StateStore:
                         series_key = COALESCE(?, series_key),
                         series_title = COALESCE(?, series_title),
                         media_title = COALESCE(?, media_title),
+                        source_cue_count = COALESCE(?, source_cue_count),
                         failure_class = ?, rules_json = ?,
                         state = CASE WHEN ? THEN state ELSE ? END,
                         last_failure_at = ?,
@@ -484,7 +508,7 @@ class StateStore:
                     """,
                     (
                         _path_key(source_path), source_language, _path_key(target_path),
-                        series_key, series_title, media_title,
+                        series_key, series_title, media_title, source_cue_count,
                         failure_class, json.dumps(rule_values), repeated, state,
                         timestamp, failed_output_hash, repeated,
                         max(0, int(eligible_completed_cycle)),
@@ -499,16 +523,16 @@ class StateStore:
                     INSERT INTO retry_plans(
                         item_type, item_id, target_language, source_hash,
                         source_path, source_language, target_path, series_key, series_title,
-                        media_title, failure_class, rules_json, state,
+                        media_title, source_cue_count, failure_class, rules_json, state,
                         first_failure_at, last_failure_at, failed_output_hash,
                         eligible_completed_cycle, artifact_path, report_path,
                         last_reason, created_at, updated_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         *identity, source_hash, _path_key(source_path),
                         source_language, _path_key(target_path), series_key, series_title,
-                        media_title, failure_class, json.dumps(rule_values), state,
+                        media_title, source_cue_count, failure_class, json.dumps(rule_values), state,
                         timestamp, timestamp, failed_output_hash,
                         max(0, int(eligible_completed_cycle)),
                         _path_key(artifact_path), _path_key(report_path), reason,
@@ -536,8 +560,11 @@ class StateStore:
                 SELECT * FROM retry_plans
                 WHERE state = 'regeneration_waiting'
                   AND eligible_completed_cycle <= ?
-                ORDER BY eligible_completed_cycle, first_failure_at,
-                         attempt_count, item_type, item_id, target_language
+                ORDER BY eligible_completed_cycle,
+                         CAST(first_failure_at / 86400 AS INTEGER),
+                         CASE WHEN source_cue_count IS NULL THEN 1 ELSE 0 END,
+                         source_cue_count, attempt_count, first_failure_at,
+                         item_type, item_id, target_language
                 """,
                 (max(0, int(completed_cycle)),),
             ).fetchall()
@@ -565,6 +592,45 @@ class StateStore:
                 for row in selected
             ]
         return [self._retry_plan_dict(row) for row in claimed if row is not None]
+
+    def due_retry_count(self, completed_cycle: int) -> int:
+        row = self._fetchone(
+            """
+            SELECT COUNT(*) AS count
+            FROM retry_plans
+            WHERE state = 'regeneration_waiting'
+              AND eligible_completed_cycle <= ?
+            """,
+            (max(0, int(completed_cycle)),),
+        )
+        return int(row["count"]) if row else 0
+
+    def recover_retry_claims(self) -> int:
+        """Release crash-orphaned claims without changing attempts or eligibility."""
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                UPDATE retry_plans
+                SET state = 'regeneration_waiting',
+                    last_reason = 'recovered after service restart',
+                    updated_at = ?
+                WHERE state IN ('regeneration_queued', 'retry_in_progress')
+                """,
+                (time.time(),),
+            )
+            return max(0, int(cursor.rowcount))
+
+    def set_retry_source_cue_count(self, plan_id: int, cue_count: int) -> bool:
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                UPDATE retry_plans
+                SET source_cue_count = ?, updated_at = ?
+                WHERE id = ? AND source_cue_count IS NULL
+                """,
+                (max(1, int(cue_count)), time.time(), int(plan_id)),
+            )
+            return cursor.rowcount == 1
 
     def update_retry_plan(
         self,
@@ -1130,15 +1196,30 @@ class StateStore:
                     f"submission attempt {attempt_id} no longer exists"
                 )
 
-    def mark_submission_failed(self, attempt_id: int) -> None:
+    def mark_submission_failed(
+        self,
+        attempt_id: int,
+        *,
+        failure_category: str | None = None,
+        failure_details: dict | None = None,
+    ) -> None:
         with self._transaction() as db:
             db.execute(
                 """
                 UPDATE translation_attempts
-                SET status = 'failed', cooldown_until = 0, updated_at = ?
+                SET status = 'failed', cooldown_until = 0,
+                    failure_category = COALESCE(?, failure_category),
+                    failure_details_json = COALESCE(?, failure_details_json),
+                    updated_at = ?
                 WHERE id = ?
                 """,
-                (time.time(), int(attempt_id)),
+                (
+                    failure_category,
+                    json.dumps(failure_details, ensure_ascii=False)
+                    if failure_details else None,
+                    time.time(),
+                    int(attempt_id),
+                ),
             )
 
     def clear_submission(

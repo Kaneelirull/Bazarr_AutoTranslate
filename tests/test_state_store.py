@@ -80,6 +80,120 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual([plan["itemId"] for plan in claimed], [1, 3])
             store.close()
 
+    def test_retry_claims_prefer_smallest_within_oldest_day_and_recover_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            day = 86400.0
+            for item_id, seen, cues in (
+                (1, day + 10, 900),
+                (2, day + 20, 100),
+                (3, 2 * day, 10),
+            ):
+                store.schedule_retry_plan(
+                    item_type="movies",
+                    item_id=item_id,
+                    target_language="et",
+                    source_hash=f"source-{item_id}",
+                    failure_class="whole_file",
+                    rules=["target_structure"],
+                    state="regeneration_waiting",
+                    source_cue_count=cues,
+                    eligible_completed_cycle=2,
+                    now=seen,
+                )
+            claimed = store.claim_due_retry_plans(2, limit=2)
+            self.assertEqual([plan["itemId"] for plan in claimed], [2, 1])
+            self.assertEqual(store.recover_retry_claims(), 2)
+            self.assertEqual(
+                [plan["state"] for plan in store.retry_plans()[:2]],
+                ["regeneration_waiting", "regeneration_waiting"],
+            )
+            store.close()
+
+    def test_cycle_two_backlog_admits_only_five_of_eighty_six(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            for item_id in range(1, 87):
+                store.schedule_retry_plan(
+                    item_type="episodes",
+                    item_id=item_id,
+                    target_language="et",
+                    source_hash=f"source-{item_id}",
+                    failure_class="whole_file",
+                    rules=["target_structure"],
+                    state="regeneration_waiting",
+                    series_key=f"series-{item_id}",
+                    source_cue_count=1000 - item_id,
+                    eligible_completed_cycle=2,
+                    now=86400 + item_id,
+                )
+            claimed = store.claim_due_retry_plans(
+                2, limit=5, per_series_limit=1
+            )
+            self.assertEqual(len(claimed), 5)
+            self.assertEqual(len([
+                plan for plan in store.retry_plans()
+                if plan["state"] == "regeneration_waiting"
+            ]), 81)
+            store.close()
+
+    def test_schema_v5_persists_failure_details(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            attempt = store.record_submission(
+                item_type="movies",
+                item_id=9,
+                target_language="et",
+                target_identity="movie",
+                target_path="movie.et.srt",
+                cooldown_seconds=1,
+                submitted_at=1,
+            )
+            store.mark_submission_failed(
+                attempt,
+                failure_category="context_limit",
+                failure_details={"status": "Failed", "category": "context_limit"},
+            )
+            row = store._fetchone(
+                "SELECT failure_category, failure_details_json FROM translation_attempts WHERE id=?",
+                (attempt,),
+            )
+            self.assertEqual(row["failure_category"], "context_limit")
+            self.assertEqual(json.loads(row["failure_details_json"])["status"], "Failed")
+            self.assertEqual(store._fetchone("PRAGMA user_version")[0], 5)
+            store.close()
+
+    def test_schema_v4_migrates_retry_size_and_failure_columns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            StateStore(database).close()
+            connection = sqlite3.connect(database)
+            connection.execute("ALTER TABLE retry_plans DROP COLUMN source_cue_count")
+            connection.execute("ALTER TABLE translation_attempts DROP COLUMN failure_category")
+            connection.execute("ALTER TABLE translation_attempts DROP COLUMN failure_details_json")
+            connection.execute("PRAGMA user_version = 4")
+            connection.commit()
+            connection.close()
+
+            migrated = StateStore(database)
+            retry_columns = {
+                row["name"]
+                for row in migrated._connection.execute(
+                    "PRAGMA table_info(retry_plans)"
+                )
+            }
+            attempt_columns = {
+                row["name"]
+                for row in migrated._connection.execute(
+                    "PRAGMA table_info(translation_attempts)"
+                )
+            }
+            self.assertIn("source_cue_count", retry_columns)
+            self.assertIn("failure_category", attempt_columns)
+            self.assertIn("failure_details_json", attempt_columns)
+            self.assertEqual(migrated._fetchone("PRAGMA user_version")[0], 5)
+            migrated.close()
+
     def test_source_change_supersedes_active_retry_plan(self):
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite3")

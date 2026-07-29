@@ -634,6 +634,70 @@ def recover_srt_structure(source_raw: str, target_raw: str) -> FormatRecoveryRes
         anchors.append((index, int(number_text), timestamp))
 
     if len(anchors) != len(source_cues):
+        # A single damaged number or timestamp can still be mapped safely when
+        # every surrounding block matches its source position exactly.
+        blocks = re.split(r"\r?\n\s*\r?\n", target_raw.lstrip("\ufeff").strip())
+        if len(blocks) == len(source_cues):
+            rebuilt: list[SubtitleCue] = []
+            damaged: list[int] = []
+            for position, (block, source_cue) in enumerate(zip(blocks, source_cues)):
+                block_lines = block.splitlines()
+                source_timestamp = _canonical_timestamp(source_cue.timestamp)
+                number_ok = bool(
+                    block_lines
+                    and block_lines[0].strip().isdigit()
+                    and int(block_lines[0].strip()) == source_cue.number
+                )
+                timestamp_at_one = (
+                    _canonical_timestamp(block_lines[1])
+                    if len(block_lines) > 1 else None
+                )
+                timestamp_at_zero = (
+                    _canonical_timestamp(block_lines[0])
+                    if block_lines else None
+                )
+                malformed_timestamp_at_one = bool(
+                    len(block_lines) > 1
+                    and ">" in block_lines[1]
+                    and re.search(r"\d{1,2}:\d{2}", block_lines[1])
+                )
+                if number_ok and timestamp_at_one == source_timestamp:
+                    text_lines = block_lines[2:]
+                elif timestamp_at_zero == source_timestamp:
+                    damaged.append(position)
+                    text_lines = block_lines[1:]
+                elif number_ok and len(block_lines) > 2 and malformed_timestamp_at_one:
+                    damaged.append(position)
+                    text_lines = block_lines[2:]
+                elif len(block_lines) > 2 and timestamp_at_one == source_timestamp:
+                    damaged.append(position)
+                    text_lines = block_lines[2:]
+                else:
+                    return FormatRecoveryResult(
+                        False, False, None,
+                        reason=f"target block {position + 1} cannot be aligned uniquely",
+                    )
+                if not any(line.strip() for line in text_lines):
+                    return FormatRecoveryResult(
+                        False, False, None,
+                        reason=f"target block {position + 1} has no translated text",
+                    )
+                rebuilt.append(
+                    SubtitleCue(source_cue.number, source_timestamp, text_lines)
+                )
+            if len(damaged) == 1:
+                newline = "\r\n" if had_crlf else "\n"
+                rendered = render_srt_cues(rebuilt, newline=newline)
+                if had_bom:
+                    rendered = "\ufeff" + rendered
+                return FormatRecoveryResult(
+                    True,
+                    rendered != target_raw,
+                    rendered,
+                    fixes=["source_aligned_single_anchor"],
+                    recovered_cues=[source_cues[damaged[0]].number],
+                    reason="repaired one source-aligned structural anchor",
+                )
         return FormatRecoveryResult(
             False,
             False,
