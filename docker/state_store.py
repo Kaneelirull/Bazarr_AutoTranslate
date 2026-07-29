@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 ACTIVE_RETRY_STATES = {
     "repair_retry_queued",
@@ -47,9 +47,11 @@ class StateStore:
         *,
         acquire_process_lock: bool = False,
         validator_version: str = "1",
+        config_fingerprint: str = "",
     ):
         self.path = Path(path)
         self.validator_version = str(validator_version)
+        self.config_fingerprint = str(config_fingerprint)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._process_lock_handle = None
@@ -321,6 +323,33 @@ class StateStore:
                     ON retry_plans(state, eligible_completed_cycle, first_failure_at);
                 CREATE INDEX IF NOT EXISTS idx_retry_plans_identity
                     ON retry_plans(item_type, item_id, target_language, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS quarantine_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_type TEXT NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    target_language TEXT NOT NULL,
+                    source_hash TEXT NOT NULL,
+                    target_hash TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    validator_fingerprint TEXT NOT NULL,
+                    config_fingerprint TEXT NOT NULL,
+                    artifact_path TEXT,
+                    report_path TEXT,
+                    failure_rules_json TEXT NOT NULL,
+                    repair_provenance_json TEXT NOT NULL,
+                    donor_provenance_json TEXT NOT NULL,
+                    cue_signatures_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    UNIQUE(
+                        item_type, item_id, target_language,
+                        source_hash, target_hash, attempt_number
+                    )
+                );
+                CREATE INDEX IF NOT EXISTS idx_quarantine_attempt_donors
+                    ON quarantine_attempts(
+                        item_type, item_id, target_language, created_at DESC
+                    );
                 """
             )
             quarantine_columns = {
@@ -362,6 +391,95 @@ class StateStore:
                     "ALTER TABLE translation_attempts ADD COLUMN failure_details_json TEXT"
                 )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    @staticmethod
+    def _quarantine_attempt_dict(row: sqlite3.Row | None) -> dict | None:
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "itemType": row["item_type"],
+            "itemId": int(row["item_id"]),
+            "targetLanguage": row["target_language"],
+            "sourceHash": row["source_hash"],
+            "targetHash": row["target_hash"],
+            "attemptNumber": int(row["attempt_number"]),
+            "validatorFingerprint": row["validator_fingerprint"],
+            "configFingerprint": row["config_fingerprint"],
+            "artifactPath": row["artifact_path"],
+            "reportPath": row["report_path"],
+            "failureRules": json.loads(row["failure_rules_json"]),
+            "repairProvenance": json.loads(row["repair_provenance_json"]),
+            "donorProvenance": json.loads(row["donor_provenance_json"]),
+            "cueSignatures": json.loads(row["cue_signatures_json"]),
+            "createdAt": float(row["created_at"]),
+        }
+
+    def record_quarantine_attempt(
+        self,
+        *,
+        item_type: str,
+        item_id: int,
+        target_language: str,
+        source_hash: str,
+        target_hash: str,
+        attempt_number: int,
+        artifact_path: str | Path | None,
+        report_path: str | Path | None,
+        failure_rules: Iterable[str],
+        cue_signatures: list[dict],
+        repair_provenance: list[dict] | None = None,
+        donor_provenance: list[dict] | None = None,
+        created_at: float | None = None,
+    ) -> dict:
+        """Append one immutable failed-output record for later donor recovery."""
+        timestamp = time.time() if created_at is None else float(created_at)
+        values = (
+            str(item_type), int(item_id), str(target_language).lower(),
+            str(source_hash), str(target_hash), max(1, int(attempt_number)),
+            self.validator_version, self.config_fingerprint,
+            _path_key(artifact_path), _path_key(report_path),
+            json.dumps(sorted({str(rule) for rule in failure_rules if rule})),
+            json.dumps(repair_provenance or [], sort_keys=True),
+            json.dumps(donor_provenance or [], sort_keys=True),
+            json.dumps(cue_signatures, sort_keys=True), timestamp,
+        )
+        with self._transaction() as db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO quarantine_attempts(
+                    item_type, item_id, target_language, source_hash, target_hash,
+                    attempt_number, validator_fingerprint, config_fingerprint,
+                    artifact_path, report_path, failure_rules_json,
+                    repair_provenance_json, donor_provenance_json,
+                    cue_signatures_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+            row = db.execute(
+                """
+                SELECT * FROM quarantine_attempts
+                WHERE item_type=? AND item_id=? AND target_language=?
+                  AND source_hash=? AND target_hash=? AND attempt_number=?
+                """,
+                values[:6],
+            ).fetchone()
+        return self._quarantine_attempt_dict(row)
+
+    def quarantine_attempts(
+        self, item_type: str, item_id: int, target_language: str
+    ) -> list[dict]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM quarantine_attempts
+                WHERE item_type=? AND item_id=? AND target_language=?
+                ORDER BY attempt_number DESC, created_at DESC, id DESC
+                """,
+                (str(item_type), int(item_id), str(target_language).lower()),
+            ).fetchall()
+        return [self._quarantine_attempt_dict(row) for row in rows]
 
     def completed_cycle(self) -> int:
         value = self._metadata("completed_cycle")

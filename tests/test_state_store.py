@@ -160,7 +160,7 @@ class StateStoreTests(unittest.TestCase):
             )
             self.assertEqual(row["failure_category"], "context_limit")
             self.assertEqual(json.loads(row["failure_details_json"])["status"], "Failed")
-            self.assertEqual(store._fetchone("PRAGMA user_version")[0], 5)
+            self.assertEqual(store._fetchone("PRAGMA user_version")[0], 6)
             store.close()
 
     def test_schema_v4_migrates_retry_size_and_failure_columns(self):
@@ -191,8 +191,44 @@ class StateStoreTests(unittest.TestCase):
             self.assertIn("source_cue_count", retry_columns)
             self.assertIn("failure_category", attempt_columns)
             self.assertIn("failure_details_json", attempt_columns)
-            self.assertEqual(migrated._fetchone("PRAGMA user_version")[0], 5)
+            self.assertEqual(migrated._fetchone("PRAGMA user_version")[0], 6)
             migrated.close()
+
+    def test_quarantine_attempts_are_immutable_and_privacy_safe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(
+                Path(directory) / "state.sqlite3",
+                validator_version="validator-6",
+                config_fingerprint="config-a",
+            )
+            values = {
+                "item_type": "episodes",
+                "item_id": 74608,
+                "target_language": "et",
+                "source_hash": "source-a",
+                "target_hash": "target-a",
+                "attempt_number": 1,
+                "artifact_path": "attempt-1.srt",
+                "report_path": "attempt-1.srt.validation.json",
+                "failure_rules": ["copied_source"],
+                "cue_signatures": [{
+                    "cueNumber": 25,
+                    "startMs": 5000,
+                    "tokenHashes": ["a1", "b2"],
+                    "sourceHash": "signature-a",
+                }],
+            }
+            first = store.record_quarantine_attempt(**values)
+            second = store.record_quarantine_attempt(
+                **{**values, "failure_rules": ["prompt_marker"]}
+            )
+
+            self.assertEqual(first, second)
+            self.assertEqual(second["failureRules"], ["copied_source"])
+            self.assertNotIn("dialogue", json.dumps(second).lower())
+            self.assertEqual(second["validatorFingerprint"], "validator-6")
+            self.assertEqual(second["configFingerprint"], "config-a")
+            store.close()
 
     def test_source_change_supersedes_active_retry_plan(self):
         with tempfile.TemporaryDirectory() as directory:

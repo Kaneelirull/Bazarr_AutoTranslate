@@ -563,6 +563,8 @@
       ["Validation rules", rules],
       ["Last reason", plan.lastReason || "—"],
       ["Eligible cycle", plan.eligibleCompletedCycle ?? "—"],
+      ["Archived attempts", plan.archivedAttemptCount ?? 0],
+      ["Latest donor attempt", plan.latestDonorAttempt ?? "—"],
       ["Item", `${plan.itemType || "media"}:${plan.itemId ?? "—"}`],
       ["Final outcome", plan.finalOutcome || "—"],
     ];
@@ -594,7 +596,7 @@
         </td>
         <td data-label="Language">${escapeHtml(plan.targetLanguage || "—")}</td>
         <td data-label="Status"><span class="badge ${stateTone}">${escapeHtml(stateLabel)}</span></td>
-        <td data-label="Attempts"><span class="duration">${Number(plan.attemptCount || 0)} / ${Number(maxAttempts || 3)}</span></td>
+        <td data-label="Attempts"><span class="duration">${Number(plan.attemptCount || 0)} / ${Number(maxAttempts || 0) === 0 ? "unlimited" : Number(maxAttempts)}</span></td>
         <td data-label="Next action">${escapeHtml(retryNextAction(plan))}</td>
         <td class="cell-details" data-label="Details">${retryDetails(plan)}</td>
       </tr>`;

@@ -92,7 +92,9 @@ Existing-library cleanup runs after startup synchronization and then on its own 
 | `RETENTION_DAYS` | `30` | Maximum age for application logs and validation-state audit records |
 | `QUARANTINE_ARTIFACT_RETENTION_DAYS` | `30` | Maximum age for quarantined subtitle files and reports; never controls retry eligibility |
 | `REGENERATION_INITIAL_DELAY_CYCLES` | `2` | Healthy completed cycles before the first fresh translation retry |
-| `REGENERATION_MAX_ATTEMPTS` | `3` | Maximum fresh translation attempts before manual review |
+| `REGENERATION_MAX_ATTEMPTS` | `0` | Fresh translation limit; `0` retries indefinitely |
+| `REGENERATION_MAX_DELAY_CYCLES` | `16` | Maximum completed-cycle delay between fresh translations |
+| `DONOR_RECOVERY_ENABLED` | `true` | Reuse individually revalidated cues from prior quarantine attempts |
 | `REGENERATION_BACKOFF_MULTIPLIER` | `2.0` | Completed-cycle backoff multiplier, producing 2/4/8 with defaults |
 | `RETRY_BATCH_SIZE_PER_CYCLE` | `5` | Maximum regeneration admissions per completed cycle |
 | `RETRY_MAX_PER_SERIES_PER_CYCLE` | `1` | Maximum regeneration admissions from one series per cycle |

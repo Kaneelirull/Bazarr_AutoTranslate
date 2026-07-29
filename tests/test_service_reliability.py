@@ -457,6 +457,17 @@ class ServiceReliabilityTests(unittest.TestCase):
             self.assertEqual(normalize.call_args_list[0], call(source))
             self.assertEqual(len(normalize.call_args_list), 2)
 
+    def test_regeneration_delay_is_indefinite_and_capped(self):
+        with (
+            patch.object(app, "REGENERATION_INITIAL_DELAY_CYCLES", 2),
+            patch.object(app, "REGENERATION_BACKOFF_MULTIPLIER", 2.0),
+            patch.object(app, "REGENERATION_MAX_DELAY_CYCLES", 16),
+        ):
+            self.assertEqual(
+                [app._regeneration_delay_cycles(index) for index in range(7)],
+                [2, 4, 8, 16, 16, 16, 16],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

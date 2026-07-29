@@ -247,6 +247,7 @@ class RepairResult:
     reason: str
     attempts: int = 0
     attempt_history: list[dict] = field(default_factory=list)
+    donor_history: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -795,9 +796,79 @@ def _normalise_for_similarity(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _looks_like_proper_noun_list(text: str) -> bool:
-    words = re.findall(r"[A-Za-z\u00C0-\u024F]+", TAG_RE.sub(" ", text))
-    return bool(words) and all(word.isupper() or word[0].isupper() for word in words)
+def _is_invariant_dominated(source: str, target: str) -> bool:
+    """Allow copied names/models without exempting ordinary title-cased prose."""
+    clean_source = TAG_RE.sub(" ", source).strip()
+    words = re.findall(r"[A-Za-z\u00C0-\u024F0-9-]+", clean_source)
+    if len(words) < 2:
+        return False
+    connectors = {"and", "or", "vs", "versus"}
+    content = [word for word in words if word.casefold() not in connectors]
+    if not content or not all(
+        word.isupper()
+        or any(char.isdigit() for char in word)
+        or (word[0].isupper() and not word[1:].isupper())
+        for word in content
+    ):
+        return False
+    has_model = any(any(char.isdigit() for char in word) or word.isupper() for word in content)
+    has_connector = bool(
+        re.search(r"[&/|]", clean_source)
+        or any(word.casefold() in connectors for word in words)
+    )
+    punctuation_groups = [
+        re.findall(r"[A-Za-z\u00C0-\u024F0-9-]+", group)
+        for group in re.split(r"[,;:!]+", clean_source)
+        if group.strip()
+    ]
+    has_short_name_groups = (
+        len(punctuation_groups) >= 2
+        and all(1 <= len(group) <= 2 for group in punctuation_groups)
+    )
+    if not (has_model or has_connector or has_short_name_groups):
+        return False
+    source_content = {
+        word.casefold() for word in content if len(word) > 1
+    }
+    target_words = {
+        word.casefold()
+        for word in re.findall(r"[A-Za-z\u00C0-\u024F0-9-]+", TAG_RE.sub(" ", target))
+    }
+    return bool(source_content) and len(source_content & target_words) / len(source_content) >= 0.8
+
+
+def _timestamp_start_ms(timestamp: str) -> int | None:
+    match = re.match(r"\s*(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})", timestamp)
+    if not match:
+        return None
+    hours, minutes, seconds, millis = (int(value) for value in match.groups())
+    return ((hours * 60 + minutes) * 60 + seconds) * 1000 + millis
+
+
+def cue_source_signature(cue: SubtitleCue) -> dict:
+    """Build privacy-safe matching metadata; no dialogue is persisted."""
+    tokens = re.findall(r"\w+", _normalise_for_similarity(cue.text), flags=re.UNICODE)
+    token_hashes = [
+        hashlib.sha256(token.encode("utf-8")).hexdigest()[:16] for token in tokens
+    ]
+    return {
+        "cueNumber": cue.number,
+        "startMs": _timestamp_start_ms(cue.timestamp),
+        "tokenHashes": token_hashes,
+        "sourceHash": hashlib.sha256(
+            "\x1f".join(token_hashes).encode("ascii")
+        ).hexdigest(),
+    }
+
+
+def source_cue_signatures(source_path: Path | str) -> list[dict]:
+    raw = read_text_best_effort(Path(source_path))
+    if raw is None:
+        return []
+    cues, errors = parse_srt_cues(raw)
+    if errors:
+        return []
+    return [cue_source_signature(cue) for cue in cues]
 
 
 def validate_cue_pair(
@@ -853,7 +924,7 @@ def validate_cue_pair(
     if (
         len(source_normalised) >= 20
         and len(target_normalised) >= 20
-        and not _looks_like_proper_noun_list(source_text)
+        and not _is_invariant_dominated(source_text, target_text)
     ):
         similarity = SequenceMatcher(None, source_normalised, target_normalised).ratio()
         if similarity >= max_source_similarity:
@@ -1060,6 +1131,9 @@ def repair_subtitle_file(
     max_attempts: int = 5,
     context_lines: int = 5,
     attempt_logger: Optional[Callable[[dict], None]] = None,
+    donor_attempts: Optional[list[dict]] = None,
+    donor_similarity: float = 0.95,
+    donor_timestamp_tolerance_ms: int = 500,
     **validation_kwargs,
 ) -> RepairResult:
     """Repair only invalid aligned cues, then atomically replace the target after full validation."""
@@ -1092,6 +1166,7 @@ def repair_subtitle_file(
     unresolved_cues: list[tuple[int, str]] = []
     attempt_count = 0
     attempt_history: list[dict] = []
+    donor_history: list[dict] = []
 
     cue_validation_keys = {
         "max_cue_lines",
@@ -1200,6 +1275,105 @@ def repair_subtitle_file(
             accepted = True
             break
 
+        if not accepted and donor_attempts:
+            current_signature = cue_source_signature(source_cue)
+            ranked: list[tuple[tuple, SubtitleCue, dict]] = []
+            for donor_attempt in donor_attempts:
+                artifact_path = donor_attempt.get("artifactPath")
+                signatures = donor_attempt.get("cueSignatures") or []
+                donor_raw = (
+                    read_text_best_effort(Path(artifact_path))
+                    if artifact_path else None
+                )
+                try:
+                    artifact_hash = (
+                        file_sha256(Path(artifact_path)) if artifact_path else None
+                    )
+                except OSError:
+                    artifact_hash = None
+                if (
+                    donor_raw is None
+                    or not donor_attempt.get("targetHash")
+                    or artifact_hash != donor_attempt.get("targetHash")
+                ):
+                    continue
+                donor_cues, donor_errors = parse_srt_cues(donor_raw)
+                if donor_errors or len(donor_cues) != len(signatures):
+                    continue
+                for donor_cue, signature in zip(donor_cues, signatures):
+                    current_tokens = current_signature["tokenHashes"]
+                    donor_tokens = signature.get("tokenHashes") or []
+                    similarity = SequenceMatcher(
+                        None, current_tokens, donor_tokens
+                    ).ratio()
+                    current_ms = current_signature.get("startMs")
+                    donor_ms = signature.get("startMs")
+                    if current_ms is None or donor_ms is None:
+                        continue
+                    timestamp_distance = abs(current_ms - int(donor_ms))
+                    if (
+                        similarity < donor_similarity
+                        or timestamp_distance > donor_timestamp_tolerance_ms
+                    ):
+                        continue
+                    replacement = SubtitleCue(
+                        source_cue.number,
+                        source_cue.timestamp,
+                        list(donor_cue.lines),
+                    )
+                    issues = validate_cue_pair(
+                        source_cue,
+                        replacement,
+                        cue_index=cue_index,
+                        target_lang=target_lang,
+                        **cue_validation_kwargs,
+                    )
+                    if issues:
+                        continue
+                    exact = current_signature["sourceHash"] == signature.get("sourceHash")
+                    detected_language, detected_confidence = detect_language(
+                        detector, replacement.text
+                    )
+                    if (
+                        detected_language is not None
+                        and detected_language != target_language
+                        and detected_confidence >= 0.70
+                    ):
+                        continue
+                    language_confidence = (
+                        detected_confidence
+                        if detected_language in (None, target_language) else 0.0
+                    )
+                    warnings = int(
+                        detected_language is not None
+                        and detected_language != target_language
+                    )
+                    expansion = abs(len(replacement.text) - len(source_cue.text))
+                    rank = (
+                        0 if exact else 1,
+                        -similarity,
+                        timestamp_distance,
+                        warnings,
+                        -language_confidence,
+                        expansion,
+                        -float(donor_attempt.get("createdAt") or 0),
+                        -int(donor_attempt.get("attemptNumber") or 0),
+                    )
+                    ranked.append((rank, replacement, donor_attempt))
+            if ranked:
+                _, replacement, donor_attempt = min(ranked, key=lambda entry: entry[0])
+                candidate_cues[cue_index] = replacement
+                repaired_numbers.append(replacement.number)
+                donor_record = {
+                    "cueNumber": source_cue.number,
+                    "sourceAttempt": donor_attempt.get("attemptNumber"),
+                    "sourceAttemptId": donor_attempt.get("id"),
+                }
+                donor_history.append(donor_record)
+                if attempt_logger is not None:
+                    attempt_logger({**donor_record, "event": "donor_accepted"})
+                accepted = True
+
         if not accepted:
             unresolved_cues.append((source_cue.number, last_reason))
 
@@ -1218,6 +1392,7 @@ def repair_subtitle_file(
             ),
             attempt_count,
             attempt_history,
+            donor_history,
         )
 
     newline = "\r\n" if "\r\n" in target_raw else "\n"
@@ -1246,14 +1421,16 @@ def repair_subtitle_file(
         )
         if not final_report.valid:
             return RepairResult(
-                False, repaired_numbers, final_report, final_report.summary(), attempt_count, attempt_history
+                False, repaired_numbers, final_report, final_report.summary(),
+                attempt_count, attempt_history, donor_history
             )
 
         normalize_managed_file(temp_name)
         os.replace(temp_name, target)
         temp_name = None
         return RepairResult(
-            True, repaired_numbers, final_report, "repaired and validated", attempt_count, attempt_history
+            True, repaired_numbers, final_report, "repaired and validated",
+            attempt_count, attempt_history, donor_history
         )
     except OSError as exc:
         return RepairResult(
@@ -1263,6 +1440,7 @@ def repair_subtitle_file(
             f"could not write repaired file: {exc}",
             attempt_count,
             attempt_history,
+            donor_history,
         )
     finally:
         if temp_name is not None:

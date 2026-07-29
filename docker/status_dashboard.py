@@ -639,6 +639,7 @@ class StatusTracker:
                             "seriesTitle", "mediaTitle", "failureClass", "rules",
                             "state", "attemptCount", "eligibleCompletedCycle",
                             "lastFailureAt", "lastReason", "finalOutcome",
+                            "archivedAttemptCount", "latestDonorAttempt",
                         )
                     })
                 self._service["retryPlans"] = safe_retries
@@ -647,9 +648,7 @@ class StatusTracker:
                     0, int(completed_cycle)
                 )
             if retry_max_attempts is not None:
-                self._service["retryMaxAttempts"] = max(
-                    1, int(retry_max_attempts)
-                )
+                self._service["retryMaxAttempts"] = max(0, int(retry_max_attempts))
             self._write_snapshot_locked()
 
     def _write_snapshot_locked(self) -> None:
