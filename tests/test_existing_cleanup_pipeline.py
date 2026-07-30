@@ -368,6 +368,16 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 ),
                 patch.object(app, "_probe_media_duration", return_value=5400.0),
                 patch.object(app, "_managed_sidecar_is_valid", return_value=(True, {"valid": True})),
+                patch.object(
+                    app,
+                    "_status_create_maintenance",
+                    return_value="prune-status",
+                ) as create_status,
+                patch.object(app, "_status_complete_maintenance") as complete_status,
+                patch.object(
+                    app,
+                    "_status_record_maintenance_outcome",
+                ) as record_outcome,
             ):
                 stats, episodes_changed, movies_changed = app.run_extra_sidecar_prune()
 
@@ -381,6 +391,17 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertTrue((root / "movie.en.srt").exists())
             self.assertTrue((root / "movie.et.srt").exists())
             self.assertTrue((root / "movie.sv.srt").exists())
+            create_status.assert_called_once_with(
+                "sidecar_pruning",
+                {"title": "Subtitle sidecar pruning"},
+                state="pruning",
+            )
+            self.assertEqual(complete_status.call_args.args[:2], ("prune-status", "accepted"))
+            self.assertEqual(record_outcome.call_count, 3)
+            self.assertTrue(all(
+                call.args[0:2] == ("sidecar_pruning", "pruned")
+                for call in record_outcome.call_args_list
+            ))
 
     def test_missing_managed_language_blocks_all_pruning(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1455,7 +1476,15 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 patch.object(app, "_repair_capacity", threading.BoundedSemaphore(2)),
             ):
                 queued = app._queue_repair(
-                    ("repair-show", "hash"), {}, report, "Repair Show", "et"
+                    ("repair-show", "hash"),
+                    {
+                        "item_type": "episodes",
+                        "item_id": 42,
+                        "target_lang": "et",
+                    },
+                    report,
+                    "Repair Show",
+                    "et",
                 )
                 self.assertEqual(queued, "repair-queued")
                 self.assertTrue(started.wait(1))
@@ -1489,6 +1518,112 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(stats["completed"], 1)
             self.assertEqual(drained_snapshot["history"]["1h"]["accepted"], 1)
             self.assertEqual(len(drained_snapshot["recentOutcomes"]), 1)
+
+    def test_existing_library_repair_uses_maintenance_status_job(self):
+        started = threading.Event()
+        release = threading.Event()
+        report = SimpleNamespace(repairable_cue_indexes=[1288, 1289], issues=[])
+
+        def worker(**_kwargs):
+            started.set()
+            release.wait(2)
+            return app.RepairJobResult(
+                "repaired", report, "Shameless (US) S06E03", "et", None, None,
+                attempts=1, target_path="ignored.srt",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = app.StatusTracker(
+                Path(directory) / "status.json",
+                Path(directory) / "history.jsonl",
+            )
+            with (
+                patch.object(app, "_status_tracker", tracker),
+                patch.object(app, "_perform_repair", side_effect=worker),
+                patch.object(app, "_repair_capacity", threading.BoundedSemaphore(2)),
+            ):
+                queued = app._queue_repair(
+                    ("existing", "hash"),
+                    {
+                        "source_lang": "en",
+                        "target_lang": "et",
+                        "title": "Shameless (US) S06E03",
+                    },
+                    report,
+                    "Shameless (US) S06E03",
+                    "et",
+                )
+                self.assertEqual(queued, "repair-queued")
+                self.assertTrue(started.wait(1))
+                active = tracker.snapshot()["maintenance"]["activeJobs"]
+                self.assertEqual(len(active), 1)
+                self.assertEqual(active[0]["operation"], "cue_repair")
+                self.assertIn(
+                    active[0]["state"],
+                    {"repair_waiting_capacity", "repairing"},
+                )
+                release.set()
+                app._drain_pending_repairs({
+                    "submitted": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "translations": [],
+                    "episode_activity": False,
+                    "movie_activity": False,
+                })
+            snapshot = tracker.snapshot()
+            self.assertEqual(snapshot["maintenance"]["activeJobs"], [])
+            self.assertEqual(
+                snapshot["maintenance"]["recentOutcomes"][0]["outcome"],
+                "repaired",
+            )
+
+    def test_cleanup_scan_waits_for_child_repair_and_records_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = app.StatusTracker(
+                Path(directory) / "status.json",
+                Path(directory) / "history.jsonl",
+            )
+            with patch.object(app, "_status_tracker", tracker):
+                scan_id = app._status_create_maintenance(
+                    "existing_library_scan",
+                    {"title": "Existing subtitle library"},
+                    state="scanning",
+                )
+                with app._maintenance_scan_contexts_lock:
+                    app._maintenance_scan_contexts[scan_id] = {
+                        "started": time.monotonic(),
+                        "stats": {},
+                        "files_discovered": 2,
+                        "files_checked": 2,
+                        "pending": 0,
+                        "repairs_queued": 0,
+                        "repairs_completed": 0,
+                        "enumeration_done": False,
+                        "last_publish": 0,
+                    }
+                app._scan_child_queued(scan_id)
+                app._scan_enumeration_finished(
+                    scan_id,
+                    {
+                        "files_checked": 1,
+                        "skipped_unchanged": 1,
+                        "formatted_files": 0,
+                        "repair_failures": 0,
+                        "action_failures": 0,
+                        "prune_failures": 0,
+                    },
+                )
+                waiting = tracker.snapshot()["maintenance"]["activeJobs"][0]
+                self.assertEqual(waiting["state"], "waiting_repair_completion")
+                self.assertEqual(waiting["filesChecked"], 2)
+                self.assertEqual(waiting["cueRepairsQueued"], 1)
+                app._scan_child_finished(scan_id, "repaired")
+            snapshot = tracker.snapshot()
+            self.assertEqual(snapshot["maintenance"]["activeJobs"], [])
+            self.assertEqual(
+                snapshot["maintenance"]["lastScan"]["metrics"]["repaired"], 1
+            )
 
     def test_repair_status_maps_terminal_outcomes_and_worker_errors(self):
         class Recorder:

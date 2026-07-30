@@ -393,6 +393,8 @@ _duration_cache: dict[tuple[str, int, int], float | None] = {}
 _duration_cache_lock = threading.Lock()
 _pending_prune_videos: dict[str, str | None] = {}
 _pending_prune_lock = threading.Lock()
+_maintenance_scan_contexts: dict[str, dict] = {}
+_maintenance_scan_contexts_lock = threading.Lock()
 _status_tracker: StatusTracker | None = None
 _completed_cycle = 0
 
@@ -766,6 +768,138 @@ def _status_transition(
         return False
 
 
+def _status_identity(job_kwargs: dict, label: str, target_lang: str) -> dict:
+    identity = retry_media_identity({
+        "itemType": job_kwargs.get("item_type"),
+        "itemId": job_kwargs.get("item_id"),
+        "targetLanguage": target_lang,
+        "mediaTitle": label,
+        "sourcePath": job_kwargs.get("source_path"),
+        "seriesTitle": job_kwargs.get("series_title"),
+    })
+    return {
+        "title": identity["displayTitle"],
+        "episodeCode": identity.get("episodeCode"),
+        "episodeTitle": identity.get("episodeTitle"),
+        "itemType": job_kwargs.get("item_type"),
+        "itemId": job_kwargs.get("item_id"),
+        "targetLanguage": target_lang,
+        "sourceLanguage": job_kwargs.get("source_lang"),
+    }
+
+
+def _status_create_repair_ref(
+    job_kwargs: dict,
+    label: str,
+    target_lang: str,
+    details: dict,
+) -> dict | None:
+    if _status_tracker is None:
+        return None
+    try:
+        cycle_key = _status_tracker.active_cycle_job_key(
+            job_kwargs.get("item_type"),
+            job_kwargs.get("item_id"),
+            target_lang,
+        )
+        if cycle_key:
+            _status_tracker.transition(cycle_key, "repair_queued", details=details)
+            return {"kind": "cycle", "id": cycle_key}
+        job_id = _status_tracker.create_maintenance_job(
+            "cue_repair",
+            _status_identity(job_kwargs, label, target_lang),
+            state="repair_queued",
+            details=details,
+        )
+        return {"kind": "maintenance", "id": job_id}
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not persist repair job: {exc}{RESET}")
+        return None
+
+
+def _status_ref_transition(
+    status_ref: dict | None,
+    state: str,
+    *,
+    reason: str | None = None,
+    details: dict | None = None,
+) -> bool:
+    if _status_tracker is None or not status_ref:
+        return False
+    try:
+        if status_ref.get("kind") == "cycle":
+            return _status_tracker.transition(
+                status_ref["id"], state, reason=reason, details=details
+            )
+        return _status_tracker.transition_maintenance(
+            status_ref["id"], state, reason=reason, details=details
+        )
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not persist repair progress: {exc}{RESET}")
+        return False
+
+
+def _status_ref_complete(
+    status_ref: dict | None,
+    outcome: str,
+    *,
+    reason: str | None = None,
+    repaired: bool = False,
+    details: dict | None = None,
+) -> bool:
+    if _status_tracker is None or not status_ref:
+        return False
+    try:
+        if status_ref.get("kind") == "cycle":
+            cycle_outcome = "accepted" if outcome == "repaired" else (
+                "quarantined" if outcome in ("quarantined", "deleted") else outcome
+            )
+            return _status_tracker.transition(
+                status_ref["id"],
+                cycle_outcome,
+                repaired=repaired or outcome == "repaired",
+                reason=reason,
+                details=details,
+            )
+        return _status_tracker.complete_maintenance(
+            status_ref["id"], outcome, reason=reason, details=details
+        )
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not persist repair completion: {exc}{RESET}")
+        return False
+
+
+def _complete_repair_status(
+    metadata: dict,
+    outcome: str,
+    *,
+    reason: str | None = None,
+    repaired: bool = False,
+    details: dict | None = None,
+) -> bool:
+    status_ref = metadata.get("status_ref")
+    if status_ref:
+        return _status_ref_complete(
+            status_ref,
+            outcome,
+            reason=reason,
+            repaired=repaired,
+            details=details,
+        )
+    # Compatibility for direct callback callers and legacy in-memory jobs.
+    cycle_outcome = "accepted" if outcome == "repaired" else (
+        "quarantined" if outcome in ("quarantined", "deleted") else outcome
+    )
+    return _status_transition(
+        metadata.get("item_type"),
+        metadata.get("item_id"),
+        metadata.get("target_lang", ""),
+        cycle_outcome,
+        repaired=repaired or outcome == "repaired",
+        reason=reason,
+    )
+
+
 def _status_set_episode_identity(
     item_type: str | None,
     item_id: int | None,
@@ -880,6 +1014,219 @@ def _status_record_maintenance(metrics: dict) -> None:
         print(f"{YELLOW}[STATUS] Could not persist maintenance status: {exc}{RESET}")
 
 
+def _status_create_maintenance(
+    operation: str,
+    identity: dict | None = None,
+    *,
+    state: str = "queued",
+    details: dict | None = None,
+) -> str | None:
+    if _status_tracker is None:
+        return None
+    try:
+        return _status_tracker.create_maintenance_job(
+            operation, identity, state=state, details=details
+        )
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not create maintenance job: {exc}{RESET}")
+        return None
+
+
+def _status_update_maintenance(
+    job_id: str | None,
+    state: str,
+    *,
+    reason: str | None = None,
+    details: dict | None = None,
+) -> bool:
+    if _status_tracker is None or not job_id:
+        return False
+    try:
+        return _status_tracker.transition_maintenance(
+            job_id, state, reason=reason, details=details
+        )
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not update maintenance job: {exc}{RESET}")
+        return False
+
+
+def _status_complete_maintenance(
+    job_id: str | None,
+    outcome: str,
+    *,
+    reason: str | None = None,
+    details: dict | None = None,
+) -> bool:
+    if _status_tracker is None or not job_id:
+        return False
+    try:
+        return _status_tracker.complete_maintenance(
+            job_id, outcome, reason=reason, details=details
+        )
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not complete maintenance job: {exc}{RESET}")
+        return False
+
+
+def _status_record_maintenance_outcome(
+    operation: str,
+    outcome: str,
+    identity: dict | None = None,
+    *,
+    reason: str | None = None,
+) -> None:
+    if _status_tracker is None:
+        return
+    try:
+        _status_tracker.record_maintenance_outcome(
+            operation, outcome, identity, reason=reason
+        )
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not record maintenance outcome: {exc}{RESET}")
+
+
+def _maintenance_file_identity(
+    path: str | Path,
+    target_language: str | None = None,
+) -> dict:
+    identity = retry_media_identity({
+        "itemType": "media",
+        "mediaTitle": Path(path).name,
+        "targetLanguage": target_language,
+    })
+    return {
+        "title": identity["displayTitle"],
+        "episodeCode": identity.get("episodeCode"),
+        "episodeTitle": identity.get("episodeTitle"),
+        "targetLanguage": target_language,
+    }
+
+
+def _maintenance_metrics(stats: dict) -> dict:
+    return {
+        "formatted": stats.get("formatted_files", 0),
+        "repaired": stats.get("repaired_files", 0)
+        + stats.get("async_repairs_completed", 0),
+        "quarantined": (
+            stats.get("quarantined_files", 0)
+            + stats.get("undersized_quarantined", 0)
+            + stats.get("prune_quarantined", 0)
+        ),
+        "deleted": stats.get("deleted_files", 0) + stats.get("prune_deleted", 0),
+        "undersized": stats.get("undersized_detected", 0),
+        "pruned": stats.get("prune_quarantined", 0) + stats.get("prune_deleted", 0),
+        "source_less_warnings": stats.get("source_less_warnings", 0),
+        "repeat_quarantines": stats.get("repeat_quarantines", 0),
+        "cycle_suppressions": stats.get("cycle_suppressions", 0),
+        "variant_outputs": (
+            stats.get("variant_outputs_discovered", 0)
+            + stats.get("recovered_pending_outputs", 0)
+        ),
+        "failures": (
+            stats.get("repair_failures", 0)
+            + stats.get("action_failures", 0)
+            + stats.get("prune_failures", 0)
+            + stats.get("async_repair_failures", 0)
+        ),
+    }
+
+
+def _scan_progress_details(context: dict) -> dict:
+    stats = context.get("stats", {})
+    discovered = int(context.get("files_discovered", 0))
+    checked = int(context.get("files_checked", 0))
+    elapsed = max(0.001, time.monotonic() - context["started"])
+    remaining = max(0, discovered - checked)
+    eta = round((elapsed / checked) * remaining, 1) if checked else None
+    details = {
+        "filesDiscovered": discovered,
+        "filesChecked": checked,
+        "filesRemaining": remaining,
+        "unchangedFilesSkipped": stats.get("skipped_unchanged", 0),
+        "validationsPerformed": stats.get("files_checked", 0),
+        "formatRepairs": stats.get("formatted_files", 0),
+        "cueRepairsQueued": context.get("repairs_queued", 0),
+        "cueRepairsCompleted": context.get("repairs_completed", 0),
+        "quarantines": (
+            stats.get("quarantined_files", 0)
+            + stats.get("undersized_quarantined", 0)
+            + stats.get("prune_quarantined", 0)
+        ),
+        "failures": _maintenance_metrics(stats)["failures"],
+        "progress": round(checked * 100 / max(1, discovered), 1),
+        "estimatedSeconds": round(elapsed + eta, 1) if eta is not None else None,
+        "etaSeconds": eta,
+    }
+    return details
+
+
+def _scan_child_queued(scan_job_id: str | None) -> None:
+    if not scan_job_id:
+        return
+    with _maintenance_scan_contexts_lock:
+        context = _maintenance_scan_contexts.get(scan_job_id)
+        if context is None:
+            return
+        context["pending"] += 1
+        context["repairs_queued"] += 1
+        details = _scan_progress_details(context)
+    _status_update_maintenance(scan_job_id, "scanning", details=details)
+
+
+def _scan_child_finished(scan_job_id: str | None, outcome: str) -> None:
+    if not scan_job_id:
+        return
+    finalize = False
+    with _maintenance_scan_contexts_lock:
+        context = _maintenance_scan_contexts.get(scan_job_id)
+        if context is None:
+            return
+        context["pending"] = max(0, context["pending"] - 1)
+        context["repairs_completed"] += 1
+        if outcome == "repaired":
+            context["stats"]["async_repairs_completed"] = (
+                context["stats"].get("async_repairs_completed", 0) + 1
+            )
+        else:
+            context["stats"]["async_repair_failures"] = (
+                context["stats"].get("async_repair_failures", 0) + 1
+            )
+        details = _scan_progress_details(context)
+        finalize = context.get("enumeration_done", False) and context["pending"] == 0
+        if finalize:
+            _maintenance_scan_contexts.pop(scan_job_id, None)
+    if finalize:
+        _status_complete_maintenance(scan_job_id, "accepted", details=details)
+        _status_record_maintenance(_maintenance_metrics(context["stats"]))
+    else:
+        _status_update_maintenance(
+            scan_job_id, "waiting_repair_completion", details=details
+        )
+
+
+def _scan_enumeration_finished(scan_job_id: str | None, stats: dict) -> None:
+    if not scan_job_id:
+        _status_record_maintenance(_maintenance_metrics(stats))
+        return
+    with _maintenance_scan_contexts_lock:
+        context = _maintenance_scan_contexts.get(scan_job_id)
+        if context is None:
+            return
+        context["stats"].update(stats)
+        context["enumeration_done"] = True
+        details = _scan_progress_details(context)
+        finalize = context["pending"] == 0
+        if finalize:
+            _maintenance_scan_contexts.pop(scan_job_id, None)
+    if finalize:
+        _status_complete_maintenance(scan_job_id, "accepted", details=details)
+        _status_record_maintenance(_maintenance_metrics(context["stats"]))
+    else:
+        _status_update_maintenance(
+            scan_job_id, "waiting_repair_completion", details=details
+        )
+
+
 def _status_compact_history() -> int:
     if _status_tracker is None:
         return 0
@@ -906,7 +1253,8 @@ def _status_finish_validation(
             repaired=action in ("formatted", "repaired"),
         )
     elif action in ("repair-queued", "repair-duplicate"):
-        _status_transition(item_type, item_id, target_lang, "repairing")
+        # The asynchronous repair path owns its exact lifecycle/status reference.
+        return
     elif action == "repair-deferred":
         _status_transition(
             item_type, item_id, target_lang, "deferred", reason="repair deferred"
@@ -1381,6 +1729,30 @@ def wait_for_bazarr_sync(had_episodes: bool, had_movies: bool, timeout: int) -> 
             time.sleep(1)
 
     return False
+
+
+def _tracked_bazarr_sync(
+    had_episodes: bool,
+    had_movies: bool,
+    timeout: int,
+) -> bool:
+    scope = (
+        "Series and movies" if had_episodes and had_movies
+        else "Series" if had_episodes else "Movies"
+    )
+    job_id = _status_create_maintenance(
+        "bazarr_sync",
+        {"title": scope},
+        state="synchronizing",
+    )
+    trigger_bazarr_sync(had_episodes, had_movies)
+    success = wait_for_bazarr_sync(had_episodes, had_movies, timeout)
+    _status_complete_maintenance(
+        job_id,
+        "accepted" if success else "failed",
+        reason=None if success else "Bazarr synchronization did not complete",
+    )
+    return success
 
 # ---------------------------------------------------------------------------
 # Lingarr API
@@ -2993,6 +3365,7 @@ def _perform_repair(
     origin: str | None = "lingarr",
     series_key: str | None = None,
     series_title: str | None = None,
+    status_ref: dict | None = None,
 ) -> RepairJobResult:
     from clean_et_subs import repair_subtitle_file, target_language_for_code
 
@@ -3031,6 +3404,9 @@ def _perform_repair(
         working_path = recovery_temp
 
         attempt_state: dict = {}
+        progress_started = time.monotonic()
+        last_progress_signature: tuple | None = None
+        last_progress_at = 0.0
 
         def attempt_logger(event: dict) -> None:
             attempt_state.clear()
@@ -3062,6 +3438,46 @@ def _perform_repair(
                 print(f"[REPAIR] Cue {cue} attempt {attempt} rejected{http_label} after {duration:.1f}s: {rules}")
             else:
                 print(f"[REPAIR] Cue {cue} attempt {attempt} failed{http_label} after {duration:.1f}s: {event.get('outcome')}")
+
+        def progress_callback(event: dict) -> None:
+            nonlocal last_progress_signature, last_progress_at
+            stage = event.get("stage")
+            state = "repair_validating" if stage == "repair_validating" else "repairing"
+            completed = int(event.get("completedCues") or 0)
+            total = int(event.get("totalRepairableCues") or 0)
+            elapsed = max(0.001, time.monotonic() - progress_started)
+            eta = (
+                round((elapsed / completed) * max(0, total - completed), 1)
+                if completed else None
+            )
+            details = {
+                key: value for key, value in event.items()
+                if key in {
+                    "totalRepairableCues", "completedCues", "currentCueNumber",
+                    "currentCuePosition", "currentCueOrdinal", "currentAttempt",
+                    "maxAttempts", "contextEnabled", "lastHttpStatus",
+                    "lastRequestDurationSeconds", "rejectedAttempts",
+                    "successfulCues", "unresolvedCues", "progress",
+                }
+            }
+            details.update({
+                "repairStage": stage,
+                "attempts": event.get("currentAttempt"),
+            })
+            if eta is not None:
+                details["etaSeconds"] = eta
+                details["estimatedSeconds"] = round(elapsed + eta, 1)
+            signature = (
+                state, stage, event.get("currentCueOrdinal"),
+                event.get("currentAttempt"), completed,
+                event.get("rejectedAttempts"), event.get("unresolvedCues"),
+            )
+            now = time.monotonic()
+            if signature == last_progress_signature and now - last_progress_at < 0.5:
+                return
+            last_progress_signature = signature
+            last_progress_at = now
+            _status_ref_transition(status_ref, state, details=details)
 
         def translator(line: str, before: list[str], after: list[str]):
             outcome_meta: dict = {}
@@ -3100,6 +3516,7 @@ def _perform_repair(
                 max_attempts=CLEANUP_MAX_REPAIR_ATTEMPTS,
                 context_lines=CLEANUP_REPAIR_CONTEXT_LINES,
                 attempt_logger=attempt_logger,
+                progress_callback=progress_callback,
                 donor_attempts=donor_attempts,
                 **_validation_kwargs(),
             )
@@ -3270,29 +3687,48 @@ def _get_repair_executor() -> ThreadPoolExecutor:
         return _repair_executor
 
 
-def _run_repair_with_capacity(capacity_token: int, job_kwargs: dict) -> RepairJobResult:
+def _run_repair_with_capacity(
+    capacity_token: int,
+    job_kwargs: dict,
+    status_ref: dict | None = None,
+) -> RepairJobResult:
     """Run one repair after its priority reservation obtains shared capacity."""
+    _status_ref_transition(
+        status_ref,
+        "repair_waiting_capacity",
+        details={"repairStage": "waiting_capacity"},
+    )
     if not _shared_capacity.start_repair(capacity_token):
         _shared_capacity.release(capacity_token)
         raise RuntimeError("shared repair capacity unavailable during shutdown")
     try:
-        return _perform_repair(**job_kwargs)
+        _status_ref_transition(
+            status_ref, "repairing", details={"repairStage": "starting"}
+        )
+        repair_kwargs = dict(job_kwargs)
+        repair_kwargs.pop("maintenance_scan_job_id", None)
+        return _perform_repair(**repair_kwargs, status_ref=status_ref)
     finally:
         _shared_capacity.release(capacity_token)
 
 
 def _publish_repair_status(future: Future, metadata: dict) -> None:
     """Publish a repair's terminal dashboard state without draining its future."""
+    status_lock = metadata.get("status_lock")
+    if status_lock is not None:
+        with status_lock:
+            if metadata.get("status_published"):
+                return
+            metadata["status_published"] = True
     try:
         result = future.result()
     except Exception:
-        _status_transition(
-            metadata.get("item_type"),
-            metadata.get("item_id"),
-            metadata.get("target_lang", ""),
+        _complete_repair_status(
+            metadata,
             "failed",
             reason="repair worker failed",
         )
+        _scan_child_finished(metadata.get("maintenance_scan_job_id"), "failed")
         return
 
     if result.action in ("repaired", "quarantined", "deleted"):
@@ -3328,12 +3764,11 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
                 else "accepted_after_retry"
             ),
         )
-        _status_transition(
-            result.item_type,
-            result.item_id,
-            result.target_lang,
-            "accepted",
+        _complete_repair_status(
+            metadata,
+            "repaired",
             repaired=True,
+            details={"attempts": result.attempts},
         )
     elif result.action in ("quarantined", "deleted"):
         _schedule_validation_retry(
@@ -3349,12 +3784,11 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
             series_key=metadata.get("series_key"),
             series_title=metadata.get("series_title"),
         )
-        _status_transition(
-            result.item_type,
-            result.item_id,
-            result.target_lang,
-            "quarantined",
+        _complete_repair_status(
+            metadata,
+            result.action,
             reason=result.action,
+            details={"attempts": result.attempts},
         )
     elif result.action == "repair-deferred":
         _schedule_validation_retry(
@@ -3370,21 +3804,23 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
             series_key=metadata.get("series_key"),
             series_title=metadata.get("series_title"),
         )
-        _status_transition(
-            result.item_type,
-            result.item_id,
-            result.target_lang,
+        _complete_repair_status(
+            metadata,
             "deferred",
             reason="repair deferred",
+            details={"attempts": result.attempts},
         )
     else:
-        _status_transition(
-            result.item_type,
-            result.item_id,
-            result.target_lang,
+        _complete_repair_status(
+            metadata,
             "failed",
             reason=f"repair {result.action}",
+            details={"attempts": result.attempts},
         )
+    _scan_child_finished(
+        metadata.get("maintenance_scan_job_id"),
+        "repaired" if result.action == "repaired" else "failed",
+    )
 
 
 def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, target_lang: str) -> str:
@@ -3392,50 +3828,17 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
         if repair_key in _repair_keys:
             print(f"[REPAIR] Duplicate repair suppressed for {label} '{target_lang}'")
             return "repair-duplicate"
-        if not _repair_capacity.acquire(blocking=False):
-            print(f"[REPAIR] Queue full; deferred {label} '{target_lang}' to the next scan")
-            return "repair-deferred"
-        _repair_keys.add(repair_key)
-        capacity_token = _shared_capacity.reserve_repair()
-        try:
-            future = _get_repair_executor().submit(
-                _run_repair_with_capacity, capacity_token, job_kwargs
-            )
-        except Exception:
-            _repair_keys.discard(repair_key)
-            _shared_capacity.release(capacity_token)
-            _repair_capacity.release()
-            raise
-        metadata = {
-            "key": repair_key,
-            "report": report,
-            "target_path": job_kwargs.get("target_path"),
-            "item_type": job_kwargs.get("item_type"),
-            "item_id": job_kwargs.get("item_id"),
-            "target_lang": job_kwargs.get("target_lang"),
-            "source_lang": job_kwargs.get("source_lang"),
-            "source_path": job_kwargs.get("source_path"),
-            "series_key": job_kwargs.get("series_key"),
-            "series_title": job_kwargs.get("series_title"),
-            "queued_monotonic": time.monotonic(),
-        }
-        _pending_repairs[future] = metadata
-    future.add_done_callback(
-        lambda completed, repair_metadata=metadata: _publish_repair_status(
-            completed, repair_metadata
+        cue_count = len(getattr(report, "repairable_cue_indexes", []) or [])
+        repair_timing = _timing_estimate(
+            "repair", job_kwargs.get("source_lang"), target_lang
         )
-    )
-    cue_count = len(getattr(report, "repairable_cue_indexes", []) or [])
-    repair_timing = _timing_estimate(
-        "repair", job_kwargs.get("source_lang"), target_lang
-    )
-    _status_transition(
-        job_kwargs.get("item_type"),
-        job_kwargs.get("item_id"),
-        target_lang,
-        "repairing",
-        details={
-            "cueCount": cue_count,
+        initial_details = {
+            "totalRepairableCues": cue_count,
+            "completedCues": 0,
+            "successfulCues": 0,
+            "unresolvedCues": 0,
+            "rejectedAttempts": 0,
+            "progress": 0,
             "secondsPerCue": round(repair_timing["secondsPerCue"], 4),
             "timingSampleCount": repair_timing["sampleCount"],
             "timingScope": repair_timing["scope"],
@@ -3453,7 +3856,55 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             ),
             "lane": "repair",
             "attempts": 0,
-        },
+            "maxAttempts": CLEANUP_MAX_REPAIR_ATTEMPTS,
+            "repairStage": "queued",
+        }
+        status_ref = _status_create_repair_ref(
+            job_kwargs, label, target_lang, initial_details
+        )
+        if not _repair_capacity.acquire(blocking=False):
+            print(f"[REPAIR] Queue full; deferred {label} '{target_lang}' to the next scan")
+            _status_ref_complete(
+                status_ref, "deferred", reason="repair queue full"
+            )
+            return "repair-deferred"
+        _repair_keys.add(repair_key)
+        capacity_token = _shared_capacity.reserve_repair()
+        try:
+            future = _get_repair_executor().submit(
+                _run_repair_with_capacity, capacity_token, job_kwargs, status_ref
+            )
+        except Exception:
+            _repair_keys.discard(repair_key)
+            _shared_capacity.release(capacity_token)
+            _repair_capacity.release()
+            _status_ref_complete(
+                status_ref, "failed", reason="repair worker submission failed"
+            )
+            raise
+        metadata = {
+            "key": repair_key,
+            "report": report,
+            "target_path": job_kwargs.get("target_path"),
+            "item_type": job_kwargs.get("item_type"),
+            "item_id": job_kwargs.get("item_id"),
+            "target_lang": job_kwargs.get("target_lang"),
+            "source_lang": job_kwargs.get("source_lang"),
+            "source_path": job_kwargs.get("source_path"),
+            "series_key": job_kwargs.get("series_key"),
+            "series_title": job_kwargs.get("series_title"),
+            "queued_monotonic": time.monotonic(),
+            "status_ref": status_ref,
+            "maintenance_scan_job_id": job_kwargs.get("maintenance_scan_job_id"),
+            "status_lock": threading.Lock(),
+            "status_published": False,
+        }
+        _pending_repairs[future] = metadata
+        _scan_child_queued(metadata.get("maintenance_scan_job_id"))
+    future.add_done_callback(
+        lambda completed, repair_metadata=metadata: _publish_repair_status(
+            completed, repair_metadata
+        )
     )
     for index in report.repairable_cue_indexes:
         print(f"[REPAIR] Queued {label} '{target_lang}' cue position {index + 1}")
@@ -3701,6 +4152,7 @@ def _validate_translated_file(
     provenance_source_hash: str | None = None,
     series_key: str | None = None,
     series_title: str | None = None,
+    maintenance_scan_job_id: str | None = None,
 ) -> tuple[str, object]:
     if target_lang not in CLEANUP_LANGUAGES:
         from clean_et_subs import validate_srt_structure
@@ -4073,6 +4525,7 @@ def _validate_translated_file(
             "origin": effective_origin,
             "series_key": series_key,
             "series_title": series_title,
+            "maintenance_scan_job_id": maintenance_scan_job_id,
         }
         if defer_repair:
             repair_key = (
@@ -4097,7 +4550,9 @@ def _validate_translated_file(
                     series_title=series_title,
                 )
             return queued_action, report
-        result = _perform_repair(**job_kwargs)
+        synchronous_kwargs = dict(job_kwargs)
+        synchronous_kwargs.pop("maintenance_scan_job_id", None)
+        result = _perform_repair(**synchronous_kwargs)
         return result.action, result.report
 
     action = _apply_cleanup_action(
@@ -5304,6 +5759,19 @@ def _scan_undersized_sidecars(stats: dict) -> bool:
             _add_completeness_issue(report, completeness)
             if completeness is not None and completeness.undersized:
                 stats["undersized_detected"] += 1
+                tokens = _sidecar_tokens(video, subtitle)
+                language = next(
+                    (
+                        token for token in tokens
+                        if len(token) in (2, 3) and token.isalpha()
+                    ),
+                    "unknown",
+                )
+                _status_record_maintenance_outcome(
+                    "undersized_detection",
+                    "undersized",
+                    _maintenance_file_identity(subtitle, language),
+                )
                 print(
                     f"{YELLOW}[SIZE] Undersized {subtitle.name}: "
                     f"{completeness.cue_count} cues, {completeness.subtitle_bytes} bytes, "
@@ -5348,6 +5816,19 @@ def _scan_undersized_sidecars(stats: dict) -> bool:
                 stats["dry_run_files"] += 1
             elif action == "action-failed":
                 stats["action_failures"] += 1
+            if action in ("quarantined", "deleted", "action-failed"):
+                _status_record_maintenance_outcome(
+                    "quarantine" if action == "quarantined" else (
+                        "deletion" if action == "deleted" else "validation"
+                    ),
+                    action if action in ("quarantined", "deleted") else "failed",
+                    _maintenance_file_identity(subtitle, language),
+                    reason=(
+                        "validation action failed"
+                        if action == "action-failed"
+                        else None
+                    ),
+                )
     return changed
 
 
@@ -5631,6 +6112,11 @@ def run_extra_sidecar_prune(
                     stats["prune_failures"] += 1
                 if action in ("quarantined", "deleted"):
                     _clear_submission_for_path(entry.path, entry.language or "unknown")
+                    _status_record_maintenance_outcome(
+                        "sidecar_pruning",
+                        "pruned",
+                        _maintenance_file_identity(entry.path, entry.language),
+                    )
                     if item_type == "episodes":
                         changed_episodes = True
                     elif item_type == "movies":
@@ -5648,12 +6134,36 @@ def run_extra_sidecar_prune(
         )
         return stats, changed_episodes, changed_movies
 
-    if already_locked:
-        return run()
-    with _cleanup_scan_lock:
-        return run()
+    prune_job_id = _status_create_maintenance(
+        "sidecar_pruning",
+        {"title": "Subtitle sidecar pruning"},
+        state="pruning",
+    )
+    try:
+        if already_locked:
+            result = run()
+        else:
+            with _cleanup_scan_lock:
+                result = run()
+    except Exception:
+        _status_complete_maintenance(
+            prune_job_id,
+            "failed",
+            reason="validation action failed",
+        )
+        raise
+    prune_details = {
+        "filesDiscovered": result[0]["prune_candidates"],
+        "filesChecked": result[0]["prune_videos_checked"],
+        "failures": result[0]["prune_failures"],
+        "quarantines": result[0]["prune_quarantined"],
+    }
+    _status_complete_maintenance(prune_job_id, "accepted", details=prune_details)
+    return result
 
-def run_existing_cleanup_scan() -> dict:
+def run_existing_cleanup_scan(
+    maintenance_scan_job_id: str | None = None,
+) -> dict:
     stats = {
         "files_checked": 0,
         "skipped_unchanged": 0,
@@ -5681,6 +6191,11 @@ def run_existing_cleanup_scan() -> dict:
         "undersized_quarantined": 0,
         **_prune_stats(),
     }
+    if maintenance_scan_job_id:
+        with _maintenance_scan_contexts_lock:
+            context = _maintenance_scan_contexts.get(maintenance_scan_job_id)
+            if context is not None:
+                context["stats"] = stats
     if not CLEANUP_SCAN_EXISTING:
         return stats
 
@@ -5702,10 +6217,20 @@ def run_existing_cleanup_scan() -> dict:
             stats.update(prune_stats)
             changed = changed or prune_episodes or prune_movies
             if changed and not shutdown_requested:
-                trigger_bazarr_sync(True, True)
-                wait_for_bazarr_sync(True, True, SYNC_TIMEOUT)
+                _tracked_bazarr_sync(True, True, SYNC_TIMEOUT)
             return stats
         candidates = discover_target_subtitles(CLEANUP_ROOTS, CLEANUP_LANGUAGES)
+        if maintenance_scan_job_id:
+            with _maintenance_scan_contexts_lock:
+                context = _maintenance_scan_contexts.get(maintenance_scan_job_id)
+                if context is not None:
+                    context["files_discovered"] = len(candidates)
+                    context["last_publish"] = time.monotonic()
+                    details = _scan_progress_details(context)
+            if context is not None:
+                _status_update_maintenance(
+                    maintenance_scan_job_id, "scanning", details=details
+                )
         print(
             f"[SCAN] Existing subtitle cleanup found {len(candidates)} target file(s) "
             f"under {', '.join(str(root) for root in CLEANUP_ROOTS)}"
@@ -5714,6 +6239,13 @@ def run_existing_cleanup_scan() -> dict:
         for candidate in candidates:
             if shutdown_requested:
                 break
+            if maintenance_scan_job_id:
+                with _maintenance_scan_contexts_lock:
+                    context = _maintenance_scan_contexts.get(
+                        maintenance_scan_job_id
+                    )
+                    if context is not None:
+                        context["files_checked"] += 1
             target_language = target_language_for_code(candidate.target_lang)
             if target_language is None:
                 print(f"{YELLOW}[SCAN] Unsupported target language for {candidate.path}{RESET}")
@@ -5803,6 +6335,7 @@ def run_existing_cleanup_scan() -> dict:
                     if candidate_video is not None else None,
                     origin=validation_origin,
                     provenance_source_hash=validation_source_hash,
+                    maintenance_scan_job_id=maintenance_scan_job_id,
                 )
             else:
                 stats["without_source"] += 1
@@ -5893,6 +6426,47 @@ def run_existing_cleanup_scan() -> dict:
             elif action == "action-failed":
                 stats["action_failures"] += 1
 
+            operation_outcomes = {
+                "valid": ("validation", "validated"),
+                "valid-warning": ("validation", "validated"),
+                "formatted": ("format_repair", "formatted"),
+                "quarantined": ("quarantine", "quarantined"),
+                "deleted": ("deletion", "deleted"),
+                "action-failed": ("validation", "failed"),
+            }
+            if action in operation_outcomes:
+                operation, outcome = operation_outcomes[action]
+                _status_record_maintenance_outcome(
+                    operation,
+                    outcome,
+                    _maintenance_file_identity(
+                        candidate.path, candidate.target_lang
+                    ),
+                    reason="validation action failed" if outcome == "failed" else None,
+                )
+
+            if maintenance_scan_job_id:
+                with _maintenance_scan_contexts_lock:
+                    context = _maintenance_scan_contexts.get(
+                        maintenance_scan_job_id
+                    )
+                    now = time.monotonic()
+                    should_publish = bool(
+                        context is not None
+                        and (
+                            now - context.get("last_publish", 0) >= 0.5
+                            or context["files_checked"]
+                            >= context["files_discovered"]
+                        )
+                    )
+                    if should_publish:
+                        context["last_publish"] = now
+                    details = _scan_progress_details(context) if should_publish else None
+                if details is not None:
+                    _status_update_maintenance(
+                        maintenance_scan_job_id, "scanning", details=details
+                    )
+
         prune_stats, prune_episodes, prune_movies = run_extra_sidecar_prune(already_locked=True)
         prune_stats["prune_bazarr_rescan_batches"] = int(prune_episodes or prune_movies)
         stats.update(prune_stats)
@@ -5927,41 +6501,47 @@ def run_existing_cleanup_scan() -> dict:
             print(f"  Dry-run files       : {stats['dry_run_files']}")
 
         if changed and not shutdown_requested:
-            trigger_bazarr_sync(True, True)
-            wait_for_bazarr_sync(True, True, SYNC_TIMEOUT)
+            _tracked_bazarr_sync(True, True, SYNC_TIMEOUT)
         return stats
 
 
 def _run_existing_cleanup_scan_safely() -> dict | None:
+    scan_job_id = _status_create_maintenance(
+        "existing_library_scan",
+        {"title": "Existing subtitle library"},
+        state="scanning",
+        details={
+            "filesDiscovered": 0,
+            "filesChecked": 0,
+            "filesRemaining": 0,
+            "progress": 0,
+        },
+    )
+    if scan_job_id:
+        with _maintenance_scan_contexts_lock:
+            _maintenance_scan_contexts[scan_job_id] = {
+                "started": time.monotonic(),
+                "stats": {},
+                "files_discovered": 0,
+                "files_checked": 0,
+                "pending": 0,
+                "repairs_queued": 0,
+                "repairs_completed": 0,
+                "enumeration_done": False,
+                "last_publish": 0.0,
+            }
     try:
-        stats = run_existing_cleanup_scan()
-        _status_record_maintenance({
-            "formatted": stats.get("formatted_files", 0),
-            "repaired": stats.get("repaired_files", 0),
-            "quarantined": (
-                stats.get("quarantined_files", 0)
-                + stats.get("undersized_quarantined", 0)
-                + stats.get("prune_quarantined", 0)
-            ),
-            "deleted": stats.get("deleted_files", 0) + stats.get("prune_deleted", 0),
-            "undersized": stats.get("undersized_detected", 0),
-            "pruned": stats.get("prune_quarantined", 0) + stats.get("prune_deleted", 0),
-            "source_less_warnings": stats.get("source_less_warnings", 0),
-            "repeat_quarantines": stats.get("repeat_quarantines", 0),
-            "cycle_suppressions": stats.get("cycle_suppressions", 0),
-            "variant_outputs": (
-                stats.get("variant_outputs_discovered", 0)
-                + stats.get("recovered_pending_outputs", 0)
-            ),
-            "failures": (
-                stats.get("repair_failures", 0)
-                + stats.get("action_failures", 0)
-                + stats.get("prune_failures", 0)
-            ),
-        })
+        stats = run_existing_cleanup_scan(scan_job_id)
+        _scan_enumeration_finished(scan_job_id, stats)
         return stats
     except Exception as e:
         print(f"{RED}[ERROR] Existing subtitle cleanup scan failed: {e}{RESET}")
+        if scan_job_id:
+            with _maintenance_scan_contexts_lock:
+                _maintenance_scan_contexts.pop(scan_job_id, None)
+            _status_complete_maintenance(
+                scan_job_id, "failed", reason="existing library scan failed"
+            )
         if DEBUG:
             import traceback
             traceback.print_exc()
@@ -6419,8 +6999,7 @@ def run_cycle(cycle_num: int) -> bool:
         _status_set_phase("synchronization")
         had_episodes = stats["episode_activity"]
         had_movies = stats["movie_activity"]
-        trigger_bazarr_sync(had_episodes, had_movies)
-        wait_for_bazarr_sync(had_episodes, had_movies, SYNC_TIMEOUT)
+        _tracked_bazarr_sync(had_episodes, had_movies, SYNC_TIMEOUT)
         repaired_with_ids = [
             result for result in repair_results
             if result.action == "repaired" and result.item_id is not None
@@ -6430,8 +7009,7 @@ def run_cycle(cycle_num: int) -> bool:
             retry_episodes = any(result.item_type == "episodes" for result in missing)
             retry_movies = any(result.item_type == "movies" for result in missing)
             print(f"{YELLOW}[WARNING] Bazarr did not register {len(missing)} repaired path(s); retrying scan once{RESET}")
-            trigger_bazarr_sync(retry_episodes, retry_movies)
-            wait_for_bazarr_sync(retry_episodes, retry_movies, SYNC_TIMEOUT)
+            _tracked_bazarr_sync(retry_episodes, retry_movies, SYNC_TIMEOUT)
             still_missing = [result for result in missing if not _bazarr_has_repaired_path(result)]
             stats["cleanup_bazarr_registration_failures"] = len(still_missing)
             for result in still_missing:

@@ -745,7 +745,11 @@ progress::-moz-progress-bar {
 
 .badge.translating,
 .badge.validating,
-.badge.repairing {
+.badge.repairing,
+.badge.repair_validating,
+.badge.scanning,
+.badge.synchronizing,
+.badge.cycle-work {
   background: var(--accent-subtle);
   color: var(--accent);
 }
@@ -757,6 +761,9 @@ progress::-moz-progress-bar {
 }
 
 .badge.deferred,
+.badge.repair_queued,
+.badge.repair_waiting_capacity,
+.badge.waiting_repair_completion,
 .badge.waiting_retry,
 .badge.series_protected,
 .badge.missing_source {
@@ -769,6 +776,30 @@ progress::-moz-progress-bar {
 .badge.quarantined {
   background: var(--danger-subtle);
   color: var(--danger);
+}
+
+.badge.maintenance-work {
+  background: var(--warning-subtle);
+  color: var(--warning);
+}
+
+.job-progress {
+  display: grid;
+  min-width: 210px;
+  gap: var(--space-1);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.job-progress progress {
+  width: 100%;
+  height: 7px;
+  accent-color: var(--accent);
+}
+
+.maintenance-window {
+  display: grid;
+  gap: var(--space-2);
 }
 
 .retry-table .cell-media {
@@ -1044,6 +1075,14 @@ progress::-moz-progress-bar {
 
   .data-table td.cell-media {
     grid-column: 1 / -1;
+  }
+
+  .data-table td.cell-progress {
+    grid-column: 1 / -1;
+  }
+
+  .job-progress {
+    min-width: 0;
   }
 
   .retry-table td.cell-details {

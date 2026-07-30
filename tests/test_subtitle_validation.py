@@ -342,6 +342,51 @@ class SubtitleValidationTests(unittest.TestCase):
             self.assertFalse(result.success)
             self.assertEqual(target.read_text(encoding="utf-8"), original)
 
+    def test_repair_progress_does_not_complete_http_200_rejection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "episode.eng.srt"
+            target = root / "episode.et.srt"
+            source.write_text(make_srt("Target dialogue"), encoding="utf-8")
+            target.write_text(
+                make_srt("[TARGET] leaked prompt [/TARGET]"),
+                encoding="utf-8",
+            )
+            events = []
+            responses = iter([
+                ("[TARGET] still invalid [/TARGET]", {
+                    "httpStatus": 200,
+                    "requestDurationSeconds": 0.9,
+                }),
+                ("Parandatud subtiiter", {
+                    "httpStatus": 200,
+                    "requestDurationSeconds": 0.8,
+                }),
+            ])
+
+            result = repair_subtitle_file(
+                source,
+                target,
+                self.detector,
+                self.estonian,
+                lambda _line, _before, _after: next(responses),
+                target_lang="et",
+                max_attempts=2,
+                progress_callback=events.append,
+            )
+
+            self.assertTrue(result.success, result.reason)
+            rejected = next(
+                event for event in events
+                if event.get("rejectedAttempts") == 1
+                and event.get("lastHttpStatus") == 200
+            )
+            self.assertEqual(rejected["completedCues"], 0)
+            self.assertEqual(rejected["progress"], 0)
+            self.assertEqual(events[-2]["completedCues"], 1)
+            self.assertEqual(events[-2]["progress"], 100)
+            self.assertEqual(events[-1]["stage"], "repair_validating")
+
     def test_five_line_context_leak_is_repairable_without_markers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -7,6 +7,7 @@ import re
 import tempfile
 import threading
 import time
+import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,7 +21,45 @@ WAIT_STATES = {"waiting_retry", "series_protected", "missing_source"}
 TERMINAL_STATES = {
     "accepted", "failed", "timed_out", "deferred", "quarantined", *WAIT_STATES,
 }
-ACTIVE_STATES = {"translating", "validating", "repairing"}
+REPAIR_ACTIVE_STATES = {
+    "repair_queued", "repair_waiting_capacity", "repairing", "repair_validating",
+}
+ACTIVE_STATES = {"translating", "validating", *REPAIR_ACTIVE_STATES}
+MAINTENANCE_ACTIVE_STATES = {
+    *REPAIR_ACTIVE_STATES,
+    "queued", "scanning", "waiting_repair_completion", "synchronizing", "pruning",
+}
+MAINTENANCE_OUTCOMES = {
+    "accepted", "repaired", "formatted", "validated", "quarantined", "deleted",
+    "deferred", "failed", "interrupted", "undersized", "pruned",
+}
+MAINTENANCE_PUBLIC_REASONS = {
+    "interrupted by service restart",
+    "Bazarr synchronization did not complete",
+    "validation action failed",
+    "existing library scan failed",
+    "repair worker failed",
+    "repair deferred",
+    "repair queue full",
+    "repair worker submission failed",
+    "quarantined",
+    "deleted",
+}
+MAINTENANCE_IDENTITY_KEYS = (
+    "title", "episodeCode", "episodeTitle", "itemType", "itemId",
+    "targetLanguage", "sourceLanguage",
+)
+MAINTENANCE_PROGRESS_KEYS = (
+    "filesDiscovered", "filesChecked", "filesRemaining", "unchangedFilesSkipped",
+    "validationsPerformed", "formatRepairs", "cueRepairsQueued",
+    "cueRepairsCompleted", "quarantines", "failures",
+    "totalRepairableCues", "completedCues", "currentCueNumber",
+    "currentCuePosition", "currentCueOrdinal", "currentAttempt", "maxAttempts",
+    "contextEnabled", "lastHttpStatus", "lastRequestDurationSeconds",
+    "rejectedAttempts", "successfulCues", "unresolvedCues",
+    "progress", "estimatedSeconds", "etaSeconds", "attempts", "lane", "repairStage",
+    "secondsPerCue", "timingSampleCount", "timingScope",
+)
 HISTORY_WINDOWS = {
     "1h": 3600,
     "6h": 6 * 3600,
@@ -82,6 +121,24 @@ def _parse_iso(value: str | None) -> float | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except (TypeError, ValueError):
         return None
+
+
+def _safe_maintenance_text(value, fallback=None, *, limit: int = 160):
+    if value is None:
+        return fallback
+    text = str(value).strip()
+    if (
+        not text
+        or len(text) > limit
+        or any(character in text for character in ("/", "\\", "\r", "\n"))
+    ):
+        return fallback
+    return text
+
+
+def _safe_maintenance_reason(value):
+    text = _safe_maintenance_text(value, limit=200)
+    return text if text in MAINTENANCE_PUBLIC_REASONS else None
 
 
 def _first_int(item: dict, *keys: str) -> int | None:
@@ -197,7 +254,7 @@ class StatusTracker:
         }
         self._cycle: dict | None = None
         self._history: list[dict] = []
-        self._maintenance = {"lastScan": None}
+        self._maintenance = {"lastScan": None, "activeJobs": []}
         self._load()
         self._recover_interrupted()
         self._write_snapshot_locked()
@@ -211,6 +268,11 @@ class StatusTracker:
             maintenance = payload.get("maintenance")
             if isinstance(maintenance, dict):
                 self._maintenance["lastScan"] = maintenance.get("lastScan")
+                active_jobs = maintenance.get("activeJobs")
+                if isinstance(active_jobs, list):
+                    self._maintenance["activeJobs"] = [
+                        job for job in active_jobs if isinstance(job, dict)
+                    ]
         except (FileNotFoundError, OSError, ValueError, TypeError):
             pass
 
@@ -228,15 +290,19 @@ class StatusTracker:
         self._drop_expired_locked()
 
     def _recover_interrupted(self) -> None:
-        if self._cycle is None or self._cycle.get("completedAt"):
-            return
         now = self.clock()
-        for job in self._cycle.get("jobs", []):
-            if job.get("state") not in TERMINAL_STATES:
-                self._finish_job_locked(
-                    job, "deferred", now, reason="interrupted by service restart"
-                )
-        self._cycle["completedAt"] = _utc_iso(now)
+        if self._cycle is not None and not self._cycle.get("completedAt"):
+            for job in self._cycle.get("jobs", []):
+                if job.get("state") not in TERMINAL_STATES:
+                    self._finish_job_locked(
+                        job, "deferred", now, reason="interrupted by service restart"
+                    )
+            self._cycle["completedAt"] = _utc_iso(now)
+        for job in list(self._maintenance.get("activeJobs", [])):
+            self._finish_maintenance_locked(
+                job, "interrupted", now, reason="interrupted by service restart"
+            )
+        self._maintenance["activeJobs"] = []
 
     def set_phase(self, phase: str, *, next_cycle_at: float | None = None) -> None:
         with self._lock:
@@ -316,6 +382,187 @@ class StatusTracker:
             if match is None:
                 return False
             return self.transition(match["key"], state, **kwargs)
+
+    def active_cycle_job_key(
+        self,
+        item_type: str | None,
+        item_id: int | None,
+        target_language: str,
+    ) -> str | None:
+        """Resolve a wanted job once so asynchronous callbacks can use its exact key."""
+        with self._lock:
+            if self._cycle is None:
+                return None
+            match = next((
+                job for job in self._cycle.get("jobs", [])
+                if job.get("itemType") == item_type
+                and job.get("itemId") == item_id
+                and job.get("targetLanguage") == target_language
+                and job.get("state") not in TERMINAL_STATES
+            ), None)
+            return match.get("key") if match else None
+
+    def create_maintenance_job(
+        self,
+        operation: str,
+        identity: dict | None = None,
+        *,
+        state: str = "queued",
+        details: dict | None = None,
+    ) -> str:
+        if state not in MAINTENANCE_ACTIVE_STATES:
+            raise ValueError(f"unsupported maintenance state: {state}")
+        now = self.clock()
+        job_id = uuid.uuid4().hex
+        job = {
+            "statusJobId": job_id,
+            "workKind": "maintenance",
+            "operation": _safe_maintenance_text(operation, "maintenance", limit=64),
+            "state": state,
+            "queuedAt": _utc_iso(now),
+            "startedAt": _utc_iso(now),
+            "updatedAt": _utc_iso(now),
+            "finishedAt": None,
+            "durationSeconds": 0,
+            "reason": None,
+        }
+        for key in MAINTENANCE_IDENTITY_KEYS:
+            value = (identity or {}).get(key)
+            if key in ("itemId",):
+                job[key] = value if isinstance(value, int) and not isinstance(value, bool) else None
+            else:
+                job[key] = _safe_maintenance_text(value)
+        self._apply_maintenance_details(job, details)
+        with self._lock:
+            self._maintenance.setdefault("activeJobs", []).append(job)
+            self._write_snapshot_locked()
+        return job_id
+
+    def transition_maintenance(
+        self,
+        job_id: str,
+        state: str,
+        *,
+        reason: str | None = None,
+        details: dict | None = None,
+    ) -> bool:
+        if state not in MAINTENANCE_ACTIVE_STATES:
+            raise ValueError(f"unsupported maintenance state: {state}")
+        with self._lock:
+            job = self._find_maintenance_locked(job_id)
+            if job is None:
+                return False
+            now = self.clock()
+            job["state"] = state
+            job["updatedAt"] = _utc_iso(now)
+            if reason:
+                job["reason"] = _safe_maintenance_reason(reason)
+            self._apply_maintenance_details(job, details)
+            started = _parse_iso(job.get("startedAt")) or now
+            job["durationSeconds"] = max(0, round(now - started, 3))
+            self._write_snapshot_locked()
+            return True
+
+    def complete_maintenance(
+        self,
+        job_id: str,
+        outcome: str,
+        *,
+        reason: str | None = None,
+        details: dict | None = None,
+    ) -> bool:
+        if outcome not in MAINTENANCE_OUTCOMES:
+            raise ValueError(f"unsupported maintenance outcome: {outcome}")
+        with self._lock:
+            job = self._find_maintenance_locked(job_id)
+            if job is None:
+                return False
+            self._apply_maintenance_details(job, details)
+            self._finish_maintenance_locked(job, outcome, self.clock(), reason=reason)
+            self._maintenance["activeJobs"] = [
+                entry for entry in self._maintenance.get("activeJobs", [])
+                if entry.get("statusJobId") != job_id
+            ]
+            self._write_snapshot_locked()
+            return True
+
+    def record_maintenance_outcome(
+        self,
+        operation: str,
+        outcome: str,
+        identity: dict | None = None,
+        *,
+        reason: str | None = None,
+        duration_seconds: float | None = None,
+    ) -> str:
+        if outcome not in MAINTENANCE_OUTCOMES:
+            raise ValueError(f"unsupported maintenance outcome: {outcome}")
+        job_id = uuid.uuid4().hex
+        now = self.clock()
+        job = {
+            "statusJobId": job_id,
+            "workKind": "maintenance",
+            "operation": _safe_maintenance_text(operation, "maintenance", limit=64),
+            "queuedAt": _utc_iso(now),
+            "startedAt": _utc_iso(now),
+            "durationSeconds": max(0, round(float(duration_seconds or 0), 3)),
+        }
+        for key in MAINTENANCE_IDENTITY_KEYS:
+            value = (identity or {}).get(key)
+            if key in ("itemId",):
+                job[key] = value if isinstance(value, int) and not isinstance(value, bool) else None
+            else:
+                job[key] = _safe_maintenance_text(value)
+        with self._lock:
+            self._finish_maintenance_locked(job, outcome, now, reason=reason)
+            self._write_snapshot_locked()
+        return job_id
+
+    def _find_maintenance_locked(self, job_id: str) -> dict | None:
+        return next((
+            job for job in self._maintenance.get("activeJobs", [])
+            if job.get("statusJobId") == job_id
+        ), None)
+
+    @staticmethod
+    def _apply_maintenance_details(job: dict, details: dict | None) -> None:
+        for key in MAINTENANCE_PROGRESS_KEYS:
+            if details is not None and key in details:
+                value = details[key]
+                if key == "contextEnabled":
+                    job[key] = bool(value)
+                elif key in ("lane", "repairStage", "timingScope"):
+                    safe_value = _safe_maintenance_text(value, limit=64)
+                    if safe_value and re.fullmatch(r"[A-Za-z0-9 _-]+", safe_value):
+                        job[key] = safe_value
+                elif value is None or (
+                    isinstance(value, (int, float)) and not isinstance(value, bool)
+                ):
+                    job[key] = value
+
+    def _finish_maintenance_locked(
+        self,
+        job: dict,
+        outcome: str,
+        now: float,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        job["state"] = outcome
+        job["outcome"] = outcome
+        job["finishedAt"] = _utc_iso(now)
+        job["updatedAt"] = job["finishedAt"]
+        if reason:
+            job["reason"] = _safe_maintenance_reason(reason)
+        started = _parse_iso(job.get("startedAt")) or _parse_iso(job.get("queuedAt")) or now
+        job["durationSeconds"] = max(
+            float(job.get("durationSeconds") or 0),
+            round(now - started, 3),
+        )
+        event = self._maintenance_public(job)
+        event["kind"] = "maintenance_job"
+        event["timestamp"] = job["finishedAt"]
+        self._append_history_locked(event)
 
     def set_episode_identity(
         self,
@@ -500,6 +747,8 @@ class StatusTracker:
         job["durationSeconds"] = max(0, round(now - started, 3))
         event = {
             "kind": "job",
+            "workKind": "cycle",
+            "operation": "cue_repair" if job["repaired"] else "translation",
             "timestamp": job["finishedAt"],
             "cycleId": self._cycle.get("id") if self._cycle else None,
             "title": job.get("title"),
@@ -594,7 +843,7 @@ class StatusTracker:
             "queued": states["queued"],
             "translating": states["translating"],
             "validating": states["validating"],
-            "repairing": states["repairing"],
+            "repairing": sum(states[state] for state in REPAIR_ACTIVE_STATES),
             "done": done,
             "accepted": states["accepted"],
             "failed": states["failed"],
@@ -622,14 +871,45 @@ class StatusTracker:
                 "etaSeconds", "progress", "lane", "attempts",
                 "jobId", "failureDetails", "circuit",
                 "retryPlanId", "retryAttempt",
+                "totalRepairableCues", "completedCues", "currentCueNumber",
+                "currentCuePosition", "currentCueOrdinal", "currentAttempt",
+                "maxAttempts", "contextEnabled", "lastHttpStatus",
+                "lastRequestDurationSeconds", "rejectedAttempts",
+                "successfulCues", "unresolvedCues",
+                "repairStage",
             )
         }
+        public["statusJobId"] = job.get("key")
+        public["workKind"] = "cycle"
+        public["operation"] = (
+            "cue_repair"
+            if job.get("state") in REPAIR_ACTIVE_STATES or job.get("repaired")
+            else "translation"
+        )
         if job.get("state") in ACTIVE_STATES:
             started = _parse_iso(job.get("startedAt"))
             if started is not None:
                 public["durationSeconds"] = max(0, round(self.clock() - started, 3))
         elif job.get("state") == "queued":
             public["durationSeconds"] = None
+        return public
+
+    def _maintenance_public(self, job: dict) -> dict:
+        public = {
+            key: job.get(key)
+            for key in (
+                "statusJobId", "workKind", "operation", *MAINTENANCE_IDENTITY_KEYS,
+                "state", "outcome", "queuedAt", "startedAt", "updatedAt",
+                "finishedAt", "durationSeconds", "reason",
+                *MAINTENANCE_PROGRESS_KEYS,
+            )
+        }
+        if job.get("state") in MAINTENANCE_ACTIVE_STATES:
+            started = _parse_iso(job.get("startedAt"))
+            if started is not None:
+                public["durationSeconds"] = max(
+                    0, round(self.clock() - started, 3)
+                )
         return public
 
     def _snapshot_locked(self) -> dict:
@@ -644,6 +924,15 @@ class StatusTracker:
         ][:10]
         recent = [
             event for event in reversed(self._history) if event.get("kind") == "job"
+        ][:self.recent_limit]
+        maintenance_active = [
+            self._maintenance_public(job)
+            for job in self._maintenance.get("activeJobs", [])
+            if job.get("state") in MAINTENANCE_ACTIVE_STATES
+        ]
+        maintenance_recent = [
+            event for event in reversed(self._history)
+            if event.get("kind") == "maintenance_job"
         ][:self.recent_limit]
         return {
             "generatedAt": _utc_iso(now),
@@ -666,6 +955,8 @@ class StatusTracker:
             },
             "maintenance": {
                 "lastScan": self._maintenance.get("lastScan"),
+                "activeJobs": maintenance_active,
+                "recentOutcomes": maintenance_recent,
                 "history": {
                     label: self._window_counts_locked("maintenance", seconds)
                     for label, seconds in HISTORY_WINDOWS.items()

@@ -2,7 +2,7 @@
 
 Continuously monitors Bazarr for missing subtitles and translates them through Lingarr's direct API. It also validates new and existing target-language subtitles, repairs isolated bad cues, and quarantines files that cannot be repaired safely.
 
-The container includes a read-only status dashboard at `http://<docker-host>:8765`. It refreshes every 30 seconds, retains a manual refresh control, and is intended for a trusted LAN.
+The container includes a read-only status dashboard at `http://<docker-host>:8765`. It refreshes every 3 seconds while work is active and every 20 seconds while idle, retains a manual refresh control, and is intended for a trusted LAN.
 
 ## How it works
 
@@ -145,9 +145,11 @@ state. The **Logs** link opens a searchable, sanitized, read-only view of
 managed AutoTranslate logs. Lingarr's internal provider command timeout is not
 configurable through its documented API and is not changed here.
 
-The status page shows one queue entry per missing target language. Its initial count is fixed when the Bazarr wanted queue is read. A Lingarr submission is shown as `translating`; it becomes `accepted` only after the resulting subtitle passes local validation. `Done` includes accepted, failed, timed-out, deferred, and quarantined jobs, while `Remaining` contains queued, translating, validating, and repairing work.
+The status page shows one queue entry per missing target language. Its initial count is fixed when the Bazarr wanted queue is read. A Lingarr submission is shown as `translating`; it becomes `accepted` only after the resulting subtitle passes local validation. `Done` includes accepted, failed, timed-out, deferred, and quarantined jobs, while `Remaining` contains queued, translating, validating, and repair work. Repair work uses `repair queued`, `waiting for capacity`, `repairing`, and `validating repaired file` stages.
 
-The page includes the current or most recently completed cycle, active jobs, the next ten jobs, the latest twenty outcomes, and exact rolling 1-hour, 6-hour, 12-hour, 24-hour, and 7-day totals. Waiting retries, circuit-protected series, and missing sources are counted separately from genuine operational deferrals. It formats elapsed time and local timestamps for readability, includes episode identity when available, supports dark and light themes, and refreshes in place every 30 seconds. Existing-library repairs, quarantines, undersized detections, and sidecar pruning are reported separately as maintenance activity.
+The page includes the current or most recently completed cycle, active jobs, the next ten jobs, the latest twenty outcomes, and exact rolling 1-hour, 6-hour, 12-hour, 24-hour, and 7-day totals. Active now combines wanted-cycle and maintenance rows visually, but their API collections and counters remain separate. Existing-library scans, cue repairs, Bazarr synchronization, and noticeable pruning batches are live maintenance work. Format repair, validation actions, undersized detection, quarantine, deletion, and individual pruning are shown through scan progress, recent maintenance outcomes, and rolling totals; retention housekeeping remains aggregate-only.
+
+Cue repair progress reports finalized cues, the current cue, attempt/max attempts, rejected attempts, elapsed time, percentage, and ETA. `HTTP 200` means Lingarr returned a transport-level response; the cue is not complete until the candidate passes local validation or the cue exhausts all attempts. No source or target dialogue or context is published.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -163,9 +165,9 @@ Endpoints:
 - `/api/status` — the same snapshot as JSON
 - `/healthz` — status-server health and current worker phase
 
-The stable JSON sections are `generatedAt`, `service`, `currentCycle`, `activeJobs`, `upNext`, `recentOutcomes`, `history`, and `maintenance`. No filesystem paths, subtitle text, or credentials are returned.
+The stable JSON sections are `generatedAt`, `service`, `currentCycle`, `activeJobs`, `upNext`, `recentOutcomes`, `history`, and `maintenance`. Existing fields remain backward compatible. `maintenance` additionally contains `activeJobs` and `recentOutcomes`; jobs expose a stable `statusJobId`, work kind, operation, lifecycle state, safe media identity, timing, and whitelisted progress fields. No filesystem paths, subtitle text, context, prompts, credentials, or provider response bodies are returned.
 
-Current state is atomically written to `/config/status.json`; terminal history is appended to `/config/status_history.jsonl`. Both survive container recreation through the existing `/config` volume. Active jobs found after a restart are finalized as deferred with an interruption reason. Status history is compacted during normal retention housekeeping.
+Current state is atomically written to `/config/status.json`; terminal history is appended to `/config/status_history.jsonl`. Both survive container recreation through the existing `/config` volume. Interrupted wanted jobs are finalized as deferred; interrupted maintenance jobs become a single `interrupted` maintenance outcome. Status history is compacted during normal retention housekeeping.
 
 The dashboard has no authentication. Keep port `8765` restricted to a trusted LAN or protect it with your firewall/reverse proxy. Set `STATUS_ENABLED=false` to disable the listener. A port-binding or status-file failure is non-fatal and does not stop translations.
 
@@ -193,7 +195,7 @@ Schema v5 retains the schema-v4 retry migration and adds retry-size ordering plu
 
 Source-anchored recovery normalizes BOMs, newlines, trailing whitespace, timestamp spacing, repeated separators, and blank lines inside cues. Orphan text is folded into its preceding cue only when every numbered timestamp anchor still matches the source in order. Missing, duplicate, reordered, or mismatched anchors are never guessed.
 
-Cue repairs share `PARALLEL_TRANSLATES` with full-file work. A waiting repair is admitted before a new translation, and the combined active count never exceeds that limit. Repair logs show queueing, worker, cue number, attempt, context counts, safe HTTP status, duration, validation rejection, and the no-context retry. Subtitle text, context contents, and credentials are never logged.
+Cue repairs share `PARALLEL_TRANSLATES` with full-file work. A waiting repair is admitted before a new translation, and the combined active count never exceeds that limit. Repair logs and status show queueing, capacity waiting, worker execution, cue number, attempt, safe HTTP status, duration, candidate validation, and completed-file validation. Subtitle text, context contents, credentials, prompts, and raw provider payloads are never logged or displayed.
 
 ## Quarantine recovery
 
