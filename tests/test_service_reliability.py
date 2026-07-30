@@ -468,6 +468,71 @@ class ServiceReliabilityTests(unittest.TestCase):
                 [2, 4, 8, 16, 16, 16, 16],
             )
 
+    def test_regeneration_retries_dispatch_in_parallel_with_capacity_two(self):
+        plans = [
+            {
+                "id": index,
+                "itemType": "episodes",
+                "itemId": 100 + index,
+                "targetLanguage": "et",
+                "attemptCount": 0,
+                "seriesKey": f"sonarr:{index}",
+                "seriesTitle": f"Show {index}",
+                "mediaTitle": f"Show {index} S01E0{index}",
+                "sourcePath": f"/media/Show {index} - S01E0{index}.en.srt",
+            }
+            for index in range(1, 4)
+        ]
+        state = Mock()
+        state.due_retry_count.return_value = 3
+        state.claim_due_retry_plans.return_value = plans
+        state.retry_plans.return_value = [
+            {**plan, "state": "accepted_after_regeneration"}
+            for plan in plans
+        ]
+        gate = threading.Semaphore(2)
+        lock = threading.Lock()
+        active = 0
+        maximum = 0
+        started = threading.Event()
+        release = threading.Event()
+
+        def process(*_args, **_kwargs):
+            nonlocal active, maximum
+            with gate:
+                with lock:
+                    active += 1
+                    maximum = max(maximum, active)
+                    if maximum == 2:
+                        started.set()
+                release.wait(2)
+                with lock:
+                    active -= 1
+
+        def unblock():
+            self.assertTrue(started.wait(2))
+            release.set()
+
+        waiter = threading.Thread(target=unblock)
+        waiter.start()
+        stats = {}
+        with (
+            patch.object(app, "_get_validation_state", return_value=state),
+            patch.object(app, "process_item", side_effect=process),
+            patch.object(app, "_status_admit_retry") as admit,
+            patch.object(app, "PARALLEL_TRANSLATES", 2),
+            patch.object(
+                app._shared_capacity, "release_current_translation"
+            ) as release_capacity,
+        ):
+            app._run_regeneration_retries(stats)
+        waiter.join(2)
+
+        self.assertEqual(maximum, 2)
+        self.assertEqual(admit.call_count, 3)
+        self.assertEqual(release_capacity.call_count, 3)
+        self.assertEqual(stats["regeneration_queued"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -127,6 +127,65 @@ def episode_identity_from_path(path: str | Path | None) -> str | None:
     return f"S{int(match.group(1)):02d}E{int(match.group(2)):02d}"
 
 
+def retry_media_identity(plan: dict) -> dict:
+    """Return safe display metadata for current and legacy retry plans."""
+    source_name = str(plan.get("sourcePath") or "").replace("\\", "/").rsplit("/", 1)[-1]
+    media_name = str(plan.get("mediaTitle") or "").replace("\\", "/").rsplit("/", 1)[-1]
+    candidate = source_name or media_name
+    stem = re.sub(r"(?i)\.srt$", "", candidate).strip()
+    stem = re.sub(
+        r"(?i)[._-](?:eng|en|est|et|swe|sv)(?:[._-](?:hi|sdh|forced))?$",
+        "",
+        stem,
+    )
+    series = str(plan.get("seriesTitle") or "").strip()
+    season_folder = re.compile(
+        r"(?i)season\s*\d+(?:\s+s\d{1,3}e\d{1,3})?"
+    )
+    if season_folder.fullmatch(series):
+        series = ""
+
+    code_match = re.search(r"(?i)\bS(\d{1,3})E(\d{1,3})\b", stem)
+    episode_code = None
+    episode_title = None
+    if code_match:
+        episode_code = (
+            f"S{int(code_match.group(1)):02d}E{int(code_match.group(2)):02d}"
+        )
+        prefix = stem[:code_match.start()].rstrip(" ._-")
+        suffix = stem[code_match.end():].lstrip(" ._-")
+        if not series and prefix and not season_folder.fullmatch(prefix):
+            series = prefix.replace(".", " ").strip()
+        suffix = re.split(r"\s+\[", suffix, maxsplit=1)[0].strip(" ._-")
+        suffix = re.sub(r"\s+-[A-Z0-9]{2,12}$", "", suffix).strip()
+        if suffix and not re.fullmatch(r"(?i)episode\s*\d+", suffix):
+            episode_title = suffix
+
+    date_match = re.match(
+        r"^(.*?)\s+-\s+(\d{4}-\d{2}-\d{2})\s+-\s+(.*)$", stem
+    )
+    if date_match:
+        series = series or date_match.group(1).strip()
+        episode_code = date_match.group(2)
+        episode_title = re.split(
+            r"\s+\[", date_match.group(3), maxsplit=1
+        )[0].strip(" ._-")
+
+    display_title = series
+    if not display_title:
+        fallback = re.split(r"\s+\[", stem, maxsplit=1)[0].strip(" ._-")
+        if not season_folder.fullmatch(fallback):
+            display_title = fallback
+    if not display_title:
+        media_type = "Episode" if plan.get("itemType") == "episodes" else "Movie"
+        display_title = f"{media_type} {plan.get('itemId', '-')}"
+    return {
+        "displayTitle": display_title,
+        "episodeCode": episode_code,
+        "episodeTitle": episode_title,
+    }
+
+
 def build_cycle_jobs(
     work: list[tuple[dict, str, str]],
     languages: list[str],
@@ -350,6 +409,60 @@ class StatusTracker:
                 self._write_snapshot_locked()
             return changed
 
+    def admit_retry(
+        self,
+        *,
+        plan_id: int,
+        item_type: str,
+        item_id: int,
+        target_language: str,
+        display_title: str,
+        episode_code: str | None = None,
+        episode_title: str | None = None,
+        attempt: int = 1,
+    ) -> bool:
+        """Place one claimed retry back into the active cycle queue."""
+        with self._lock:
+            if self._cycle is None or self._cycle.get("completedAt"):
+                return False
+            jobs = self._cycle.setdefault("jobs", [])
+            job = next((
+                candidate for candidate in jobs
+                if candidate.get("itemType") == item_type
+                and candidate.get("itemId") == item_id
+                and candidate.get("targetLanguage") == target_language
+            ), None)
+            now = _utc_iso(self.clock())
+            if job is None:
+                job = {
+                    "key": f"{self._cycle['id']}:retry:{int(plan_id)}",
+                    "itemType": item_type,
+                    "itemId": item_id,
+                    "targetLanguage": target_language,
+                }
+                jobs.append(job)
+                self._cycle["initial"] = int(
+                    self._cycle.get("initial", len(jobs) - 1)
+                ) + 1
+            elif job.get("state") not in WAIT_STATES:
+                return False
+            job.update({
+                "title": display_title,
+                "episodeCode": episode_code,
+                "episodeTitle": episode_title,
+                "state": "queued",
+                "queuedAt": now,
+                "startedAt": None,
+                "finishedAt": None,
+                "durationSeconds": None,
+                "repaired": False,
+                "reason": "admitted retry waiting for translation lane",
+                "retryPlanId": int(plan_id),
+                "retryAttempt": max(1, int(attempt)),
+            })
+            self._write_snapshot_locked()
+            return True
+
     def finish_cycle(self, metrics: dict | None = None) -> None:
         with self._lock:
             if self._cycle is None:
@@ -566,6 +679,7 @@ class StatusTracker:
                 "timingScope", "estimatedSeconds", "timeoutSeconds",
                 "etaSeconds", "progress", "lane", "attempts",
                 "jobId", "failureDetails", "circuit",
+                "retryPlanId", "retryAttempt",
             )
         }
         if job.get("state") in ACTIVE_STATES:
@@ -640,6 +754,7 @@ class StatusTracker:
                             "state", "attemptCount", "eligibleCompletedCycle",
                             "lastFailureAt", "lastReason", "finalOutcome",
                             "archivedAttemptCount", "latestDonorAttempt",
+                            "displayTitle", "episodeCode", "episodeTitle",
                         )
                     })
                 self._service["retryPlans"] = safe_retries
