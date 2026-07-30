@@ -50,6 +50,8 @@ docker compose up -d
 | `CHECK_INTERVAL` | `1200` | Seconds between wanted-subtitle cycles |
 | `POLL_TIMEOUT` | `900` | Minimum per-file translation timeout |
 | `RESUBMIT_COOLDOWN` | `3600` | Minimum delay before resubmitting an item/language pair |
+| `CIRCUIT_FAILURE_THRESHOLD` | `3` | Consecutive failures before series protection opens |
+| `CIRCUIT_OPEN_CYCLES` | `3` | Healthy completed cycles before one half-open trial |
 
 ## Subtitle validation, repair, and cleanup
 
@@ -121,8 +123,9 @@ worker, short files have priority whenever no repair is pending.
 
 Failed Lingarr jobs are inspected for positioned line results. Valid completed
 lines are retained and unresolved cues are retried individually instead of
-resubmitting the complete episode. Three consecutive failures open a temporary
-per-series circuit so one problematic show cannot monopolize the queue.
+resubmitting the complete episode. Three consecutive failures open a persisted
+per-series circuit. It remains blocked for three healthy completed cycles, then
+allows exactly one half-open trial. Interrupted and degraded cycles do not count.
 
 The dashboard shows learned cue speed, estimates, ETA, lanes, and circuit
 state. The **Logs** link opens a searchable, sanitized, read-only view of

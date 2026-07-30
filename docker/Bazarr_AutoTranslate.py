@@ -22,9 +22,9 @@ from status_dashboard import (
     StatusTracker,
     build_cycle_jobs,
     episode_identity_from_path,
-    retry_media_identity,
     start_status_server,
 )
+from media_identity import resolve_media_identity, retry_media_identity
 from state_store import StateStore, StateStoreError
 
 # Unbuffered output
@@ -198,7 +198,12 @@ REPAIR_TIMEOUT_MULTIPLIER = max(
 CIRCUIT_FAILURE_THRESHOLD = max(
     1, int(os.getenv("CIRCUIT_FAILURE_THRESHOLD", "3"))
 )
-CIRCUIT_OPEN_SECONDS = max(60, int(os.getenv("CIRCUIT_OPEN_SECONDS", "21600")))
+CIRCUIT_OPEN_CYCLES = max(1, int(os.getenv("CIRCUIT_OPEN_CYCLES", "3")))
+if os.getenv("CIRCUIT_OPEN_SECONDS"):
+    print(
+        "[WARNING] CIRCUIT_OPEN_SECONDS is deprecated and has no scheduling "
+        "effect; use CIRCUIT_OPEN_CYCLES"
+    )
 RESUBMIT_COOLDOWN = max(60, int(os.getenv("RESUBMIT_COOLDOWN", "3600")))
 SYNC_TIMEOUT = max(30, int(os.getenv("SYNC_TIMEOUT", "600")))
 SYNC_POLL_INTERVAL = max(5, int(os.getenv("SYNC_POLL_INTERVAL", "15")))
@@ -299,6 +304,7 @@ _CIRCUIT_CONFIG_FINGERPRINT = hashlib.sha256(
             "timeoutMultiplier": TRANSLATION_TIMEOUT_MULTIPLIER,
             "timeoutCap": TRANSLATION_TIMEOUT_CAP,
             "parallel": PARALLEL_TRANSLATES,
+            "openCycles": CIRCUIT_OPEN_CYCLES,
         },
         sort_keys=True,
     ).encode("utf-8")
@@ -958,6 +964,13 @@ def _initialize_state_store() -> StateStore:
             cooldown_seconds=RESUBMIT_COOLDOWN,
         )
         reconciliation = store.reconcile_pending_operations()
+        circuit_migration = store.initialize_cycle_circuits(CIRCUIT_OPEN_CYCLES)
+        print(
+            "[STATE] Circuit migration: "
+            f"completed_cycle={circuit_migration['completedCycle']}, "
+            f"migrated={circuit_migration['migrated']}, "
+            f"retired_generic={circuit_migration['retiredGeneric']}"
+        )
         _validation_state = store
         retry_migration = {"migrated": 0, "unresolved": 0, "ignored": 0}
         candidates = store.legacy_retry_candidates()
@@ -975,10 +988,14 @@ def _initialize_state_store() -> StateStore:
                 retry_migration["ignored"] += 1
                 continue
             identity = retry_media_identity(candidate)
-            series_key = (
-                f"episodes:{identity['displayTitle'].casefold()}"
-                if candidate["itemType"] == "episodes"
-                else None
+            circuit_identity = resolve_media_identity(
+                {
+                    "seriesTitle": candidate.get("seriesTitle"),
+                    "title": identity["displayTitle"],
+                },
+                candidate["itemType"],
+                candidate["itemId"],
+                source_path,
             )
             store.schedule_retry_plan(
                 item_type=candidate["itemType"],
@@ -988,8 +1005,8 @@ def _initialize_state_store() -> StateStore:
                 source_path=source_path,
                 source_language=candidate.get("sourceLanguage"),
                 target_path=candidate.get("targetPath"),
-                series_key=series_key,
-                series_title=identity["displayTitle"],
+                series_key=circuit_identity["key"],
+                series_title=circuit_identity["title"],
                 media_title=os.path.basename(source_path),
                 source_cue_count=_count_srt_cues(source_path),
                 failure_class="whole_file",
@@ -3293,7 +3310,7 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
                         else f"invalid subtitle {result.action}"
                     ),
                     threshold=CIRCUIT_FAILURE_THRESHOLD,
-                    open_seconds=CIRCUIT_OPEN_SECONDS,
+                    open_cycles=CIRCUIT_OPEN_CYCLES,
                     config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
                 )
                 _refresh_status_diagnostics()
@@ -4148,7 +4165,7 @@ def _record_invalid_circuit_outcome(
             success=False,
             reason=f"invalid subtitle {action}: {rules}",
             threshold=CIRCUIT_FAILURE_THRESHOLD,
-            open_seconds=CIRCUIT_OPEN_SECONDS,
+            open_cycles=CIRCUIT_OPEN_CYCLES,
             config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
         )
         _refresh_status_diagnostics()
@@ -4252,13 +4269,9 @@ def process_item(
     if item_id is None:
         return
     title = _item_title(item, item_type)
-    series_title = title
-    series_id = item.get("sonarrSeriesId") if item_type == "episodes" else None
-    series_key = (
-        f"sonarr:{series_id}"
-        if series_id is not None
-        else f"{item_type}:{title.casefold()}"
-    )
+    identity = resolve_media_identity(item, item_type, item_id)
+    series_title = identity["title"]
+    series_key = identity["key"]
     lingarr_media_type = "Episode" if item_type == "episodes" else "Movie"
 
     missing_raw = {
@@ -4288,6 +4301,9 @@ def process_item(
             )
         return
     _status_set_episode_identity(item_type, item_id, video_path)
+    identity = resolve_media_identity(item, item_type, item_id, video_path)
+    series_title = identity["title"]
+    series_key = identity["key"]
     if video_path:
         _queue_video_for_pruning(video_path, item_type)
     available_by_lang: dict[str, list[str]] = {}
@@ -4599,10 +4615,10 @@ def process_item(
             print(f"{YELLOW}[CIRCUIT] State unavailable for {title}: {exc}{RESET}")
             circuit = {"allowed": True, "state": "unknown", "failures": 0}
         if not circuit["allowed"]:
-            retry_at = circuit.get("retryAt")
+            eligible_cycle = circuit.get("eligibleAfterCycle")
             print(
                 f"{YELLOW}[CIRCUIT] Deferred {title}: {circuit['state']} after "
-                f"{circuit.get('failures', 0)} failures; retry_at={retry_at}{RESET}"
+                f"{circuit.get('failures', 0)} failures; eligible_after_cycle={eligible_cycle}{RESET}"
             )
             _status_transition(
                 item_type,
@@ -4683,12 +4699,12 @@ def process_item(
         if not queued_circuit["allowed"]:
             _file_lane_gate.release(lane)
             _shared_capacity.release(shared_token)
-            retry_at = queued_circuit.get("retryAt")
+            eligible_cycle = queued_circuit.get("eligibleAfterCycle")
             print(
                 f"{YELLOW}[CIRCUIT] Released {lane} slot for {title}: protection "
                 f"opened while queued; state={queued_circuit['state']} "
                 f"failures={queued_circuit.get('failures', 0)} "
-                f"retry_at={retry_at}{RESET}"
+                f"eligible_after_cycle={eligible_cycle}{RESET}"
             )
             with stats_lock:
                 stats["deferred"] = stats.get("deferred", 0) + 1
@@ -4867,11 +4883,11 @@ def process_item(
                 circuit = {"allowed": True, "state": "unknown", "failures": 0}
             if not circuit["allowed"]:
                 _mark_submission_failed(attempt_id)
-                retry_at = circuit.get("retryAt")
+                eligible_cycle = circuit.get("eligibleAfterCycle")
                 print(
                     f"{YELLOW}[CIRCUIT] Deferred {title} before submission: "
                     f"state={circuit['state']} failures={circuit.get('failures', 0)} "
-                    f"retry_at={retry_at}; released_slot={lane}{RESET}"
+                    f"eligible_after_cycle={eligible_cycle}; released_slot={lane}{RESET}"
                 )
                 with stats_lock:
                     stats["deferred"] = stats.get("deferred", 0) + 1
@@ -4904,7 +4920,7 @@ def process_item(
                             success=False,
                             reason="Lingarr submission failed",
                             threshold=CIRCUIT_FAILURE_THRESHOLD,
-                            open_seconds=CIRCUIT_OPEN_SECONDS,
+                            open_cycles=CIRCUIT_OPEN_CYCLES,
                             config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
                         )
                     except StateStoreError as exc:
@@ -5052,7 +5068,7 @@ def process_item(
                     success=False,
                     reason=failure_reason,
                     threshold=CIRCUIT_FAILURE_THRESHOLD,
-                    open_seconds=CIRCUIT_OPEN_SECONDS,
+                    open_cycles=CIRCUIT_OPEN_CYCLES,
                     config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
                 )
             except StateStoreError as exc:
@@ -5197,7 +5213,7 @@ def process_item(
                     success=True,
                     reason=None,
                     threshold=CIRCUIT_FAILURE_THRESHOLD,
-                    open_seconds=CIRCUIT_OPEN_SECONDS,
+                    open_cycles=CIRCUIT_OPEN_CYCLES,
                     config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
                 )
             except StateStoreError as exc:
@@ -6531,7 +6547,7 @@ def main() -> int:
     )
     print(
         f"  Circuit breaker   : {CIRCUIT_FAILURE_THRESHOLD} failures / "
-        f"{CIRCUIT_OPEN_SECONDS}s"
+        f"{CIRCUIT_OPEN_CYCLES} healthy completed cycles"
     )
     print(f"  Check interval    : {CHECK_INTERVAL}s (after Bazarr sync)")
     print(f"  Poll interval     : {POLL_INTERVAL}s  (floor {POLL_TIMEOUT}s per translation)")

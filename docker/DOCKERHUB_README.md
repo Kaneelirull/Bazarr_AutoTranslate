@@ -102,6 +102,8 @@ docker run -d \
 | `POLL_INTERVAL` | No | `20` | Lingarr job polling interval |
 | `POLL_TIMEOUT` | No | `900` | Base translation timeout |
 | `RESUBMIT_COOLDOWN` | No | `3600` | Duplicate-submission cooldown |
+| `CIRCUIT_FAILURE_THRESHOLD` | No | `3` | Failures before series protection opens |
+| `CIRCUIT_OPEN_CYCLES` | No | `3` | Healthy completed cycles before one trial |
 
 API connection failures are retried with bounded backoff. Bazarr category
 failures are reported as degraded cycles instead of empty queues, and Lingarr
@@ -141,6 +143,11 @@ context. If any cue still fails, the untouched original subtitle is handled by
 Quarantine is audit storage only: retry plans persist separately in SQLite,
 use completed-cycle backoff, respect the series circuit breaker, and remain
 visible on the dashboard until accepted or exhausted.
+
+Series protection is cycle based too. After the configured failure threshold,
+`CIRCUIT_OPEN_CYCLES` healthy completed cycles (default 3) must finish before
+one half-open trial can run. Restarted, interrupted, and degraded cycles do not
+advance the persisted eligibility counter.
 
 Additional validation thresholds are documented in the repository's
 [`docker/README.md`](https://github.com/Kaneelirull/Bazarr_AutoTranslate/blob/main/docker/README.md)

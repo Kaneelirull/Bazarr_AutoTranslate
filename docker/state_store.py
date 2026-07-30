@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 ACTIVE_RETRY_STATES = {
     "repair_retry_queued",
@@ -282,6 +282,7 @@ class StateStore:
                     state TEXT NOT NULL DEFAULT 'closed',
                     opened_at REAL,
                     retry_at REAL,
+                    eligible_after_cycle INTEGER,
                     half_open_claimed INTEGER NOT NULL DEFAULT 0,
                     config_fingerprint TEXT NOT NULL,
                     last_reason TEXT,
@@ -375,6 +376,17 @@ class StateStore:
             if "source_cue_count" not in retry_columns:
                 self._connection.execute(
                     "ALTER TABLE retry_plans ADD COLUMN source_cue_count INTEGER"
+                )
+            circuit_columns = {
+                row["name"]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(circuit_breakers)"
+                ).fetchall()
+            }
+            if "eligible_after_cycle" not in circuit_columns:
+                self._connection.execute(
+                    "ALTER TABLE circuit_breakers "
+                    "ADD COLUMN eligible_after_cycle INTEGER"
                 )
             attempt_columns = {
                 row["name"]
@@ -487,6 +499,48 @@ class StateStore:
             return max(0, int(value or 0))
         except (TypeError, ValueError):
             return 0
+
+    @staticmethod
+    def _completed_cycle_in(connection: sqlite3.Connection) -> int:
+        row = connection.execute(
+            "SELECT value FROM state_metadata WHERE key = 'completed_cycle'"
+        ).fetchone()
+        try:
+            return max(0, int(row["value"])) if row else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def initialize_cycle_circuits(self, open_cycles: int) -> dict:
+        """Migrate legacy time-based circuits and retire unsafe generic keys."""
+        with self._transaction() as db:
+            completed = self._completed_cycle_in(db)
+            retired = db.execute(
+                """
+                UPDATE circuit_breakers
+                SET state='closed', consecutive_failures=0, opened_at=NULL,
+                    retry_at=NULL, eligible_after_cycle=NULL,
+                    half_open_claimed=0, last_reason='retired generic series identity',
+                    updated_at=?
+                WHERE lower(trim(series_title)) GLOB 'season [0-9]*'
+                   OR lower(series_key) GLOB 'episodes:season [0-9]*'
+                """,
+                (time.time(),),
+            ).rowcount
+            eligible = completed + max(1, int(open_cycles))
+            migrated = db.execute(
+                """
+                UPDATE circuit_breakers
+                SET eligible_after_cycle=?, retry_at=NULL, updated_at=?
+                WHERE state IN ('open', 'half_open')
+                  AND eligible_after_cycle IS NULL
+                """,
+                (eligible, time.time()),
+            ).rowcount
+        return {
+            "completedCycle": completed,
+            "migrated": migrated,
+            "retiredGeneric": retired,
+        }
 
     def advance_completed_cycle(self) -> int:
         with self._transaction() as db:
@@ -993,10 +1047,16 @@ class StateStore:
         series_title: str,
         config_fingerprint: str,
         claim: bool = True,
+        completed_cycle: int | None = None,
         now: float | None = None,
     ) -> dict:
         now = time.time() if now is None else now
         with self._transaction() as connection:
+            current_cycle = (
+                self._completed_cycle_in(connection)
+                if completed_cycle is None
+                else max(0, int(completed_cycle))
+            )
             row = connection.execute(
                 "SELECT * FROM circuit_breakers WHERE series_key = ?",
                 (series_key,),
@@ -1012,42 +1072,57 @@ class StateStore:
                     ON CONFLICT(series_key) DO UPDATE SET
                         series_title=excluded.series_title,
                         consecutive_failures=0, state='closed', opened_at=NULL,
-                        retry_at=NULL, half_open_claimed=0,
+                        retry_at=NULL, eligible_after_cycle=NULL, half_open_claimed=0,
                         config_fingerprint=excluded.config_fingerprint,
                         last_reason=NULL, updated_at=excluded.updated_at
                     """,
                     (series_key, series_title, config_fingerprint, now),
                 )
                 return {"allowed": True, "state": "closed", "failures": 0}
+            if series_title and series_title != row["series_title"]:
+                connection.execute(
+                    "UPDATE circuit_breakers SET series_title=?, updated_at=? "
+                    "WHERE series_key=?",
+                    (series_title, now, series_key),
+                )
             state = row["state"]
-            if state == "open" and row["retry_at"] and now >= row["retry_at"]:
+            eligible = row["eligible_after_cycle"]
+            remaining = max(0, int(eligible or 0) - current_cycle)
+            if (
+                state == "open"
+                and eligible is not None
+                and current_cycle >= int(eligible)
+            ):
                 if not claim:
                     return {
                         "allowed": True,
                         "state": "half_open",
                         "failures": row["consecutive_failures"],
-                        "retryAt": row["retry_at"],
+                        "eligibleAfterCycle": int(eligible),
+                        "completedCyclesRemaining": 0,
                     }
-                connection.execute(
+                claimed = connection.execute(
                     """
                     UPDATE circuit_breakers
                     SET state='half_open', half_open_claimed=1, updated_at=?
-                    WHERE series_key=?
+                    WHERE series_key=? AND state='open' AND half_open_claimed=0
                     """,
                     (now, series_key),
-                )
+                ).rowcount
                 return {
-                    "allowed": True,
-                    "state": "half_open",
+                    "allowed": bool(claimed),
+                    "state": "half_open" if claimed else "open",
                     "failures": row["consecutive_failures"],
-                    "retryAt": row["retry_at"],
+                    "eligibleAfterCycle": int(eligible),
+                    "completedCyclesRemaining": 0,
                 }
             allowed = state == "closed"
             return {
                 "allowed": allowed,
                 "state": state,
                 "failures": row["consecutive_failures"],
-                "retryAt": row["retry_at"],
+                "eligibleAfterCycle": eligible,
+                "completedCyclesRemaining": remaining,
                 "reason": row["last_reason"],
             }
 
@@ -1059,7 +1134,7 @@ class StateStore:
         success: bool,
         reason: str | None,
         threshold: int,
-        open_seconds: int,
+        open_cycles: int,
         config_fingerprint: str,
         now: float | None = None,
     ) -> dict:
@@ -1072,23 +1147,25 @@ class StateStore:
             failures = 0 if success else int(row["consecutive_failures"] if row else 0) + 1
             state = "closed"
             opened_at = None
-            retry_at = None
+            eligible_after_cycle = None
             if not success and failures >= max(1, threshold):
                 state = "open"
                 opened_at = now
-                retry_at = now + max(1, open_seconds)
+                current_cycle = self._completed_cycle_in(connection)
+                eligible_after_cycle = current_cycle + max(1, int(open_cycles))
             connection.execute(
                 """
                 INSERT INTO circuit_breakers(
                     series_key, series_title, consecutive_failures, state,
-                    opened_at, retry_at, half_open_claimed, config_fingerprint,
+                    opened_at, retry_at, eligible_after_cycle, half_open_claimed, config_fingerprint,
                     last_reason, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, NULL, ?, 0, ?, ?, ?)
                 ON CONFLICT(series_key) DO UPDATE SET
                     series_title=excluded.series_title,
                     consecutive_failures=excluded.consecutive_failures,
                     state=excluded.state, opened_at=excluded.opened_at,
-                    retry_at=excluded.retry_at, half_open_claimed=0,
+                    retry_at=NULL, eligible_after_cycle=excluded.eligible_after_cycle,
+                    half_open_claimed=0,
                     config_fingerprint=excluded.config_fingerprint,
                     last_reason=excluded.last_reason, updated_at=excluded.updated_at
                 """,
@@ -1098,7 +1175,7 @@ class StateStore:
                     failures,
                     state,
                     opened_at,
-                    retry_at,
+                    eligible_after_cycle,
                     config_fingerprint,
                     None if success else reason,
                     now,
@@ -1107,18 +1184,24 @@ class StateStore:
         return {
             "state": state,
             "failures": failures,
-            "retryAt": retry_at,
+            "eligibleAfterCycle": eligible_after_cycle,
+            "completedCyclesRemaining": max(
+                0, int(eligible_after_cycle or 0) - self.completed_cycle()
+            ),
             "reason": None if success else reason,
         }
 
     def circuit_breakers(self) -> list[dict]:
         with self._lock:
+            completed_cycle = self._completed_cycle_in(self._connection)
             rows = self._connection.execute(
                 """
                 SELECT series_key, series_title, consecutive_failures, state,
-                       retry_at, last_reason
+                       eligible_after_cycle, last_reason
                 FROM circuit_breakers
-                WHERE state != 'closed' OR consecutive_failures > 0
+                WHERE state IN ('open', 'half_open')
+                  AND trim(series_title) != ''
+                  AND lower(trim(series_title)) NOT GLOB 'season [0-9]*'
                 ORDER BY updated_at DESC
                 """
             ).fetchall()
@@ -1128,7 +1211,12 @@ class StateStore:
                 "seriesTitle": row["series_title"],
                 "failures": row["consecutive_failures"],
                 "state": row["state"],
-                "retryAt": row["retry_at"],
+                "eligibleAfterCycle": row["eligible_after_cycle"],
+                "completedCyclesRemaining": max(
+                    0,
+                    int(row["eligible_after_cycle"] or 0)
+                    - completed_cycle,
+                ),
                 "reason": row["last_reason"],
             }
             for row in rows

@@ -441,17 +441,22 @@
       </article>`;
     };
     const activeCircuits = (circuits || []).filter(
-      (entry) => entry.state === "open" || entry.state === "half_open",
+      (entry) => (entry.state === "open" || entry.state === "half_open")
+        && entry.seriesTitle,
     );
     const breakerRows = activeCircuits.map((entry) => {
       const failures = number(entry.failures);
-      const retryAt = entry.retryAt && Number.isFinite(Number(entry.retryAt))
-        ? new Date(Number(entry.retryAt) * 1000).toISOString()
-        : entry.retryAt;
-      const trial = retryAt ? ` · Next trial ${timeMarkup(retryAt)}` : "";
+      const eligible = Number(entry.eligibleAfterCycle);
+      const remaining = Math.max(0, number(entry.completedCyclesRemaining));
+      const trial = Number.isFinite(eligible)
+        ? ` - Next trial after cycle ${eligible.toLocaleString()}`
+        : "";
+      const wait = remaining
+        ? ` - ${remaining.toLocaleString()} healthy ${remaining === 1 ? "cycle" : "cycles"} remaining`
+        : "";
       return `<div class="protection-series">
-        <strong>${escapeHtml(entry.seriesTitle || entry.seriesKey || "Unknown series")}</strong>
-        <span>${failures.toLocaleString()} consecutive ${failures === 1 ? "failure" : "failures"}${trial}</span>
+        <strong>${escapeHtml(entry.seriesTitle)}</strong>
+        <span>${failures.toLocaleString()} consecutive ${failures === 1 ? "failure" : "failures"}${trial}${wait}</span>
       </div>`;
     }).join("");
     const protection = breakerRows
@@ -481,57 +486,10 @@
     </section>`;
   };
 
-  const retryMedia = (plan) => {
-    if (plan.displayTitle) {
-      const detail = [plan.episodeCode, plan.episodeTitle].filter(Boolean).join(" · ");
-      return { title: plan.displayTitle, detail };
-    }
-    const basename = String(plan.mediaTitle || "").split(/[\\/]/).pop() || "";
-    let stem = basename
-      .replace(/\.srt\s*season\s*\d+$/i, "")
-      .replace(/\.srt$/i, "")
-      .replace(/[._-](?:eng|en|est|et|swe|sv)(?:[._-](?:hi|sdh|forced))?$/i, "")
-      .replace(/\[[^\]]*]/g, " ")
-      .replace(/\s+-?(?:NTb|FLUX|GLUE|BLOOM|WEB|ETHEL|YIFY|RARBG)\b.*$/i, "")
-      .replace(/\s+/g, " ")
-      .trim();
-    const codeMatch = stem.match(/\b(S\d{1,2}E\d{1,3})\b/i);
-    const dateMatch = stem.match(/^(.*?)\s+-\s+(\d{4}-\d{2}-\d{2})\s+-\s+(.*)$/);
-    const meaningfulSeries = String(plan.seriesTitle || "")
-      .split(/[\\/]/)
-      .pop()
-      .trim();
-    const seriesFallback = meaningfulSeries
-      && !/^season\s*\d+$/i.test(meaningfulSeries)
-      ? meaningfulSeries
-      : "";
-    let title = seriesFallback;
-    let detail = "";
-    if (dateMatch) {
-      title ||= dateMatch[1].trim();
-      detail = `${dateMatch[2]} · ${dateMatch[3]}`;
-    } else if (codeMatch) {
-      const before = stem.slice(0, codeMatch.index).replace(/[\s._-]+$/g, "").trim();
-      let after = stem.slice(codeMatch.index + codeMatch[0].length)
-        .replace(/^[\s._-]+/, "")
-        .split(/\b(?:WEB(?:DL)?|BluRay|REMUX|HDTV|1080p|720p|480p|x26[45]|h26[45])\b/i)[0]
-        .replace(/[\s._-]+$/g, "")
-        .trim();
-      title ||= before.replaceAll(".", " ").trim();
-      detail = codeMatch[1].toUpperCase() + (after ? ` · ${after}` : "");
-    }
-    if (!title) {
-      title = stem
-        .split(/\b(?:WEB(?:DL)?|BluRay|REMUX|HDTV|1080p|720p|480p|x26[45]|h26[45])\b/i)[0]
-        .replace(/[\s._-]+$/g, "")
-        .replaceAll(".", " ")
-        .trim();
-    }
-    return {
-      title: title || `${plan.itemType || "media"} ${plan.itemId ?? "—"}`,
-      detail: detail || (seriesFallback && seriesFallback !== title ? seriesFallback : ""),
-    };
-  };
+  const retryMedia = (plan) => ({
+    title: plan.displayTitle || `${plan.itemType || "media"} ${plan.itemId ?? "?"}`,
+    detail: [plan.episodeCode, plan.episodeTitle].filter(Boolean).join(" - "),
+  });
 
   const retryState = (state) => {
     const states = {

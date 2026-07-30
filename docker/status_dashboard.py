@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlsplit
 
+from media_identity import retry_media_identity
 
 WAIT_STATES = {"waiting_retry", "series_protected", "missing_source"}
 TERMINAL_STATES = {
@@ -125,65 +126,6 @@ def episode_identity_from_path(path: str | Path | None) -> str | None:
     if not match:
         return None
     return f"S{int(match.group(1)):02d}E{int(match.group(2)):02d}"
-
-
-def retry_media_identity(plan: dict) -> dict:
-    """Return safe display metadata for current and legacy retry plans."""
-    source_name = str(plan.get("sourcePath") or "").replace("\\", "/").rsplit("/", 1)[-1]
-    media_name = str(plan.get("mediaTitle") or "").replace("\\", "/").rsplit("/", 1)[-1]
-    candidate = source_name or media_name
-    stem = re.sub(r"(?i)\.srt$", "", candidate).strip()
-    stem = re.sub(
-        r"(?i)[._-](?:eng|en|est|et|swe|sv)(?:[._-](?:hi|sdh|forced))?$",
-        "",
-        stem,
-    )
-    series = str(plan.get("seriesTitle") or "").strip()
-    season_folder = re.compile(
-        r"(?i)season\s*\d+(?:\s+s\d{1,3}e\d{1,3})?"
-    )
-    if season_folder.fullmatch(series):
-        series = ""
-
-    code_match = re.search(r"(?i)\bS(\d{1,3})E(\d{1,3})\b", stem)
-    episode_code = None
-    episode_title = None
-    if code_match:
-        episode_code = (
-            f"S{int(code_match.group(1)):02d}E{int(code_match.group(2)):02d}"
-        )
-        prefix = stem[:code_match.start()].rstrip(" ._-")
-        suffix = stem[code_match.end():].lstrip(" ._-")
-        if not series and prefix and not season_folder.fullmatch(prefix):
-            series = prefix.replace(".", " ").strip()
-        suffix = re.split(r"\s+\[", suffix, maxsplit=1)[0].strip(" ._-")
-        suffix = re.sub(r"\s+-[A-Z0-9]{2,12}$", "", suffix).strip()
-        if suffix and not re.fullmatch(r"(?i)episode\s*\d+", suffix):
-            episode_title = suffix
-
-    date_match = re.match(
-        r"^(.*?)\s+-\s+(\d{4}-\d{2}-\d{2})\s+-\s+(.*)$", stem
-    )
-    if date_match:
-        series = series or date_match.group(1).strip()
-        episode_code = date_match.group(2)
-        episode_title = re.split(
-            r"\s+\[", date_match.group(3), maxsplit=1
-        )[0].strip(" ._-")
-
-    display_title = series
-    if not display_title:
-        fallback = re.split(r"\s+\[", stem, maxsplit=1)[0].strip(" ._-")
-        if not season_folder.fullmatch(fallback):
-            display_title = fallback
-    if not display_title:
-        media_type = "Episode" if plan.get("itemType") == "episodes" else "Movie"
-        display_title = f"{media_type} {plan.get('itemId', '-')}"
-    return {
-        "displayTitle": display_title,
-        "episodeCode": episode_code,
-        "episodeTitle": episode_title,
-    }
 
 
 def build_cycle_jobs(
@@ -746,7 +688,7 @@ class StatusTracker:
             if retries is not None:
                 safe_retries = []
                 for plan in retries:
-                    safe_retries.append({
+                    public_plan = {
                         key: plan.get(key)
                         for key in (
                             "id", "itemType", "itemId", "targetLanguage",
@@ -756,7 +698,9 @@ class StatusTracker:
                             "archivedAttemptCount", "latestDonorAttempt",
                             "displayTitle", "episodeCode", "episodeTitle",
                         )
-                    })
+                    }
+                    public_plan.update(retry_media_identity(plan))
+                    safe_retries.append(public_plan)
                 self._service["retryPlans"] = safe_retries
             if completed_cycle is not None:
                 self._service["completedCycle"] = max(

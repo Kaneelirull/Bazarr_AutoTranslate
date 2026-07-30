@@ -160,7 +160,7 @@ class StateStoreTests(unittest.TestCase):
             )
             self.assertEqual(row["failure_category"], "context_limit")
             self.assertEqual(json.loads(row["failure_details_json"])["status"], "Failed")
-            self.assertEqual(store._fetchone("PRAGMA user_version")[0], 6)
+            self.assertEqual(store._fetchone("PRAGMA user_version")[0], 7)
             store.close()
 
     def test_schema_v4_migrates_retry_size_and_failure_columns(self):
@@ -191,7 +191,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertIn("source_cue_count", retry_columns)
             self.assertIn("failure_category", attempt_columns)
             self.assertIn("failure_details_json", attempt_columns)
-            self.assertEqual(migrated._fetchone("PRAGMA user_version")[0], 6)
+            self.assertEqual(migrated._fetchone("PRAGMA user_version")[0], 7)
             migrated.close()
 
     def test_quarantine_attempts_are_immutable_and_privacy_safe(self):
@@ -776,23 +776,24 @@ class StateStoreTests(unittest.TestCase):
                         success=False,
                         reason="timeout",
                         threshold=3,
-                        open_seconds=60,
+                        open_cycles=3,
                         config_fingerprint="a",
                         now=100 + index,
                     )
                 self.assertEqual(state["state"], "open")
+                self.assertEqual(state["eligibleAfterCycle"], 3)
                 self.assertFalse(store.circuit_permission(
                     series_key="sonarr:1",
                     series_title="Top Gear",
                     config_fingerprint="a",
-                    now=120,
+                    completed_cycle=2,
                 )["allowed"])
                 preview = store.circuit_permission(
                     series_key="sonarr:1",
                     series_title="Top Gear",
                     config_fingerprint="a",
                     claim=False,
-                    now=200,
+                    completed_cycle=3,
                 )
                 self.assertTrue(preview["allowed"])
                 self.assertEqual(preview["state"], "half_open")
@@ -801,14 +802,14 @@ class StateStoreTests(unittest.TestCase):
                     series_title="Top Gear",
                     config_fingerprint="a",
                     claim=False,
-                    now=201,
+                    completed_cycle=3,
                 )
                 self.assertTrue(second_preview["allowed"])
                 trial = store.circuit_permission(
                     series_key="sonarr:1",
                     series_title="Top Gear",
                     config_fingerprint="a",
-                    now=200,
+                    completed_cycle=3,
                 )
                 self.assertTrue(trial["allowed"])
                 self.assertEqual(trial["state"], "half_open")
@@ -816,8 +817,77 @@ class StateStoreTests(unittest.TestCase):
                     series_key="sonarr:1",
                     series_title="Top Gear",
                     config_fingerprint="a",
-                    now=201,
+                    completed_cycle=3,
                 )["allowed"])
+                store.record_circuit_outcome(
+                    series_key="sonarr:1",
+                    series_title="Top Gear",
+                    success=False,
+                    reason="trial failed",
+                    threshold=3,
+                    open_cycles=3,
+                    config_fingerprint="a",
+                )
+                self.assertEqual(
+                    store.circuit_breakers()[0]["eligibleAfterCycle"], 3
+                )
+            finally:
+                store.close()
+
+    def test_legacy_open_circuit_migrates_from_persisted_cycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(Path(directory))
+            try:
+                for _ in range(7):
+                    store.advance_completed_cycle()
+                with store._transaction() as db:
+                    db.execute(
+                        """
+                        INSERT INTO circuit_breakers(
+                            series_key, series_title, consecutive_failures, state,
+                            opened_at, retry_at, half_open_claimed,
+                            config_fingerprint, updated_at
+                        ) VALUES (?, ?, 3, 'open', 1, 999999, 0, ?, 1)
+                        """,
+                        ("sonarr:2", "Example Show", "a"),
+                    )
+                result = store.initialize_cycle_circuits(3)
+                self.assertEqual(result["completedCycle"], 7)
+                self.assertEqual(result["migrated"], 1)
+                circuit = store.circuit_breakers()[0]
+                self.assertEqual(circuit["eligibleAfterCycle"], 10)
+                self.assertEqual(circuit["completedCyclesRemaining"], 3)
+            finally:
+                store.close()
+
+    def test_circuit_title_is_corrected_and_generic_rows_are_retired(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(Path(directory))
+            try:
+                store.record_circuit_outcome(
+                    series_key="sonarr:9",
+                    series_title="Season 05",
+                    success=False,
+                    reason="timeout",
+                    threshold=1,
+                    open_cycles=3,
+                    config_fingerprint="a",
+                )
+                result = store.initialize_cycle_circuits(3)
+                self.assertEqual(result["retiredGeneric"], 1)
+                self.assertEqual(store.circuit_breakers(), [])
+
+                store.circuit_permission(
+                    series_key="sonarr:9",
+                    series_title="Top Gear",
+                    config_fingerprint="a",
+                )
+                row = store._fetchone(
+                    "SELECT series_title, state FROM circuit_breakers "
+                    "WHERE series_key='sonarr:9'"
+                )
+                self.assertEqual(row["series_title"], "Top Gear")
+                self.assertEqual(row["state"], "closed")
             finally:
                 store.close()
 
