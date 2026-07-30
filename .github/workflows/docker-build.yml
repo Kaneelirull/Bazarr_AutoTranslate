@@ -95,13 +95,29 @@ jobs:
           bazarr-autotranslate:release-candidate
           -c "import media_identity, status_dashboard"
 
-      - name: Publish latest from the default branch
+      - name: Publish dated image and update latest
         if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           set -euo pipefail
-          docker tag bazarr-autotranslate:release-candidate "${IMAGE_NAME}:latest"
-          docker push "${IMAGE_NAME}:latest"
+          release_date="$(date -u +%Y-%m-%d)"
+          dated_ref="${IMAGE_NAME}:${release_date}"
+
+          docker tag bazarr-autotranslate:release-candidate "$dated_ref"
+          docker push "$dated_ref"
+          dated_digest="$(docker buildx imagetools inspect "$dated_ref" \
+            --format '{{.Manifest.Digest}}')"
+
+          docker buildx imagetools create --prefer-index=false \
+            --tag "${IMAGE_NAME}:latest" \
+            "${IMAGE_NAME}@${dated_digest}"
+          latest_digest="$(docker buildx imagetools inspect "${IMAGE_NAME}:latest" \
+            --format '{{.Manifest.Digest}}')"
+
+          if [[ "$latest_digest" != "$dated_digest" ]]; then
+            echo "latest digest $latest_digest does not match $dated_digest" >&2
+            exit 1
+          fi
 
       - name: Publish immutable version and update latest
         if: startsWith(github.ref, 'refs/tags/v')
