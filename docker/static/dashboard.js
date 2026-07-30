@@ -564,11 +564,17 @@
     return states[state] || [labelForState(state || "queued"), "queued"];
   };
 
-  const retryNextAction = (plan) => {
+  const retryNextAction = (plan, completedCycle) => {
     const reason = String(plan.lastReason || "").toLowerCase();
     if (reason.includes("circuit")) return "Waiting for circuit";
     if (plan.state === "regeneration_waiting") {
-      return `After cycle ${Number(plan.eligibleCompletedCycle || 0)}`;
+      const cyclesRemaining = Math.max(
+        0,
+        number(plan.eligibleCompletedCycle) - number(completedCycle),
+      );
+      if (cyclesRemaining === 0) return "Now";
+      if (cyclesRemaining === 1) return "Next cycle";
+      return `In ${cyclesRemaining} Cycles`;
     }
     if (plan.state === "repair_retry_queued") return "Repair at cycle end";
     if (plan.state === "retry_exhausted" || plan.state === "source_blocked") {
@@ -620,7 +626,7 @@
         <td data-label="Language">${escapeHtml(plan.targetLanguage || "—")}</td>
         <td data-label="Status"><span class="badge ${stateTone}">${escapeHtml(stateLabel)}</span></td>
         <td data-label="Attempts"><span class="duration">${Number(plan.attemptCount || 0)} / ${Number(maxAttempts || 0) === 0 ? "unlimited" : Number(maxAttempts)}</span></td>
-        <td data-label="Next action">${escapeHtml(retryNextAction(plan))}</td>
+        <td data-label="Next action">${escapeHtml(retryNextAction(plan, completedCycle))}</td>
         <td class="cell-details" data-label="Details">${retryDetails(plan)}</td>
       </tr>`;
     }).join("");
