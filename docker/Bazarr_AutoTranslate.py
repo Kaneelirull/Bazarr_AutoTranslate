@@ -638,7 +638,7 @@ _shared_capacity = SharedCapacityCoordinator(PARALLEL_TRANSLATES)
 
 
 class FileLaneGate:
-    """Alternate short and long lanes while allowing idle long lanes to lend."""
+    """Prefer dedicated lanes while lending any capacity that would sit idle."""
 
     def __init__(self, workers: int):
         self.workers = max(1, workers)
@@ -691,12 +691,19 @@ class FileLaneGate:
                         )
                         lane = "long" if is_long else "short"
                     elif is_long:
-                        available = (
-                            self._active_long < self.long_capacity
-                            and bool(long_waiters)
-                            and long_waiters[0][0] == token
+                        preferred_long = (
+                            bool(long_waiters) and long_waiters[0][0] == token
                         )
-                        lane = "long"
+                        if preferred_long and self._active_long < self.long_capacity:
+                            available = True
+                            lane = "long"
+                        else:
+                            available = (
+                                preferred_long
+                                and self._active_short < self.short_capacity
+                                and not short_waiters
+                            )
+                            lane = "long (borrowed)"
                     else:
                         preferred_short = (
                             bool(short_waiters) and short_waiters[0][0] == token
@@ -5138,6 +5145,11 @@ def process_item(
         if lane == "short (borrowed)":
             print(
                 f"[LANE] {title} '{target_lang}' borrowed the idle long slot "
+                f"(estimate={timing['estimatedSeconds']:.0f}s)"
+            )
+        elif lane == "long (borrowed)":
+            print(
+                f"[LANE] {title} '{target_lang}' borrowed the idle short slot "
                 f"(estimate={timing['estimatedSeconds']:.0f}s)"
             )
 

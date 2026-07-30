@@ -208,6 +208,76 @@ class AdaptiveTranslationTests(unittest.TestCase):
         gate.release("long")
         gate.release("long")
 
+    def test_two_workers_run_two_long_jobs_when_no_short_waits(self):
+        gate = app.FileLaneGate(2)
+        self.assertEqual(gate.acquire(True, 900), "long")
+        self.assertEqual(gate.acquire(True, 800), "long (borrowed)")
+        gate.release("long (borrowed)")
+        gate.release("long")
+
+    def test_four_workers_allow_long_jobs_to_borrow_all_idle_short_lanes(self):
+        gate = app.FileLaneGate(4)
+        self.assertEqual(gate.acquire(True, 1000), "long")
+        self.assertEqual(gate.acquire(True, 900), "long")
+        self.assertEqual(gate.acquire(True, 800), "long (borrowed)")
+        self.assertEqual(gate.acquire(True, 700), "long (borrowed)")
+        gate.release("long (borrowed)")
+        gate.release("long (borrowed)")
+        gate.release("long")
+        gate.release("long")
+
+    def test_waiting_short_job_blocks_new_long_borrowing(self):
+        gate = app.FileLaneGate(2)
+        self.assertEqual(gate.acquire(True, 1000), "long")
+        self.assertEqual(gate.acquire(False, 100), "short")
+        admitted = []
+        release_short = threading.Event()
+
+        def acquire_long():
+            lane = gate.acquire(True, 800)
+            admitted.append(("long", lane))
+            gate.release(lane)
+
+        def acquire_short():
+            lane = gate.acquire(False, 200)
+            admitted.append(("short", lane))
+            release_short.wait(1)
+            gate.release(lane)
+
+        long_thread = threading.Thread(target=acquire_long)
+        short_thread = threading.Thread(target=acquire_short)
+        long_thread.start()
+        short_thread.start()
+        time.sleep(0.05)
+        gate.release("short")
+        time.sleep(0.05)
+        self.assertEqual(admitted, [("short", "short")])
+        release_short.set()
+        gate.release("long")
+        long_thread.join(1)
+        short_thread.join(1)
+        self.assertEqual({name for name, _lane in admitted}, {"long", "short"})
+
+    def test_late_short_job_does_not_preempt_borrowed_long_job(self):
+        gate = app.FileLaneGate(2)
+        self.assertEqual(gate.acquire(True, 1000), "long")
+        self.assertEqual(gate.acquire(True, 900), "long (borrowed)")
+        admitted = []
+
+        def acquire_short():
+            lane = gate.acquire(False, 100)
+            admitted.append(lane)
+            gate.release(lane)
+
+        short_thread = threading.Thread(target=acquire_short)
+        short_thread.start()
+        time.sleep(0.05)
+        self.assertEqual(admitted, [])
+        gate.release("long (borrowed)")
+        short_thread.join(1)
+        self.assertEqual(admitted, ["short"])
+        gate.release("long")
+
     def test_four_workers_give_freed_long_lane_to_long_waiter(self):
         gate = app.FileLaneGate(4)
         self.assertEqual(gate.acquire(True, 1000), "long")
