@@ -810,12 +810,81 @@ progress::-moz-progress-bar {
   width: 1%;
 }
 
-.retry-details {
-  position: relative;
+.retry-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: 0 var(--space-6) var(--space-2);
 }
 
-.retry-details summary {
-  width: max-content;
+.retry-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.retry-summary span {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  padding: 4px 10px;
+  background: var(--bg-raised);
+}
+
+.retry-summary strong {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+.retry-mobile-sort {
+  display: none;
+}
+
+.retry-sort-button,
+.retry-details-toggle,
+.retry-sort-direction {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.retry-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0;
+  cursor: pointer;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.retry-sort-button span {
+  color: var(--text-disabled);
+  font-size: 12px;
+}
+
+.retry-sort-button.is-active,
+.retry-sort-button.is-active span {
+  color: var(--accent);
+}
+
+.retry-sort-button:focus-visible,
+.retry-details-toggle:focus-visible,
+.retry-sort-direction:focus-visible,
+.retry-mobile-sort select:focus-visible {
+  border-radius: var(--radius-sm);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.retry-details-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1);
   cursor: pointer;
   color: var(--accent);
   font-size: 12px;
@@ -823,18 +892,36 @@ progress::-moz-progress-bar {
   white-space: nowrap;
 }
 
-.retry-details summary:focus-visible {
-  border-radius: var(--radius-sm);
-  outline: none;
-  box-shadow: 0 0 0 3px var(--accent-glow);
+.retry-details-icon {
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 6px solid currentColor;
+  transition: transform 120ms ease;
 }
 
-.retry-details dl {
+.retry-details-toggle[aria-expanded="true"] .retry-details-icon {
+  transform: rotate(90deg);
+}
+
+.retry-main-row.has-expanded td {
+  border-bottom: 0;
+}
+
+.retry-detail-row[hidden] {
+  display: none;
+}
+
+.retry-detail-row td {
+  padding-top: 0;
+}
+
+.retry-detail-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(130px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-3);
-  min-width: min(520px, calc(100vw - 64px));
-  margin: var(--space-3) 0 0;
+  margin: 0;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   padding: var(--space-4);
@@ -842,11 +929,15 @@ progress::-moz-progress-bar {
   box-shadow: 0 8px 24px var(--shadow-panel);
 }
 
-.retry-details dl div {
+.retry-detail-grid div {
   min-width: 0;
 }
 
-.retry-details dt {
+.retry-detail-wide {
+  grid-column: span 2;
+}
+
+.retry-detail-grid dt {
   color: var(--text-secondary);
   font-size: 10px;
   font-weight: 700;
@@ -854,10 +945,23 @@ progress::-moz-progress-bar {
   text-transform: uppercase;
 }
 
-.retry-details dd {
+.retry-detail-grid dd {
   margin: 2px 0 0;
   overflow-wrap: anywhere;
   color: var(--text-primary);
+  font-size: 12px;
+}
+
+.retry-table-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-3) 0;
+}
+
+.retry-showing {
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
@@ -945,6 +1049,14 @@ progress::-moz-progress-bar {
   font-size: 12px;
 }
 
+@media (min-width: 1400px) {
+  .loading,
+  .noscript,
+  .dashboard-shell {
+    width: min(90%, 2200px);
+  }
+}
+
 @media (max-width: 920px) {
   .overview-grid {
     grid-template-columns: 1fr;
@@ -956,6 +1068,10 @@ progress::-moz-progress-bar {
 
   .rolling-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .retry-detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -1030,6 +1146,57 @@ progress::-moz-progress-bar {
     padding: var(--space-3) var(--space-4) var(--space-4);
   }
 
+  .retry-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+    padding-right: var(--space-4);
+    padding-left: var(--space-4);
+  }
+
+  .retry-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .retry-summary span {
+    border-radius: var(--radius-sm);
+    text-align: center;
+  }
+
+  .retry-mobile-sort {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .retry-mobile-sort label {
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .retry-mobile-sort select {
+    min-width: 0;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-raised);
+    color: var(--text-primary);
+    font: 13px var(--font-sans);
+  }
+
+  .retry-sort-direction {
+    min-width: 36px;
+    min-height: 36px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    background: var(--bg-raised);
+    color: var(--accent);
+    font-size: 16px;
+  }
+
   .data-table,
   .data-table tbody,
   .data-table tr,
@@ -1089,9 +1256,30 @@ progress::-moz-progress-bar {
     grid-column: 1 / -1;
   }
 
-  .retry-details dl {
+  .retry-table .retry-main-row.has-expanded {
+    margin-bottom: 0;
+    border-bottom: 0;
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+  }
+
+  .retry-table .retry-detail-row {
+    display: block;
+    margin-top: 0;
+    border-top: 0;
+    border-radius: 0 0 var(--radius-md) var(--radius-md);
+    padding-top: 0;
+  }
+
+  .retry-table .retry-detail-row[hidden] {
+    display: none;
+  }
+
+  .retry-table .retry-detail-row td::before {
+    content: none;
+  }
+
+  .retry-detail-grid {
     grid-template-columns: 1fr 1fr;
-    min-width: 0;
   }
 
   .rolling-grid {
@@ -1132,8 +1320,12 @@ progress::-moz-progress-bar {
     grid-template-columns: 1fr;
   }
 
-  .retry-details dl {
+  .retry-detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .retry-detail-wide {
+    grid-column: auto;
   }
 }
 
