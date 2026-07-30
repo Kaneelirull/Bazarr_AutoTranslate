@@ -9,15 +9,13 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY Bazarr_AutoTranslate.py .
-COPY clean_et_subs.py .
-COPY state_store.py .
-COPY status_dashboard.py .
+COPY *.py ./
 COPY static ./static
 COPY entrypoint.sh .
 
 RUN chmod +x entrypoint.sh clean_et_subs.py \
-    && mkdir -p /var/log/bazarr-autotranslate /config
+    && mkdir -p /var/log/bazarr-autotranslate /config \
+    && python -c "import media_identity, state_store, status_dashboard"
 
 EXPOSE 8765
 
