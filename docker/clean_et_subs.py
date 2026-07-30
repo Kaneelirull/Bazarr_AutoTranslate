@@ -1131,6 +1131,7 @@ def repair_subtitle_file(
     max_attempts: int = 5,
     context_lines: int = 5,
     attempt_logger: Optional[Callable[[dict], None]] = None,
+    progress_callback: Optional[Callable[[dict], None]] = None,
     donor_attempts: Optional[list[dict]] = None,
     donor_similarity: float = 0.95,
     donor_timestamp_tolerance_ms: int = 500,
@@ -1167,6 +1168,31 @@ def repair_subtitle_file(
     attempt_count = 0
     attempt_history: list[dict] = []
     donor_history: list[dict] = []
+    completed_cues = 0
+    successful_cues = 0
+    rejected_attempts = 0
+
+    def publish_progress(**values) -> None:
+        if progress_callback is None:
+            return
+        payload = {
+            "totalRepairableCues": len(cue_indexes),
+            "completedCues": completed_cues,
+            "successfulCues": successful_cues,
+            "unresolvedCues": len(unresolved_cues),
+            "rejectedAttempts": rejected_attempts,
+            "progress": round(
+                completed_cues * 100 / max(1, len(cue_indexes)), 1
+            ),
+            **values,
+        }
+        try:
+            progress_callback(payload)
+        except Exception:
+            # Status reporting is best effort and must never abort file repair.
+            pass
+
+    publish_progress(stage="repairing")
 
     cue_validation_keys = {
         "max_cue_lines",
@@ -1182,7 +1208,7 @@ def repair_subtitle_file(
         key: value for key, value in validation_kwargs.items() if key in cue_validation_keys
     }
 
-    for cue_index in cue_indexes:
+    for cue_ordinal, cue_index in enumerate(cue_indexes, start=1):
         source_cue = source_cues[cue_index]
         before = [cue.text for cue in source_cues[max(0, cue_index - context_lines):cue_index]]
         after = [cue.text for cue in source_cues[cue_index + 1:cue_index + 1 + context_lines]]
@@ -1205,6 +1231,15 @@ def repair_subtitle_file(
             started = time.monotonic()
             if attempt_logger is not None:
                 attempt_logger({**attempt_record, "event": "sending"})
+            publish_progress(
+                stage="calling_lingarr",
+                currentCueNumber=source_cue.number,
+                currentCuePosition=cue_index + 1,
+                currentCueOrdinal=cue_ordinal,
+                currentAttempt=attempt + 1,
+                maxAttempts=max(1, max_attempts),
+                contextEnabled=bool(attempt_before or attempt_after),
+            )
             try:
                 translated_result = translator(source_cue.text, attempt_before, attempt_after)
             except Exception as exc:
@@ -1217,6 +1252,16 @@ def repair_subtitle_file(
                 attempt_history.append(attempt_record)
                 if attempt_logger is not None:
                     attempt_logger({**attempt_record, "event": "failed"})
+                publish_progress(
+                    stage="calling_lingarr",
+                    currentCueNumber=source_cue.number,
+                    currentCuePosition=cue_index + 1,
+                    currentCueOrdinal=cue_ordinal,
+                    currentAttempt=attempt + 1,
+                    maxAttempts=max(1, max_attempts),
+                    contextEnabled=bool(attempt_before or attempt_after),
+                    lastRequestDurationSeconds=attempt_record["durationSeconds"],
+                )
                 continue
             response_metadata: dict = {}
             if (
@@ -1228,6 +1273,17 @@ def repair_subtitle_file(
                 attempt_record.update(response_metadata)
             else:
                 translated = translated_result
+            publish_progress(
+                stage="validating_candidate",
+                currentCueNumber=source_cue.number,
+                currentCuePosition=cue_index + 1,
+                currentCueOrdinal=cue_ordinal,
+                currentAttempt=attempt + 1,
+                maxAttempts=max(1, max_attempts),
+                contextEnabled=bool(attempt_before or attempt_after),
+                lastHttpStatus=response_metadata.get("httpStatus"),
+                lastRequestDurationSeconds=round(time.monotonic() - started, 3),
+            )
             if translated is None or not translated.strip():
                 attempt_record.update({
                     "durationSeconds": round(time.monotonic() - started, 3),
@@ -1251,6 +1307,7 @@ def repair_subtitle_file(
                 **cue_validation_kwargs,
             )
             if replacement_issues:
+                rejected_attempts += 1
                 last_reason = ValidationReport(replacement_issues).summary()
                 attempt_record.update({
                     "durationSeconds": round(time.monotonic() - started, 3),
@@ -1260,6 +1317,17 @@ def repair_subtitle_file(
                 attempt_history.append(attempt_record)
                 if attempt_logger is not None:
                     attempt_logger({**attempt_record, "event": "rejected"})
+                publish_progress(
+                    stage="validating_candidate",
+                    currentCueNumber=source_cue.number,
+                    currentCuePosition=cue_index + 1,
+                    currentCueOrdinal=cue_ordinal,
+                    currentAttempt=attempt + 1,
+                    maxAttempts=max(1, max_attempts),
+                    contextEnabled=bool(attempt_before or attempt_after),
+                    lastHttpStatus=response_metadata.get("httpStatus"),
+                    lastRequestDurationSeconds=attempt_record["durationSeconds"],
+                )
                 continue
 
             candidate_cues[cue_index] = replacement
@@ -1376,6 +1444,18 @@ def repair_subtitle_file(
 
         if not accepted:
             unresolved_cues.append((source_cue.number, last_reason))
+        else:
+            successful_cues += 1
+        completed_cues += 1
+        publish_progress(
+            stage="repairing",
+            currentCueNumber=source_cue.number,
+            currentCuePosition=cue_index + 1,
+            currentCueOrdinal=cue_ordinal,
+            currentAttempt=min(max(1, max_attempts), attempt + 1),
+            maxAttempts=max(1, max_attempts),
+            contextEnabled=False,
+        )
 
     if unresolved_cues:
         unresolved_summary = "; ".join(
@@ -1411,6 +1491,7 @@ def repair_subtitle_file(
             temp_file.write(render_srt_cues(candidate_cues, newline=newline))
             temp_name = temp_file.name
 
+        publish_progress(stage="repair_validating")
         final_report = validate_subtitle_pair(
             source_path,
             temp_name,

@@ -701,6 +701,164 @@ class StatusDashboardTests(unittest.TestCase):
         for undefined in ("var(--muted)", "var(--border)", "var(--surface-strong)", "var(--text)"):
             self.assertNotIn(undefined, stylesheet)
 
+    def test_maintenance_jobs_are_persistent_separate_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_path = Path(directory) / "status.json"
+            history_path = Path(directory) / "history.jsonl"
+            tracker = StatusTracker(snapshot_path, history_path)
+            tracker.start_cycle("cycle", 1, [])
+            job_id = tracker.create_maintenance_job(
+                "cue_repair",
+                {
+                    "title": "Shameless (US)",
+                    "episodeCode": "S06E03",
+                    "targetLanguage": "et",
+                    "sourceLanguage": "en",
+                },
+                state="repair_queued",
+                details={"totalRepairableCues": 4, "completedCues": 0},
+            )
+            active = tracker.snapshot()
+            self.assertEqual(active["currentCycle"]["initial"], 0)
+            self.assertEqual(active["currentCycle"]["done"], 0)
+            self.assertEqual(
+                active["maintenance"]["activeJobs"][0]["statusJobId"], job_id
+            )
+            tracker.transition_maintenance(
+                job_id,
+                "repairing",
+                details={
+                    "completedCues": 1,
+                    "currentAttempt": 2,
+                    "maxAttempts": 5,
+                    "progress": 25,
+                },
+            )
+            self.assertTrue(
+                tracker.complete_maintenance(job_id, "repaired")
+            )
+            self.assertFalse(
+                tracker.complete_maintenance(job_id, "failed")
+            )
+            finished = tracker.snapshot()
+            self.assertEqual(finished["maintenance"]["activeJobs"], [])
+            self.assertEqual(
+                finished["maintenance"]["recentOutcomes"][0]["outcome"],
+                "repaired",
+            )
+            self.assertEqual(finished["history"]["1h"]["accepted"], 0)
+
+    def test_maintenance_restart_recovers_as_interrupted_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_path = Path(directory) / "status.json"
+            history_path = Path(directory) / "history.jsonl"
+            tracker = StatusTracker(snapshot_path, history_path)
+            tracker.create_maintenance_job(
+                "existing_library_scan",
+                {"title": "Existing subtitle library"},
+                state="scanning",
+            )
+            recovered = StatusTracker(snapshot_path, history_path)
+            snapshot = recovered.snapshot()
+            self.assertEqual(snapshot["maintenance"]["activeJobs"], [])
+            self.assertEqual(
+                snapshot["maintenance"]["recentOutcomes"][0]["outcome"],
+                "interrupted",
+            )
+            recovered_again = StatusTracker(snapshot_path, history_path)
+            self.assertEqual(
+                len(recovered_again.snapshot()["maintenance"]["recentOutcomes"]),
+                1,
+            )
+
+    def test_repair_lifecycle_states_remain_active_cycle_work(self):
+        jobs = queue_jobs()
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = StatusTracker(
+                Path(directory) / "status.json",
+                Path(directory) / "history.jsonl",
+            )
+            tracker.start_cycle("cycle-1", 1, jobs)
+            key = tracker.active_cycle_job_key("episodes", 42, "et")
+            self.assertIsNotNone(key)
+            for state in (
+                "repair_queued",
+                "repair_waiting_capacity",
+                "repairing",
+                "repair_validating",
+            ):
+                self.assertTrue(tracker.transition(key, state))
+                snapshot = tracker.snapshot()
+                self.assertEqual(snapshot["currentCycle"]["repairing"], 1)
+                self.assertEqual(snapshot["activeJobs"][0]["state"], state)
+                self.assertEqual(snapshot["activeJobs"][0]["workKind"], "cycle")
+
+    def test_maintenance_snapshot_whitelists_public_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = StatusTracker(
+                Path(directory) / "status.json",
+                Path(directory) / "history.jsonl",
+            )
+            tracker.create_maintenance_job(
+                "cue_repair",
+                {
+                    "title": "Safe title",
+                    "path": "/media/private/show.srt",
+                    "prompt": "secret dialogue",
+                    "credential": "token-value",
+                },
+                state="repairing",
+                details={
+                    "currentAttempt": 1,
+                    "repairStage": "secret dialogue /media/private",
+                    "responseBody": "unsafe provider response",
+                    "sourceContext": "subtitle dialogue",
+                },
+            )
+            job_id = tracker.create_maintenance_job(
+                "cue_repair",
+                {"title": "Another safe title"},
+                state="repairing",
+            )
+            tracker.complete_maintenance(
+                job_id,
+                "failed",
+                reason="credential token-value",
+            )
+            payload = json.dumps(tracker.snapshot())
+            for unsafe in (
+                "/media/private",
+                "secret dialogue",
+                "token-value",
+                "unsafe provider response",
+                "subtitle dialogue",
+            ):
+                self.assertNotIn(unsafe, payload)
+
+    def test_dashboard_assets_render_maintenance_and_adaptive_refresh(self):
+        script = (
+            REPO_ROOT / "docker" / "static" / "dashboard.js"
+        ).read_text(encoding="utf-8")
+        stylesheet = (
+            REPO_ROOT / "docker" / "static" / "dashboard.css"
+        ).read_text(encoding="utf-8")
+        for text in (
+            "maintenance.activeJobs",
+            "Recent maintenance",
+            "Rolling maintenance",
+            "Waiting for capacity",
+            "Calling Lingarr",
+            "Validating returned cue",
+            "ACTIVE_REFRESH_MS = 3_000",
+            "IDLE_REFRESH_MS = 20_000",
+            "MAX_BACKOFF_MS = 60_000",
+            "if (requestInFlight || document.hidden) return",
+            'aria-label="${escapeHtml(`${operationLabel(row.operation)} progress`)}"',
+        ):
+            self.assertIn(text, script)
+        self.assertIn(".badge.maintenance-work", stylesheet)
+        self.assertIn(".job-progress progress", stylesheet)
+
 
 if __name__ == "__main__":
     unittest.main()

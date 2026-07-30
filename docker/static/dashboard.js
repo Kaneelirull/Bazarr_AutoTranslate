@@ -1,7 +1,9 @@
 (() => {
   "use strict";
 
-  const REFRESH_MS = 30_000;
+  const ACTIVE_REFRESH_MS = 3_000;
+  const IDLE_REFRESH_MS = 20_000;
+  const MAX_BACKOFF_MS = 60_000;
   const root = document.getElementById("dashboard");
   const configuredTimeZone = root.dataset.timeZone || "UTC";
   let snapshot = {};
@@ -9,6 +11,7 @@
   let nextRefreshAt = 0;
   let requestInFlight = false;
   let updateError = "";
+  let failureCount = 0;
   let tooltipSequence = 0;
   let activeTooltipTrigger = null;
   let pinnedTooltipTrigger = null;
@@ -93,6 +96,14 @@
       waiting_retry: "Waiting for retry",
       series_protected: "Circuit protected",
       missing_source: "Missing source",
+      repair_queued: "Repair queued",
+      repair_waiting_capacity: "Waiting for capacity",
+      repairing: "Repairing",
+      repair_validating: "Validating repaired file",
+      scanning: "Scanning library",
+      waiting_repair_completion: "Waiting for repairs",
+      synchronizing: "Synchronizing Bazarr",
+      pruning: "Pruning sidecars",
     }[clean] || clean.replaceAll("_", " ");
   };
 
@@ -120,6 +131,49 @@
       + `data-tooltip-trigger aria-describedby="${tooltipId}" aria-expanded="false">${escapeHtml(label)}</button>`
       + `<span class="status-tooltip" id="${tooltipId}" role="tooltip" hidden>`
       + `<strong>Reason</strong><span>${escapeHtml(reason)}</span></span></span>`;
+  };
+
+  const operationLabel = (operation) => ({
+    translation: "Translation",
+    cue_repair: "Cue repair",
+    format_repair: "Format repair",
+    validation: "Validation",
+    quarantine: "Quarantine",
+    deletion: "Deletion",
+    undersized_detection: "Undersized detection",
+    sidecar_pruning: "Sidecar pruning",
+    bazarr_sync: "Bazarr synchronization",
+    existing_library_scan: "Existing-library scan",
+  }[operation] || String(operation || "Work").replaceAll("_", " "));
+
+  const progressMarkup = (row) => {
+    const percent = Math.max(0, Math.min(100, number(row.progress)));
+    const total = number(row.totalRepairableCues);
+    const completed = number(row.completedCues);
+    const cue = row.currentCueNumber ?? row.currentCuePosition;
+    let detail = "";
+    if (total) {
+      detail = `${completed} of ${total} cues`;
+      if (cue !== null && cue !== undefined) detail += `; cue ${cue}`;
+    } else if (number(row.filesDiscovered)) {
+      detail = `${number(row.filesChecked)} of ${number(row.filesDiscovered)} files`;
+    }
+    const attempt = row.currentAttempt
+      ? `Attempt ${number(row.currentAttempt)} of ${number(row.maxAttempts) || "n/a"}`
+      : "";
+    const stageLabels = {
+      waiting_capacity: "Waiting for capacity",
+      starting: "Starting repair",
+      calling_lingarr: "Calling Lingarr",
+      validating_candidate: "Validating returned cue",
+      repairing: "Repairing cues",
+      repair_validating: "Validating completed file",
+      queued: "Queued",
+    };
+    const stage = stageLabels[row.repairStage] || "";
+    if (!detail && !attempt && !stage) return '<span class="duration">n/a</span>';
+    return `<div class="job-progress"><span>${escapeHtml([stage, detail, attempt].filter(Boolean).join(" / "))}</span>`
+      + `<progress max="100" value="${percent}" aria-label="${escapeHtml(`${operationLabel(row.operation)} progress`)}">${percent}%</progress></div>`;
   };
 
   const exactTimeMarkup = (value) => {
@@ -267,11 +321,13 @@
       ];
     } else if (kind === "active") {
       columns = [
+        ["Work", "work"],
         ["Media", "media"],
         ...(showType ? [["Type", "type"]] : []),
         ["Language", "language"],
         ["Status", "status"],
-        ["Lane", "lane"],
+        ["Operation", "operation"],
+        ["Progress", "progress"],
         ["Elapsed", "elapsed"],
         ["Est. total", "estimate"],
         ["Remaining", "eta"],
@@ -279,13 +335,13 @@
       ];
     } else {
       columns = [
+        ["Work", "work"],
         ["Media", "media"],
         ...(showType ? [["Type", "type"]] : []),
         ["Language", "language"],
+        ["Operation", "operation"],
         ["Outcome", "outcome"],
         ["Duration", "duration"],
-        ["Estimate", "estimate"],
-        ["Lane", "lane"],
         ["Attempts", "attempts"],
         ["Finished", "finished"],
       ];
@@ -293,8 +349,11 @@
 
     const cell = (row, key, index) => {
       if (key === "position") return `<span class="queue-position">#${index + 1}</span>`;
+      if (key === "work") return `<span class="badge ${row.workKind === "maintenance" ? "maintenance-work" : "cycle-work"}">${escapeHtml(row.workKind === "maintenance" ? "Maintenance" : "Cycle")}</span>`;
       if (key === "media") return mediaMarkup(row);
       if (key === "type") return escapeHtml(row.itemType === "movies" ? "Movie" : "Episode");
+      if (key === "operation") return escapeHtml(operationLabel(row.operation));
+      if (key === "progress") return progressMarkup(row);
       if (key === "language") return escapeHtml(row.targetLanguage || "—");
       if (key === "status") return statusMarkup(row.state, detailedReason(row));
       if (key === "outcome") {
@@ -354,16 +413,18 @@
 
   const renderHeader = (service, cycle) => {
     const phase = labelForState(service.phase || "startup");
-    const error = updateError
+    const generated = parseTime(snapshot.generatedAt);
+    const stale = !generated || Date.now() - generated.getTime() > 30_000;
+    const error = updateError || stale
       ? `<span class="status-warning" role="status">Update delayed</span>`
-      : '<span id="refresh-countdown">Refresh in 30s</span>';
+      : '<span id="refresh-countdown">Refresh scheduled</span>';
     return `<header class="topbar">
       <div>
         <div class="eyebrow"><span class="status-dot" aria-hidden="true"></span>${escapeHtml(phase)}</div>
         <h1>Translation status</h1>
         <p class="header-meta">
           <span>Cycle #${escapeHtml(cycle.number ?? "—")}</span>
-          <span id="freshness">${timeMarkup(snapshot.generatedAt)}</span>
+          <span id="freshness">Last updated ${timeMarkup(snapshot.generatedAt)}</span>
           <span>${error}</span>
         </p>
       </div>
@@ -624,10 +685,26 @@
     return `<section class="panel">${panelHeader("Latest maintenance scan", note)}${content}</section>`;
   };
 
+  const renderMaintenanceRolling = (history) => {
+    const cards = Object.entries(history || {}).map(([window, values]) => (
+      `<article class="window-card"><h3 class="window-title">${escapeHtml(window)}</h3>`
+      + `<div class="maintenance-window">${Object.entries(maintenanceLabels).map(([key, label]) => (
+        `<div class="outcome-line ${key === "failures" ? "tone-danger" : ""} ${number(values?.[key]) ? "" : "is-zero"}">`
+        + `<span>${escapeHtml(label)}</span><strong>${number(values?.[key]).toLocaleString()}</strong></div>`
+      )).join("")}</div></article>`
+    )).join("");
+    return `<section class="panel">${panelHeader("Rolling maintenance", "Maintenance totals are separate from wanted-cycle outcomes.")}
+      <div class="rolling-grid">${cards}</div></section>`;
+  };
+
   const render = () => {
     const service = snapshot.service || {};
     const cycle = snapshot.currentCycle || {};
-    const active = snapshot.activeJobs || [];
+    const maintenance = snapshot.maintenance || {};
+    const active = [
+      ...(snapshot.activeJobs || []),
+      ...(maintenance.activeJobs || []),
+    ];
     const upcoming = snapshot.upNext || [];
     const recent = snapshot.recentOutcomes || [];
     activeTooltipTrigger = null;
@@ -651,9 +728,13 @@
       <section class="panel">${panelHeader("Recent outcomes", "Latest completed work")}
         ${table(recent, "recent", "No completed jobs recorded yet.")}
       </section>
+      <section class="panel">${panelHeader("Recent maintenance", "Latest completed maintenance work")}
+        ${table(maintenance.recentOutcomes || [], "recent", "No maintenance outcomes recorded yet.")}
+      </section>
       ${renderRolling(snapshot.history || {})}
-      ${renderMaintenance(snapshot.maintenance || {})}
-      <p class="footer-note">Auto-refreshes every 30 seconds · trusted LAN endpoint · no subtitle text or filesystem paths exposed</p>
+      ${renderMaintenanceRolling(maintenance.history || {})}
+      ${renderMaintenance(maintenance)}
+      <p class="footer-note">Auto-refreshes every 3 seconds while active and 20 seconds while idle · trusted LAN endpoint · no subtitle text or filesystem paths exposed</p>
     </div>`;
     root.setAttribute("aria-busy", "false");
     bindControls();
@@ -725,8 +806,14 @@
   const scheduleRefresh = () => {
     clearTimeout(refreshTimer);
     if (document.hidden) return;
-    nextRefreshAt = Date.now() + REFRESH_MS;
-    refreshTimer = window.setTimeout(() => refreshStatus(false), REFRESH_MS);
+    const active = (snapshot.activeJobs?.length || 0)
+      + (snapshot.maintenance?.activeJobs?.length || 0);
+    const baseDelay = active ? ACTIVE_REFRESH_MS : IDLE_REFRESH_MS;
+    const delay = failureCount
+      ? Math.min(MAX_BACKOFF_MS, baseDelay * (2 ** failureCount))
+      : baseDelay;
+    nextRefreshAt = Date.now() + delay;
+    refreshTimer = window.setTimeout(() => refreshStatus(false), delay);
   };
 
   const refreshStatus = async (manual) => {
@@ -743,9 +830,11 @@
       if (!response.ok) throw new Error(`Status request failed (${response.status})`);
       snapshot = await response.json();
       updateError = "";
+      failureCount = 0;
       render();
     } catch (error) {
       updateError = error instanceof Error ? error.message : "Status request failed";
+      failureCount += 1;
       render();
     } finally {
       requestInFlight = false;
