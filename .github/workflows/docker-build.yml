@@ -10,6 +10,7 @@ on:
 
 env:
   IMAGE_NAME: kaneelir0ll/bazarr-autotranslate
+  MEDIA_IDENTITY_FIX_COMMIT: 0af333475f74404daccb3f0ce13222f40d0e7cbd
 
 permissions:
   contents: read
@@ -67,31 +68,58 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Verify release contains the media identity fix
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: git merge-base --is-ancestor "$MEDIA_IDENTITY_FIX_COMMIT" HEAD
 
-      - name: Build and push Docker image
+      - name: Build Docker release candidate
         uses: docker/build-push-action@v7
         with:
           context: ./docker
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          file: ./docker/Dockerfile
+          load: true
+          push: false
+          tags: bazarr-autotranslate:release-candidate
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Smoke test packaged Python modules
+        run: >-
+          docker run --rm --entrypoint python
+          bazarr-autotranslate:release-candidate
+          -c "import media_identity, status_dashboard"
+
+      - name: Publish immutable version and update latest
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          version_ref="${IMAGE_NAME}:${version}"
+
+          if docker manifest inspect "$version_ref" >/dev/null 2>&1; then
+            echo "Refusing to overwrite immutable release tag: $version_ref" >&2
+            exit 1
+          fi
+
+          docker tag bazarr-autotranslate:release-candidate "$version_ref"
+          docker push "$version_ref"
+          version_digest="$(docker buildx imagetools inspect "$version_ref" \
+            --format '{{.Manifest.Digest}}')"
+
+          docker buildx imagetools create --prefer-index=false \
+            --tag "${IMAGE_NAME}:latest" \
+            "${IMAGE_NAME}@${version_digest}"
+          latest_digest="$(docker buildx imagetools inspect "${IMAGE_NAME}:latest" \
+            --format '{{.Manifest.Digest}}')"
+
+          if [[ "$latest_digest" != "$version_digest" ]]; then
+            echo "latest digest $latest_digest does not match $version_digest" >&2
+            exit 1
+          fi

@@ -30,6 +30,19 @@ Translation timeout is calculated dynamically from the source subtitle's dialogu
 
 ## Setup
 
+### Corrected TrueNAS release
+
+Use the immutable image tag `kaneelir0ll/bazarr-autotranslate:1.0.1` on
+TrueNAS. This corrected release includes `media_identity.py` in the image and is
+smoke-tested for both the `media_identity` and `status_dashboard` imports before
+publication. The `latest` tag is updated to the exact same image digest only
+after that check passes.
+
+After changing the image tag, pull `1.0.1` and use **Recreate** (or redeploy the
+app with **Force Pull Image** enabled) rather than merely restarting the existing
+container. This ensures TrueNAS replaces the container created from the broken
+image. Keeping `1.0.1` configured pins the corrected image explicitly.
+
 ```bash
 cp .env.example .env
 # Edit .env with your values
