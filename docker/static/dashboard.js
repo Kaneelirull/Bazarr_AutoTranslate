@@ -482,6 +482,10 @@
   };
 
   const retryMedia = (plan) => {
+    if (plan.displayTitle) {
+      const detail = [plan.episodeCode, plan.episodeTitle].filter(Boolean).join(" · ");
+      return { title: plan.displayTitle, detail };
+    }
     const basename = String(plan.mediaTitle || "").split(/[\\/]/).pop() || "";
     let stem = basename
       .replace(/\.srt\s*season\s*\d+$/i, "")

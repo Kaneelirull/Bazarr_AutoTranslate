@@ -22,6 +22,7 @@ from status_dashboard import (
     StatusTracker,
     build_cycle_jobs,
     episode_identity_from_path,
+    retry_media_identity,
     start_status_server,
 )
 from state_store import StateStore, StateStoreError
@@ -775,6 +776,24 @@ def _status_set_episode_identity(
         print(f"{YELLOW}[STATUS] Could not persist episode identity: {exc}{RESET}")
 
 
+def _status_admit_retry(plan: dict, identity: dict) -> None:
+    if _status_tracker is None:
+        return
+    try:
+        _status_tracker.admit_retry(
+            plan_id=plan["id"],
+            item_type=plan["itemType"],
+            item_id=plan["itemId"],
+            target_language=plan["targetLanguage"],
+            display_title=identity["displayTitle"],
+            episode_code=identity.get("episodeCode"),
+            episode_title=identity.get("episodeTitle"),
+            attempt=int(plan.get("attemptCount", 0)) + 1,
+        )
+    except OSError as exc:
+        print(f"{YELLOW}[STATUS] Could not admit retry job: {exc}{RESET}")
+
+
 def _refresh_status_diagnostics() -> None:
     if _status_tracker is None or not hasattr(_status_tracker, "set_diagnostics"):
         return
@@ -796,6 +815,7 @@ def _refresh_status_diagnostics() -> None:
         )
         retry_plans = _get_validation_state().retry_plans()
         for plan in retry_plans:
+            plan.update(retry_media_identity(plan))
             attempts = _get_validation_state().quarantine_attempts(
                 plan["itemType"], plan["itemId"], plan["targetLanguage"]
             )
@@ -954,9 +974,11 @@ def _initialize_state_store() -> StateStore:
             if rules & {"source_unreadable", "source_structure", "undersized_source"}:
                 retry_migration["ignored"] += 1
                 continue
+            identity = retry_media_identity(candidate)
             series_key = (
-                f"path:{os.path.normcase(os.path.dirname(source_path))}"
-                if candidate["itemType"] == "episodes" else None
+                f"episodes:{identity['displayTitle'].casefold()}"
+                if candidate["itemType"] == "episodes"
+                else None
             )
             store.schedule_retry_plan(
                 item_type=candidate["itemType"],
@@ -967,7 +989,7 @@ def _initialize_state_store() -> StateStore:
                 source_language=candidate.get("sourceLanguage"),
                 target_path=candidate.get("targetPath"),
                 series_key=series_key,
-                series_title=os.path.basename(os.path.dirname(source_path)),
+                series_title=identity["displayTitle"],
                 media_title=os.path.basename(source_path),
                 source_cue_count=_count_srt_cues(source_path),
                 failure_class="whole_file",
@@ -4922,6 +4944,7 @@ def process_item(
                 item_id,
                 target_lang,
                 "translating",
+                reason="waiting for Lingarr output",
                 details={
                     "cueCount": timing["cueCount"],
                     "secondsPerCue": round(timing["secondsPerCue"], 4),
@@ -6076,15 +6099,25 @@ def _run_regeneration_retries(stats: dict) -> None:
         f"completed_cycle={_completed_cycle}"
     )
     retry_lock = threading.Lock()
+    admitted: list[tuple[dict, dict, str, str]] = []
     for plan in plans:
         if shutdown_requested:
-            break
+            try:
+                _get_validation_state().update_retry_plan(
+                    plan["id"],
+                    state="regeneration_waiting",
+                    reason="retry admission cancelled during shutdown",
+                )
+            except StateStoreError:
+                stats["degraded"] = True
+            continue
         item_type = plan["itemType"]
         id_field = "sonarrEpisodeId" if item_type == "episodes" else "radarrId"
+        identity = retry_media_identity(plan)
         item = {
             id_field: plan["itemId"],
-            "title": plan.get("mediaTitle") or "Scheduled retry",
-            "seriesTitle": plan.get("seriesTitle") or plan.get("mediaTitle") or "Scheduled retry",
+            "title": identity.get("episodeTitle") or identity["displayTitle"],
+            "seriesTitle": identity["displayTitle"],
             "missing_subtitles": [{"code2": plan["targetLanguage"]}],
         }
         if plan.get("seriesKey", "").startswith("sonarr:"):
@@ -6098,26 +6131,77 @@ def _run_regeneration_retries(stats: dict) -> None:
             f"attempt={plan['attemptCount'] + 1}/"
             f"{REGENERATION_MAX_ATTEMPTS or 'unlimited'}"
         )
-        process_item(
-            item, item_type, id_field, stats, retry_lock, retry_plan=plan
-        )
+        _status_admit_retry(plan, identity)
+        admitted.append((plan, item, item_type, id_field))
+
+    def run_retry(
+        plan: dict, item: dict, item_type: str, id_field: str
+    ) -> None:
         try:
-            current = next(
-                (
-                    entry for entry in _get_validation_state().retry_plans()
-                    if entry["id"] == plan["id"]
-                ),
-                None,
+            process_item(
+                item,
+                item_type,
+                id_field,
+                stats,
+                retry_lock,
+                retry_plan=plan,
             )
-            if current and current["state"] == "regeneration_queued":
-                _get_validation_state().update_retry_plan(
-                    plan["id"],
-                    state="regeneration_waiting",
-                    reason="retry admission deferred before Lingarr output",
+        finally:
+            _shared_capacity.release_current_translation()
+
+    dispatch_workers = max(
+        PARALLEL_TRANSLATES * 4, PARALLEL_TRANSLATES + 1
+    )
+    with ThreadPoolExecutor(
+        max_workers=min(len(admitted), dispatch_workers) or 1,
+        thread_name_prefix="retry-worker",
+    ) as executor:
+        futures = {
+            executor.submit(run_retry, plan, item, item_type, id_field): plan
+            for plan, item, item_type, id_field in admitted
+        }
+        for future in as_completed(futures):
+            plan = futures[future]
+            try:
+                future.result()
+            except Exception as exc:
+                print(
+                    f"{RED}[ERROR] Retry worker failed for plan "
+                    f"{plan['id']}: {exc}{RESET}"
                 )
-        except StateStoreError as exc:
-            print(f"{YELLOW}[RETRY] Could not release deferred plan: {exc}{RESET}")
-            stats["degraded"] = True
+                with retry_lock:
+                    stats["degraded"] = True
+                _status_transition(
+                    plan["itemType"],
+                    plan["itemId"],
+                    plan["targetLanguage"],
+                    "deferred",
+                    reason="retry worker failed",
+                )
+            try:
+                current = next(
+                    (
+                        entry for entry in _get_validation_state().retry_plans()
+                        if entry["id"] == plan["id"]
+                    ),
+                    None,
+                )
+                if current and current["state"] == "regeneration_queued":
+                    _get_validation_state().update_retry_plan(
+                        plan["id"],
+                        state="regeneration_waiting",
+                        reason=(
+                            "retry worker failed before Lingarr output"
+                            if future.exception() is not None
+                            else "retry admission deferred before Lingarr output"
+                        ),
+                    )
+            except StateStoreError as exc:
+                print(
+                    f"{YELLOW}[RETRY] Could not release deferred plan: "
+                    f"{exc}{RESET}"
+                )
+                stats["degraded"] = True
 
 
 def run_cycle(cycle_num: int) -> bool:

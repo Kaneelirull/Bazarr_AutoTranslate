@@ -17,6 +17,7 @@ from status_dashboard import (  # noqa: E402
     build_cycle_jobs,
     episode_identity,
     episode_identity_from_path,
+    retry_media_identity,
     render_dashboard,
     render_logs_page,
     read_logs,
@@ -109,6 +110,80 @@ class StatusDashboardTests(unittest.TestCase):
             "S04E09",
         )
         self.assertIsNone(episode_identity_from_path("/media/Example Movie.mkv"))
+
+    def test_retry_identity_rejects_season_folder_title(self):
+        identity = retry_media_identity({
+            "itemType": "episodes",
+            "itemId": 11569,
+            "seriesTitle": "Season 05",
+            "mediaTitle": "Season 05 S05E24",
+            "sourcePath": (
+                "/media/_Shows/The Big Bang Theory (2007) [tvdbid-80379]/"
+                "Season 05/The Big Bang Theory (2007) - S05E24 - "
+                "The Countdown Reflection [Bluray-1080p].en.srt"
+            ),
+        })
+        self.assertEqual(
+            identity,
+            {
+                "displayTitle": "The Big Bang Theory (2007)",
+                "episodeCode": "S05E24",
+                "episodeTitle": "The Countdown Reflection",
+            },
+        )
+        pathless = retry_media_identity({
+            "itemType": "episodes",
+            "itemId": 99,
+            "seriesTitle": "Season 10",
+            "mediaTitle": "Season 10 S10E16",
+        })
+        self.assertEqual(pathless["displayTitle"], "Episode 99")
+        self.assertEqual(pathless["episodeCode"], "S10E16")
+
+    def test_retry_identity_handles_series_movies_and_dated_episodes(self):
+        top_gear = retry_media_identity({
+            "itemType": "episodes",
+            "itemId": 1,
+            "seriesTitle": "Top Gear",
+            "sourcePath": "/media/Top Gear - S04E02 - Episode 2.en.srt",
+        })
+        bluey = retry_media_identity({
+            "itemType": "episodes",
+            "itemId": 2,
+            "sourcePath": "/media/Bluey (2018) - S01E38 - Copycat [WEB].eng.srt",
+        })
+        dated = retry_media_identity({
+            "itemType": "episodes",
+            "itemId": 3,
+            "sourcePath": (
+                "/media/The Daily Show - 2026-07-27 - "
+                "Episode Name [WEB].en.srt"
+            ),
+        })
+        movie = retry_media_identity({
+            "itemType": "movies",
+            "itemId": 4,
+            "mediaTitle": "Example Movie (2025).en.srt",
+        })
+        windows_release = retry_media_identity({
+            "itemType": "episodes",
+            "itemId": 5,
+            "sourcePath": (
+                r"C:\media\How I Met Your Mother (2005) - S02E22 - "
+                r"Something Blue -NOGRP.en.srt"
+            ),
+        })
+        self.assertEqual(top_gear["displayTitle"], "Top Gear")
+        self.assertEqual(top_gear["episodeCode"], "S04E02")
+        self.assertEqual(bluey["displayTitle"], "Bluey (2018)")
+        self.assertEqual(bluey["episodeTitle"], "Copycat")
+        self.assertEqual(dated["episodeCode"], "2026-07-27")
+        self.assertEqual(dated["episodeTitle"], "Episode Name")
+        self.assertEqual(movie["displayTitle"], "Example Movie (2025)")
+        self.assertEqual(
+            windows_release["displayTitle"], "How I Met Your Mother (2005)"
+        )
+        self.assertEqual(windows_release["episodeTitle"], "Something Blue")
 
     def test_queued_duration_is_blank_and_active_duration_uses_started_time(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -213,6 +288,54 @@ class StatusDashboardTests(unittest.TestCase):
             self.assertEqual(snapshot["history"]["1h"]["waiting_retry"], 1)
             self.assertEqual(snapshot["history"]["1h"]["series_protected"], 1)
             self.assertEqual(snapshot["history"]["1h"]["missing_source"], 1)
+
+    def test_admitted_retry_reopens_waiting_job_for_up_next_and_active(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self.make_tracker(directory)
+            jobs = queue_jobs()
+            tracker.start_cycle("cycle-1", 1, jobs)
+            tracker.transition(jobs[0]["key"], "waiting_retry")
+
+            self.assertTrue(tracker.admit_retry(
+                plan_id=9,
+                item_type="episodes",
+                item_id=42,
+                target_language="et",
+                display_title="Example Show",
+                episode_code="S01E02",
+                episode_title="The Beginning",
+                attempt=2,
+            ))
+            snapshot = tracker.snapshot()
+            self.assertEqual(len(snapshot["upNext"]), 3)
+            retry = next(
+                row for row in snapshot["upNext"]
+                if row.get("retryPlanId") == 9
+            )
+            self.assertEqual(retry["retryPlanId"], 9)
+            self.assertEqual(retry["retryAttempt"], 2)
+            self.assertEqual(snapshot["currentCycle"]["waitingRetry"], 0)
+
+            tracker.transition_for("episodes", 42, "et", "translating")
+            snapshot = tracker.snapshot()
+            self.assertEqual(snapshot["activeJobs"][0]["retryPlanId"], 9)
+            self.assertEqual(len(snapshot["upNext"]), 2)
+
+    def test_admitted_retry_absent_from_wanted_queue_is_added(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self.make_tracker(directory)
+            tracker.start_cycle("cycle-1", 1, queue_jobs())
+            self.assertTrue(tracker.admit_retry(
+                plan_id=12,
+                item_type="episodes",
+                item_id=999,
+                target_language="et",
+                display_title="Legacy Show",
+                episode_code="S02E03",
+            ))
+            snapshot = tracker.snapshot()
+            self.assertEqual(snapshot["currentCycle"]["initial"], 4)
+            self.assertEqual(snapshot["upNext"][-1]["title"], "Legacy Show")
 
     def test_rolling_windows_and_repaired_subtype(self):
         with tempfile.TemporaryDirectory() as directory:
