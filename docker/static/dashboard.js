@@ -4,6 +4,7 @@
   const ACTIVE_REFRESH_MS = 3_000;
   const IDLE_REFRESH_MS = 20_000;
   const MAX_BACKOFF_MS = 60_000;
+  const RETRY_BATCH_SIZE = 20;
   const root = document.getElementById("dashboard");
   const configuredTimeZone = root.dataset.timeZone || "UTC";
   let snapshot = {};
@@ -15,6 +16,10 @@
   let tooltipSequence = 0;
   let activeTooltipTrigger = null;
   let pinnedTooltipTrigger = null;
+  let retrySortKey = "nextAction";
+  let retrySortDirection = "asc";
+  let retryVisibleCount = RETRY_BATCH_SIZE;
+  const expandedRetryIds = new Set();
 
   const escapeHtml = (value) => String(value ?? "—")
     .replaceAll("&", "&amp;")
@@ -552,6 +557,14 @@
     detail: [plan.episodeCode, plan.episodeTitle].filter(Boolean).join(" - "),
   });
 
+  const retryPlanId = (plan) => String(
+    plan.id ?? `${plan.itemType || "media"}-${plan.itemId ?? "unknown"}-${plan.targetLanguage || "unknown"}`,
+  );
+
+  const retryDetailId = (plan) => (
+    `retry-detail-${retryPlanId(plan).replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`
+  );
+
   const retryState = (state) => {
     const states = {
       regeneration_waiting: ["Regeneration waiting", "deferred"],
@@ -583,7 +596,63 @@
     return labelForState(plan.state || "queued");
   };
 
-  const retryDetails = (plan) => {
+  const retryActionOrder = (plan, completedCycle) => {
+    if ([
+      "regeneration_queued", "retry_in_progress", "repair_retry_queued",
+    ].includes(plan.state)) {
+      return [0, 0];
+    }
+    if (plan.state === "regeneration_waiting") {
+      const cyclesRemaining = Math.max(
+        0,
+        number(plan.eligibleCompletedCycle) - number(completedCycle),
+      );
+      return cyclesRemaining === 0 ? [0, 1] : [1, cyclesRemaining];
+    }
+    const reason = String(plan.lastReason || "").toLowerCase();
+    if (reason.includes("circuit")) return [2, 0];
+    if (plan.state === "retry_exhausted" || plan.state === "source_blocked") {
+      return [3, 0];
+    }
+    return [2, String(retryNextAction(plan, completedCycle)).toLocaleLowerCase()];
+  };
+
+  const retrySortValue = (plan, key, completedCycle) => {
+    const [stateLabel] = retryState(plan.state);
+    if (key === "media") return retryMedia(plan).title.toLocaleLowerCase();
+    if (key === "language") return String(plan.targetLanguage || "").toLocaleLowerCase();
+    if (key === "status") return stateLabel.toLocaleLowerCase();
+    if (key === "attempts") return number(plan.attemptCount);
+    return retryActionOrder(plan, completedCycle);
+  };
+
+  const compareRetryValues = (left, right) => {
+    if (Array.isArray(left) && Array.isArray(right)) {
+      for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+        const comparison = compareRetryValues(left[index], right[index]);
+        if (comparison) return comparison;
+      }
+      return 0;
+    }
+    if (typeof left === "number" && typeof right === "number") return left - right;
+    return String(left ?? "").localeCompare(String(right ?? ""), undefined, {
+      numeric: true,
+      sensitivity: "base",
+    });
+  };
+
+  const compareRetryPlans = (left, right, completedCycle) => {
+    const primary = compareRetryValues(
+      retrySortValue(left, retrySortKey, completedCycle),
+      retrySortValue(right, retrySortKey, completedCycle),
+    );
+    if (primary) return retrySortDirection === "desc" ? -primary : primary;
+    const titleOrder = compareRetryValues(retryMedia(left).title, retryMedia(right).title);
+    if (titleOrder) return titleOrder;
+    return compareRetryValues(retryPlanId(left), retryPlanId(right));
+  };
+
+  const retryDetails = (plan, expanded) => {
     const rules = Array.isArray(plan.rules) && plan.rules.length
       ? plan.rules.join(", ")
       : "—";
@@ -597,28 +666,71 @@
       ["Item", `${plan.itemType || "media"}:${plan.itemId ?? "—"}`],
       ["Final outcome", plan.finalOutcome || "—"],
     ];
-    return `<details class="retry-details">
-      <summary>View details</summary>
-      <dl>${fields.map(([label, value]) => (
-        `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`
-      )).join("")}</dl>
-    </details>`;
+    const detailId = retryDetailId(plan);
+    return `<tr class="retry-detail-row" id="${escapeHtml(detailId)}" ${expanded ? "" : "hidden"}>
+      <td colspan="6">
+        <dl class="retry-detail-grid">${fields.map(([label, value]) => (
+          `<div class="${label === "Last reason" ? "retry-detail-wide" : ""}"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`
+        )).join("")}</dl>
+      </td>
+    </tr>`;
+  };
+
+  const retrySortLabels = {
+    media: "Media",
+    language: "Language",
+    status: "Status",
+    attempts: "Attempts",
+    nextAction: "Next action",
+  };
+
+  const retrySortHeader = (key) => {
+    const active = retrySortKey === key;
+    const ariaSort = active
+      ? ` aria-sort="${retrySortDirection === "asc" ? "ascending" : "descending"}"`
+      : "";
+    const indicator = active ? (retrySortDirection === "asc" ? "↑" : "↓") : "↕";
+    return `<th scope="col"${ariaSort}>
+      <button type="button" class="retry-sort-button ${active ? "is-active" : ""}"
+        data-retry-sort="${escapeHtml(key)}" data-retry-focus="sort-${escapeHtml(key)}">
+        ${escapeHtml(retrySortLabels[key])}<span aria-hidden="true">${indicator}</span>
+      </button>
+    </th>`;
   };
 
   const renderRetryPlans = (plans, completedCycle, maxAttempts) => {
     const active = plans.filter((plan) => ![
       "accepted_after_retry", "superseded",
     ].includes(plan.state));
+    const activeIds = new Set(active.map(retryPlanId));
+    expandedRetryIds.forEach((id) => {
+      if (!activeIds.has(id)) expandedRetryIds.delete(id);
+    });
     const note = `Persistent quarantine recovery · completed cycle ${Number(completedCycle || 0)}`;
     if (!active.length) {
       return `<section class="panel">${panelHeader("Retry queue", note)}
         <p class="empty-state">No retry work scheduled.</p>
       </section>`;
     }
-    const rows = active.slice(0, 20).map((plan) => {
+    const sorted = [...active].sort((left, right) => (
+      compareRetryPlans(left, right, completedCycle)
+    ));
+    const visible = sorted.slice(0, retryVisibleCount);
+    const dueNow = active.filter((plan) => (
+      plan.state === "regeneration_waiting"
+      && number(plan.eligibleCompletedCycle) <= number(completedCycle)
+    )).length;
+    const dueNext = active.filter((plan) => (
+      plan.state === "regeneration_waiting"
+      && number(plan.eligibleCompletedCycle) === number(completedCycle) + 1
+    )).length;
+    const rows = visible.map((plan) => {
       const media = retryMedia(plan);
       const [stateLabel, stateTone] = retryState(plan.state);
-      return `<tr>
+      const planId = retryPlanId(plan);
+      const detailId = retryDetailId(plan);
+      const expanded = expandedRetryIds.has(planId);
+      return `<tr class="retry-main-row ${expanded ? "has-expanded" : ""}">
         <td class="cell-media" data-label="Media">
           <span class="media-title">${escapeHtml(media.title)}</span>
           ${media.detail ? `<span class="media-detail">${escapeHtml(media.detail)}</span>` : ""}
@@ -627,14 +739,44 @@
         <td data-label="Status"><span class="badge ${stateTone}">${escapeHtml(stateLabel)}</span></td>
         <td data-label="Attempts"><span class="duration">${Number(plan.attemptCount || 0)} / ${Number(maxAttempts || 0) === 0 ? "unlimited" : Number(maxAttempts)}</span></td>
         <td data-label="Next action">${escapeHtml(retryNextAction(plan, completedCycle))}</td>
-        <td class="cell-details" data-label="Details">${retryDetails(plan)}</td>
-      </tr>`;
+        <td class="cell-details" data-label="Details">
+          <button type="button" class="retry-details-toggle"
+            data-retry-id="${escapeHtml(planId)}" data-retry-focus="details-${escapeHtml(planId)}"
+            aria-expanded="${expanded ? "true" : "false"}" aria-controls="${escapeHtml(detailId)}">
+            <span class="retry-details-icon" aria-hidden="true"></span>
+            <span class="retry-details-label">${expanded ? "Hide details" : "View details"}</span>
+          </button>
+        </td>
+      </tr>${retryDetails(plan, expanded)}`;
     }).join("");
+    const sortOptions = Object.entries(retrySortLabels).map(([key, label]) => (
+      `<option value="${escapeHtml(key)}" ${retrySortKey === key ? "selected" : ""}>${escapeHtml(label)}</option>`
+    )).join("");
+    const remaining = Math.max(0, active.length - visible.length);
     return `<section class="panel">${panelHeader("Retry queue", note)}
+      <div class="retry-toolbar">
+        <div class="retry-summary" aria-label="${active.length} active retries, ${dueNow} due now, ${dueNext} due next cycle">
+          <span><strong>${active.length.toLocaleString()}</strong> active</span>
+          <span><strong>${dueNow.toLocaleString()}</strong> due now</span>
+          <span><strong>${dueNext.toLocaleString()}</strong> next cycle</span>
+        </div>
+        <div class="retry-mobile-sort">
+          <label for="retry-sort-select">Sort by</label>
+          <select id="retry-sort-select" data-retry-focus="sort-select">${sortOptions}</select>
+          <button type="button" class="retry-sort-direction" data-retry-focus="sort-direction"
+            aria-label="Sort ${retrySortDirection === "asc" ? "descending" : "ascending"}">
+            <span aria-hidden="true">${retrySortDirection === "asc" ? "↑" : "↓"}</span>
+          </button>
+        </div>
+      </div>
       <div class="table-wrap"><table class="data-table retry-table">
-        <thead><tr><th scope="col">Media</th><th scope="col">Language</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Next action</th><th scope="col">Details</th></tr></thead>
+        <thead><tr>${retrySortHeader("media")}${retrySortHeader("language")}${retrySortHeader("status")}${retrySortHeader("attempts")}${retrySortHeader("nextAction")}<th scope="col">Details</th></tr></thead>
         <tbody>${rows}</tbody>
-      </table></div>
+      </table>
+      <div class="retry-table-footer">
+        <span class="retry-showing" aria-live="polite">Showing ${visible.length.toLocaleString()} of ${active.length.toLocaleString()}</span>
+        ${remaining ? `<button type="button" class="btn btn-secondary btn-sm retry-show-more" data-retry-focus="show-more">Show ${Math.min(RETRY_BATCH_SIZE, remaining).toLocaleString()} more</button>` : ""}
+      </div></div>
     </section>`;
   };
 
@@ -704,6 +846,7 @@
   };
 
   const render = () => {
+    const retryFocusKey = document.activeElement?.dataset?.retryFocus || "";
     const service = snapshot.service || {};
     const cycle = snapshot.currentCycle || {};
     const maintenance = snapshot.maintenance || {};
@@ -744,6 +887,12 @@
     </div>`;
     root.setAttribute("aria-busy", "false");
     bindControls();
+    if (retryFocusKey) {
+      const retryFocusTarget = Array.from(
+        root.querySelectorAll("[data-retry-focus]"),
+      ).find((node) => node.dataset.retryFocus === retryFocusKey);
+      retryFocusTarget?.focus({ preventScroll: true });
+    }
     tick();
   };
 
@@ -779,11 +928,70 @@
     updateThemeButton();
   };
 
+  const bindRetryControls = () => {
+    document.querySelectorAll("[data-retry-sort]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const key = button.dataset.retrySort;
+        if (!Object.hasOwn(retrySortLabels, key)) return;
+        if (retrySortKey === key) {
+          retrySortDirection = retrySortDirection === "asc" ? "desc" : "asc";
+        } else {
+          retrySortKey = key;
+          retrySortDirection = "asc";
+        }
+        retryVisibleCount = RETRY_BATCH_SIZE;
+        render();
+      });
+    });
+
+    const select = document.getElementById("retry-sort-select");
+    select?.addEventListener("change", () => {
+      if (!Object.hasOwn(retrySortLabels, select.value)) return;
+      retrySortKey = select.value;
+      retrySortDirection = "asc";
+      retryVisibleCount = RETRY_BATCH_SIZE;
+      render();
+    });
+
+    document.querySelector(".retry-sort-direction")?.addEventListener("click", () => {
+      retrySortDirection = retrySortDirection === "asc" ? "desc" : "asc";
+      retryVisibleCount = RETRY_BATCH_SIZE;
+      render();
+    });
+
+    document.querySelectorAll(".retry-details-toggle").forEach((button) => {
+      button.addEventListener("click", () => {
+        const planId = button.dataset.retryId;
+        const detailId = button.getAttribute("aria-controls");
+        const detailRow = detailId ? document.getElementById(detailId) : null;
+        if (!planId || !detailRow) return;
+        const expanded = button.getAttribute("aria-expanded") !== "true";
+        if (expanded) {
+          expandedRetryIds.add(planId);
+        } else {
+          expandedRetryIds.delete(planId);
+        }
+        button.setAttribute("aria-expanded", String(expanded));
+        button.querySelector(".retry-details-label").textContent = (
+          expanded ? "Hide details" : "View details"
+        );
+        button.closest(".retry-main-row")?.classList.toggle("has-expanded", expanded);
+        detailRow.hidden = !expanded;
+      });
+    });
+
+    document.querySelector(".retry-show-more")?.addEventListener("click", () => {
+      retryVisibleCount += RETRY_BATCH_SIZE;
+      render();
+    });
+  };
+
   const bindControls = () => {
     const theme = document.getElementById("theme-toggle");
     const refresh = document.getElementById("refresh-button");
     theme?.addEventListener("click", toggleTheme);
     refresh?.addEventListener("click", () => refreshStatus(true));
+    bindRetryControls();
     updateThemeButton();
   };
 
