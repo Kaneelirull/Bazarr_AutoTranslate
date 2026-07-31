@@ -514,15 +514,17 @@
       const failures = number(entry.failures);
       const eligible = Number(entry.eligibleAfterCycle);
       const remaining = Math.max(0, number(entry.completedCyclesRemaining));
-      const trial = Number.isFinite(eligible)
-        ? ` - Next trial after cycle ${eligible.toLocaleString()}`
-        : "";
-      const wait = remaining
-        ? ` - ${remaining.toLocaleString()} healthy ${remaining === 1 ? "cycle" : "cycles"} remaining`
-        : "";
+      let trial = "Trial ready";
+      if (entry.state === "half_open" && entry.trialJobId != null) {
+        trial = "Trial in progress";
+      } else if (remaining > 0) {
+        trial = `Trial in ${remaining.toLocaleString()} ${remaining === 1 ? "cycle" : "cycles"}`;
+      } else if (!Number.isFinite(eligible) && entry.state !== "half_open") {
+        return "";
+      }
       return `<div class="protection-series">
         <strong>${escapeHtml(entry.seriesTitle)}</strong>
-        <span>${failures.toLocaleString()} consecutive ${failures === 1 ? "failure" : "failures"}${trial}${wait}</span>
+        <span>${failures.toLocaleString()} consecutive ${failures === 1 ? "failure" : "failures"} - ${trial}</span>
       </div>`;
     }).join("");
     const protection = breakerRows
@@ -567,9 +569,10 @@
 
   const retryState = (state) => {
     const states = {
-      regeneration_waiting: ["Regeneration waiting", "deferred"],
-      regeneration_queued: ["Regeneration queued", "translating"],
-      retry_in_progress: ["Retry in progress", "translating"],
+      regeneration_waiting: ["Due now", "deferred"],
+      regeneration_queued: ["Admitted", "translating"],
+      waiting_lane: ["Waiting for lane", "queued"],
+      retry_in_progress: ["Translating", "translating"],
       repair_retry_queued: ["Repair queued", "repairing"],
       retry_exhausted: ["Retry exhausted", "failed"],
       source_blocked: ["Source blocked", "failed"],
@@ -580,12 +583,17 @@
   const retryNextAction = (plan, completedCycle) => {
     const reason = String(plan.lastReason || "").toLowerCase();
     if (reason.includes("circuit")) return "Waiting for circuit";
+    if (plan.runtimeState === "waiting_lane") return "Waiting for lane";
+    if (plan.runtimeState === "retry_in_progress") return "Translating";
+    if (plan.state === "regeneration_queued") return "Admitted";
+    if (plan.state === "retry_in_progress") return "Translating";
     if (plan.state === "regeneration_waiting") {
       const cyclesRemaining = Math.max(
         0,
         number(plan.eligibleCompletedCycle) - number(completedCycle),
       );
-      if (cyclesRemaining === 0) return "Now";
+      if (cyclesRemaining === 0) return "Due now";
+      if (plan.lastDeferralClass) return "Rescheduled after no progress";
       if (cyclesRemaining === 1) return "Next cycle";
       return `In ${cyclesRemaining} Cycles`;
     }
@@ -661,6 +669,9 @@
       ["Validation rules", rules],
       ["Last reason", plan.lastReason || "—"],
       ["Eligible cycle", plan.eligibleCompletedCycle ?? "—"],
+      ["Last admitted cycle", plan.lastAdmittedCycle ?? "—"],
+      ["No-progress count", plan.noProgressCount ?? 0],
+      ["Last deferral", plan.lastDeferralClass || "—"],
       ["Archived attempts", plan.archivedAttemptCount ?? 0],
       ["Latest donor attempt", plan.latestDonorAttempt ?? "—"],
       ["Item", `${plan.itemType || "media"}:${plan.itemId ?? "—"}`],
@@ -698,10 +709,22 @@
     </th>`;
   };
 
-  const renderRetryPlans = (plans, completedCycle, maxAttempts) => {
+  const renderRetryPlans = (plans, completedCycle, maxAttempts, cycleJobs = []) => {
+    const jobsByPlan = new Map(
+      cycleJobs.filter((job) => job.retryPlanId != null).map(
+        (job) => [String(job.retryPlanId), job],
+      ),
+    );
     const active = plans.filter((plan) => ![
       "accepted_after_retry", "superseded",
-    ].includes(plan.state));
+    ].includes(plan.state)).map((plan) => {
+      const job = jobsByPlan.get(retryPlanId(plan));
+      if (!job) return plan;
+      const runtimeState = ["translating", "validating"].includes(job.state)
+        ? "retry_in_progress"
+        : "waiting_lane";
+      return { ...plan, runtimeState };
+    });
     const activeIds = new Set(active.map(retryPlanId));
     expandedRetryIds.forEach((id) => {
       if (!activeIds.has(id)) expandedRetryIds.delete(id);
@@ -726,7 +749,7 @@
     )).length;
     const rows = visible.map((plan) => {
       const media = retryMedia(plan);
-      const [stateLabel, stateTone] = retryState(plan.state);
+      const [stateLabel, stateTone] = retryState(plan.runtimeState || plan.state);
       const planId = retryPlanId(plan);
       const detailId = retryDetailId(plan);
       const expanded = expandedRetryIds.has(planId);
@@ -867,6 +890,7 @@
         snapshot.retryPlans || [],
         snapshot.completedCycle || 0,
         snapshot.retryMaxAttempts || 3,
+        [...active, ...upcoming],
       )}
       <section class="panel">${panelHeader("Active now", `${active.length.toLocaleString()} in progress`)}
         ${table(active, "active", "No active translations or repairs.")}

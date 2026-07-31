@@ -80,6 +80,29 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual([plan["itemId"] for plan in claimed], [1, 3])
             store.close()
 
+    def test_retry_limit_collapses_legacy_series_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            for item_id, key in ((1, "episodes:title:old"), (2, "season:05")):
+                store.schedule_retry_plan(
+                    item_type="episodes",
+                    item_id=item_id,
+                    target_language="et",
+                    source_hash=f"source-{item_id}",
+                    failure_class="whole_file",
+                    rules=["target_structure"],
+                    state="regeneration_waiting",
+                    series_key=key,
+                    eligible_completed_cycle=0,
+                )
+                store.register_series_alias(key, "sonarr:99", "Example Show")
+            claimed = store.claim_due_retry_plans(
+                0, limit=5, per_series_limit=1
+            )
+            self.assertEqual(len(claimed), 1)
+            self.assertEqual(claimed[0]["canonicalSeriesKey"], "sonarr:99")
+            store.close()
+
     def test_retry_claims_prefer_smallest_within_oldest_day_and_recover_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite3")
@@ -137,6 +160,70 @@ class StateStoreTests(unittest.TestCase):
             ]), 81)
             store.close()
 
+    def test_no_progress_retry_rotates_behind_never_admitted_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            for item_id in range(1, 7):
+                store.schedule_retry_plan(
+                    item_type="episodes",
+                    item_id=item_id,
+                    target_language="et",
+                    source_hash=f"source-{item_id}",
+                    failure_class="whole_file",
+                    rules=["target_structure"],
+                    state="regeneration_waiting",
+                    series_key=f"series-{item_id}",
+                    eligible_completed_cycle=2,
+                    now=float(item_id),
+                )
+            first = store.claim_due_retry_plans(2, limit=5)
+            for plan in first:
+                store.reschedule_retry_no_progress(
+                    plan["id"],
+                    completed_cycle=2,
+                    deferral_class="target_unresolved",
+                    reason="target could not be resolved safely",
+                )
+            second = store.claim_due_retry_plans(3, limit=1)
+            self.assertEqual(second[0]["itemId"], 6)
+            self.assertEqual(second[0]["lastAdmittedCycle"], 3)
+            store.close()
+
+    def test_restart_keeps_retry_claim_with_durable_lingarr_submission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            store.schedule_retry_plan(
+                item_type="episodes",
+                item_id=42,
+                target_language="et",
+                source_hash="source-42",
+                failure_class="whole_file",
+                rules=["target_structure"],
+                state="regeneration_waiting",
+                series_key="sonarr:7",
+                eligible_completed_cycle=0,
+            )
+            claimed = store.claim_due_retry_plans(0, limit=1)[0]
+            attempt = store.record_submission(
+                item_type="episodes",
+                item_id=42,
+                target_language="et",
+                target_identity="episode-42",
+                target_path="episode.et.srt",
+                cooldown_seconds=3600,
+            )
+            self.assertTrue(
+                store.bind_retry_submission(
+                    claimed["id"], claimed["claimOwner"], attempt
+                )
+            )
+            store.mark_submission_submitted(attempt, 9001)
+            self.assertEqual(store.recover_retry_claims(), 0)
+            claim = store.retry_claims_with_submissions()[0]
+            self.assertEqual(claim["state"], "regeneration_queued")
+            self.assertEqual(claim["lingarrJobId"], 9001)
+            store.close()
+
     def test_schema_v5_persists_failure_details(self):
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite3")
@@ -160,7 +247,7 @@ class StateStoreTests(unittest.TestCase):
             )
             self.assertEqual(row["failure_category"], "context_limit")
             self.assertEqual(json.loads(row["failure_details_json"])["status"], "Failed")
-            self.assertEqual(store._fetchone("PRAGMA user_version")[0], 7)
+            self.assertEqual(store._fetchone("PRAGMA user_version")[0], 8)
             store.close()
 
     def test_schema_v4_migrates_retry_size_and_failure_columns(self):
@@ -191,7 +278,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertIn("source_cue_count", retry_columns)
             self.assertIn("failure_category", attempt_columns)
             self.assertIn("failure_details_json", attempt_columns)
-            self.assertEqual(migrated._fetchone("PRAGMA user_version")[0], 7)
+            self.assertEqual(migrated._fetchone("PRAGMA user_version")[0], 8)
             migrated.close()
 
     def test_quarantine_attempts_are_immutable_and_privacy_safe(self):
@@ -796,7 +883,7 @@ class StateStoreTests(unittest.TestCase):
                     completed_cycle=3,
                 )
                 self.assertTrue(preview["allowed"])
-                self.assertEqual(preview["state"], "half_open")
+                self.assertEqual(preview["state"], "eligible")
                 second_preview = store.circuit_permission(
                     series_key="sonarr:1",
                     series_title="Top Gear",
@@ -819,6 +906,29 @@ class StateStoreTests(unittest.TestCase):
                     config_fingerprint="a",
                     completed_cycle=3,
                 )["allowed"])
+                self.assertTrue(
+                    store.release_circuit_trial(
+                        "sonarr:1", trial["trialOwner"], "no submission"
+                    )
+                )
+                reclaimed = store.circuit_permission(
+                    series_key="sonarr:1",
+                    series_title="Top Gear",
+                    config_fingerprint="a",
+                    completed_cycle=3,
+                    trial_owner="attempt:2",
+                )
+                self.assertTrue(reclaimed["allowed"])
+                self.assertTrue(
+                    store.bind_circuit_trial_job(
+                        "sonarr:1", "attempt:2", 4321
+                    )
+                )
+                self.assertFalse(
+                    store.release_circuit_trial(
+                        "sonarr:1", "wrong-owner", "must not release"
+                    )
+                )
                 store.record_circuit_outcome(
                     series_key="sonarr:1",
                     series_title="Top Gear",
