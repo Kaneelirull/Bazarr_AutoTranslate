@@ -4635,6 +4635,24 @@ def _record_invalid_circuit_outcome(
         print(f"{YELLOW}[CIRCUIT] Could not record invalid output: {exc}{RESET}")
 
 
+def _record_valid_circuit_outcome(
+    series_key: str, series_title: str
+) -> None:
+    try:
+        _get_validation_state().record_circuit_outcome(
+            series_key=series_key,
+            series_title=series_title,
+            success=True,
+            reason=None,
+            threshold=CIRCUIT_FAILURE_THRESHOLD,
+            open_cycles=CIRCUIT_OPEN_CYCLES,
+            config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+        )
+        _refresh_status_diagnostics()
+    except StateStoreError as exc:
+        print(f"{YELLOW}[CIRCUIT] Could not close validated trial: {exc}{RESET}")
+
+
 def _bazarr_has_repaired_path(result: RepairJobResult) -> bool:
     if result.item_id is None or result.item_type not in ("episodes", "movies"):
         return True
@@ -4766,6 +4784,23 @@ def process_item(
     identity = resolve_media_identity(item, item_type, item_id, video_path)
     series_title = identity["title"]
     series_key = identity["key"]
+    if item_type == "episodes" and series_key.startswith("sonarr:"):
+        fallback_item = dict(item)
+        fallback_item.pop("sonarrSeriesId", None)
+        fallback_item.pop("sonarr_series_id", None)
+        fallback_identity = resolve_media_identity(
+            fallback_item, item_type, item_id, video_path
+        )
+        if fallback_identity["key"] != series_key:
+            try:
+                _get_validation_state().register_series_alias(
+                    fallback_identity["key"], series_key, series_title
+                )
+            except StateStoreError as exc:
+                print(
+                    f"{YELLOW}[IDENTITY] Could not persist series alias "
+                    f"for {series_title}: {exc}{RESET}"
+                )
     if video_path:
         _queue_video_for_pruning(video_path, item_type)
     available_by_lang: dict[str, list[str]] = {}
@@ -4785,7 +4820,15 @@ def process_item(
         paths.sort(key=lambda path: _sub_priority(path, code))
 
     target_langs = [l for l in LANGUAGES if l in missing and l not in available_by_lang]
+    if retry_plan is not None:
+        retry_target = str(retry_plan.get("targetLanguage") or "").lower()
+        if retry_target in missing and retry_target not in target_langs:
+            # Retry plans must validate stale targets instead of trusting Bazarr's
+            # presence flag and leaving the plan at the head of the queue.
+            target_langs.append(retry_target)
     source_langs = [l for l in LANGUAGES if l in available_by_lang]
+    if retry_plan is not None:
+        source_langs = [language for language in source_langs if language != retry_target]
     for already_available in missing - set(target_langs):
         _status_transition(
             item_type,
@@ -4841,6 +4884,45 @@ def process_item(
         if _se:
             title = f"{title} S{int(_se.group(1)):02d}E{int(_se.group(2)):02d}"
     print(f"[INFO] {title}: source={source_lang}, targets={target_langs}")
+
+    if retry_plan is not None:
+        current_source_hash = _file_hash_or_none(source_path)
+        if current_source_hash and current_source_hash != retry_plan.get("sourceHash"):
+            retry_target = str(retry_plan["targetLanguage"]).lower()
+            replacement_target = _derive_target_path(
+                source_path, source_lang, retry_target
+            )
+            _get_validation_state().schedule_retry_plan(
+                item_type=item_type,
+                item_id=item_id,
+                target_language=retry_target,
+                source_hash=current_source_hash,
+                source_path=source_path,
+                source_language=source_lang,
+                target_path=replacement_target,
+                series_key=series_key,
+                series_title=series_title,
+                media_title=title,
+                source_cue_count=_count_srt_cues(source_path),
+                failure_class=retry_plan.get("failureClass") or "whole_file",
+                rules=retry_plan.get("rules") or [],
+                state="regeneration_waiting",
+                eligible_completed_cycle=(
+                    _completed_cycle + REGENERATION_INITIAL_DELAY_CYCLES
+                ),
+                reason="source changed; retry plan superseded",
+            )
+            _get_validation_state().reset_circuit(
+                series_key, "source subtitle fingerprint changed"
+            )
+            _status_transition(
+                item_type,
+                item_id,
+                retry_target,
+                "waiting_retry",
+                reason="source changed; retry plan superseded",
+            )
+            return
 
     media_id = lingarr_resolve_media_id(item_type, item_id)
     if media_id is None:
@@ -4907,6 +4989,9 @@ def process_item(
                                 + REGENERATION_INITIAL_DELAY_CYCLES
                             ),
                             reason="source changed; retry plan reset",
+                        )
+                        _get_validation_state().reset_circuit(
+                            series_key, "source subtitle fingerprint changed"
                         )
                         print(
                             f"[RETRY] Source changed for {title} '{target_lang}'; "
@@ -4988,6 +5073,9 @@ def process_item(
                 series_title=series_title,
             )
             if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
+                _record_valid_circuit_outcome(series_key, series_title)
+                if retry_plan is not None:
+                    _resolve_retry_success(item_type, item_id, target_lang)
                 with stats_lock:
                     stats["completed"] += 1
                     stats["translations"].append(f"{title}: {source_lang} -> {target_lang} (on disk)")
@@ -5247,6 +5335,9 @@ def process_item(
                 series_title=series_title,
             )
             if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
+                _record_valid_circuit_outcome(series_key, series_title)
+                if retry_plan is not None:
+                    _resolve_retry_success(item_type, item_id, target_lang)
                 with stats_lock:
                     stats["completed"] += 1
                     stats["translations"].append(f"{title}: {source_lang} -> {target_lang} (on disk)")
@@ -5334,9 +5425,32 @@ def process_item(
                 reason="could not persist translation reservation",
             )
             continue
+        if retry_plan is not None:
+            try:
+                retry_bound = _get_validation_state().bind_retry_submission(
+                    retry_plan["id"],
+                    retry_plan.get("claimOwner") or "",
+                    attempt_id,
+                )
+            except StateStoreError:
+                retry_bound = False
+            if not retry_bound:
+                _mark_submission_failed(attempt_id)
+                _translation_capacity.release(capacity_token)
+                _file_lane_gate.release(lane)
+                _shared_capacity.release(shared_token)
+                _get_validation_state().reschedule_retry_no_progress(
+                    retry_plan["id"],
+                    completed_cycle=_completed_cycle,
+                    deferral_class="claim_binding_failed",
+                    reason="retry submission reservation could not be bound",
+                )
+                continue
         status: str | None = None
         translation_started = time.monotonic()
         job_id: int | None = None
+        trial_owner = f"attempt:{attempt_id}"
+        trial_claimed = False
         try:
             try:
                 circuit = _get_validation_state().circuit_permission(
@@ -5344,6 +5458,7 @@ def process_item(
                     series_title=series_title,
                     config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
                     claim=True,
+                    trial_owner=trial_owner,
                 )
             except StateStoreError as exc:
                 print(f"{YELLOW}[CIRCUIT] State unavailable for {title}: {exc}{RESET}")
@@ -5370,6 +5485,7 @@ def process_item(
                 )
                 _shared_capacity.release(shared_token)
                 continue
+            trial_claimed = circuit.get("state") == "half_open"
             job_id = lingarr_submit_file(
                 media_id,
                 source_path,
@@ -5379,20 +5495,16 @@ def process_item(
             )
             if job_id is None:
                 _mark_submission_failed(attempt_id)
-                if circuit.get("state") == "half_open":
+                if trial_claimed:
                     try:
-                        _get_validation_state().record_circuit_outcome(
+                        _get_validation_state().release_circuit_trial(
                             series_key=series_key,
-                            series_title=series_title,
-                            success=False,
-                            reason="Lingarr submission failed",
-                            threshold=CIRCUIT_FAILURE_THRESHOLD,
-                            open_cycles=CIRCUIT_OPEN_CYCLES,
-                            config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+                            trial_owner=trial_owner,
+                            reason="Lingarr submission did not create a job",
                         )
                     except StateStoreError as exc:
                         print(
-                            f"{YELLOW}[CIRCUIT] Could not reopen failed "
+                            f"{YELLOW}[CIRCUIT] Could not release unsubmitted "
                             f"half-open trial: {exc}{RESET}"
                         )
                 with stats_lock:
@@ -5407,21 +5519,50 @@ def process_item(
                 _shared_capacity.release(shared_token)
                 continue
 
+            if trial_claimed:
+                try:
+                    trial_bound = _get_validation_state().bind_circuit_trial_job(
+                        series_key, trial_owner, job_id
+                    )
+                except StateStoreError as exc:
+                    trial_bound = False
+                    print(
+                        f"{YELLOW}[CIRCUIT] Could not bind half-open trial "
+                        f"to Lingarr job {job_id}: {exc}{RESET}"
+                    )
+                if not trial_bound:
+                    lingarr_cancel_job(job_id)
+                    _mark_submission_failed(attempt_id)
+                    try:
+                        _get_validation_state().release_circuit_trial(
+                            series_key,
+                            trial_owner,
+                            "trial job binding failed before monitoring",
+                        )
+                    except StateStoreError:
+                        pass
+                    job_id = None
+                    with stats_lock:
+                        stats["degraded"] = True
+                    _status_transition(
+                        item_type,
+                        item_id,
+                        target_lang,
+                        "deferred",
+                        reason="circuit trial binding failed",
+                    )
+                    _shared_capacity.release(shared_token)
+                    continue
             try:
                 _mark_submission_submitted(attempt_id, job_id)
             except StateStoreError as exc:
                 print(
-                    f"{YELLOW}[DEFER] Lingarr accepted {title} '{target_lang}' "
-                    f"but its job state could not be persisted: {exc}{RESET}"
+                    f"{YELLOW}[STATE] Lingarr accepted {title} '{target_lang}' "
+                    f"but its job state could not be persisted; continuing to "
+                    f"monitor job {job_id}: {exc}{RESET}"
                 )
                 with stats_lock:
-                    stats["deferred"] = stats.get("deferred", 0) + 1
-                _status_transition(
-                    item_type, item_id, target_lang, "deferred",
-                    reason="Lingarr job persistence failed",
-                )
-                _shared_capacity.release(shared_token)
-                continue
+                    stats["degraded"] = True
             _status_transition(
                 item_type,
                 item_id,
@@ -5474,6 +5615,18 @@ def process_item(
             except TypeError:
                 status = lingarr_poll_job(job_id, deadline, title)
         finally:
+            if trial_claimed and job_id is None:
+                try:
+                    _get_validation_state().release_circuit_trial(
+                        series_key=series_key,
+                        trial_owner=trial_owner,
+                        reason="submission path exited before a Lingarr job was created",
+                    )
+                except StateStoreError as exc:
+                    print(
+                        f"{YELLOW}[CIRCUIT] Could not release abandoned "
+                        f"half-open claim: {exc}{RESET}"
+                    )
             _translation_capacity.release(capacity_token)
             _file_lane_gate.release(lane)
         translation_elapsed = time.monotonic() - translation_started
@@ -6690,6 +6843,26 @@ def _run_regeneration_retries(stats: dict) -> None:
     if shutdown_requested:
         return
     try:
+        for pending in _get_validation_state().retry_plans(include_terminal=False):
+            if pending.get("itemType") != "episodes":
+                continue
+            identity_item = {"seriesTitle": pending.get("seriesTitle")}
+            old_key = str(pending.get("seriesKey") or "")
+            if old_key.startswith("sonarr:"):
+                try:
+                    identity_item["sonarrSeriesId"] = int(old_key.split(":", 1)[1])
+                except ValueError:
+                    pass
+            canonical = resolve_media_identity(
+                identity_item,
+                "episodes",
+                pending["itemId"],
+                pending.get("sourcePath"),
+            )
+            if old_key and canonical["key"] != old_key:
+                _get_validation_state().register_series_alias(
+                    old_key, canonical["key"], canonical["title"]
+                )
         due_before = _get_validation_state().due_retry_count(_completed_cycle)
         plans = _get_validation_state().claim_due_retry_plans(
             _completed_cycle,
@@ -6770,9 +6943,11 @@ def _run_regeneration_retries(stats: dict) -> None:
         }
         for future in as_completed(futures):
             plan = futures[future]
+            worker_error: Exception | None = None
             try:
                 future.result()
             except Exception as exc:
+                worker_error = exc
                 print(
                     f"{RED}[ERROR] Retry worker failed for plan "
                     f"{plan['id']}: {exc}{RESET}"
@@ -6795,12 +6970,22 @@ def _run_regeneration_retries(stats: dict) -> None:
                     None,
                 )
                 if current and current["state"] == "regeneration_queued":
-                    _get_validation_state().update_retry_plan(
+                    deferral_class = (
+                        "shutdown"
+                        if shutdown_requested
+                        else "worker_exception"
+                        if worker_error is not None
+                        else "admission_no_progress"
+                    )
+                    _get_validation_state().reschedule_retry_no_progress(
                         plan["id"],
-                        state="regeneration_waiting",
+                        completed_cycle=_completed_cycle,
+                        deferral_class=deferral_class,
                         reason=(
                             "retry worker failed before Lingarr output"
-                            if future.exception() is not None
+                            if worker_error is not None
+                            else "retry admission stopped during shutdown"
+                            if shutdown_requested
                             else "retry admission deferred before Lingarr output"
                         ),
                     )
@@ -7030,6 +7215,8 @@ def run_cycle(cycle_num: int) -> bool:
     queue_drained = _drain_lingarr_queue()
     if not queue_drained:
         stats["degraded"] = True
+    _reconcile_retry_claims(_get_validation_state())
+    _reconcile_circuit_trial_leases(_get_validation_state())
     _status_finish_cycle(stats)
     return bool(
         not shutdown_requested
@@ -7041,11 +7228,112 @@ def run_cycle(cycle_num: int) -> bool:
 # Main loop
 # ---------------------------------------------------------------------------
 
+def _reconcile_retry_claims(state_store: StateStore) -> int:
+    reconciled = 0
+    for plan in state_store.retry_claims_with_submissions():
+        try:
+            if plan["state"] == "retry_in_progress":
+                state_store.update_retry_plan(
+                    plan["id"],
+                    state="regeneration_waiting",
+                    eligible_completed_cycle=_completed_cycle,
+                    reason="retry output awaiting validation after restart",
+                )
+                reconciled += 1
+                continue
+            job_id = plan.get("lingarrJobId")
+            job = lingarr_get_job(job_id) if job_id is not None else None
+            status = str((job or {}).get("status") or "")
+            if status and status not in ("Completed", "Failed", "Cancelled", "Interrupted"):
+                continue
+            if status == "Completed":
+                state_store.update_retry_plan(
+                    plan["id"],
+                    state="regeneration_waiting",
+                    eligible_completed_cycle=_completed_cycle,
+                    reason="completed retry output awaiting validation",
+                )
+            elif status in ("Failed", "Cancelled", "Interrupted"):
+                attempts = int(plan.get("attemptCount") or 0)
+                state_store.update_retry_plan(
+                    plan["id"],
+                    state="regeneration_waiting",
+                    completed_cycle=_completed_cycle,
+                    eligible_completed_cycle=(
+                        _completed_cycle + _regeneration_delay_cycles(attempts)
+                    ),
+                    increment_attempt=True,
+                    reason=f"recovered terminal retry: {status}",
+                )
+            else:
+                state_store.reschedule_retry_no_progress(
+                    plan["id"],
+                    completed_cycle=_completed_cycle,
+                    deferral_class="submission_unresolved",
+                    reason="durable retry submission could not be resolved",
+                )
+            reconciled += 1
+        except Exception as exc:
+            print(
+                f"{YELLOW}[RETRY] Could not reconcile claim "
+                f"{plan.get('id')}: {exc}{RESET}"
+            )
+    return reconciled
+
+
+def _reconcile_circuit_trial_leases(state_store: StateStore) -> int:
+    reconciled = 0
+    for lease in state_store.circuit_trial_leases():
+        try:
+            job = lingarr_get_job(lease["trialJobId"])
+            job_status = str((job or {}).get("status") or "")
+            if job_status in ("Failed", "Cancelled", "Interrupted"):
+                state_store.record_circuit_outcome(
+                    series_key=lease["seriesKey"],
+                    series_title=lease["seriesTitle"],
+                    success=False,
+                    reason=f"recovered terminal trial: {job_status}",
+                    threshold=CIRCUIT_FAILURE_THRESHOLD,
+                    open_cycles=CIRCUIT_OPEN_CYCLES,
+                    config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+                )
+                reconciled += 1
+            elif job_status == "Completed":
+                state_store.mark_circuit_trial_validation_pending(
+                    lease["seriesKey"],
+                    lease["trialOwner"],
+                )
+                reconciled += 1
+            elif not job:
+                claimed_at = float(lease.get("trialClaimedAt") or 0)
+                if claimed_at and (
+                    time.time() - claimed_at
+                    >= TRANSLATION_TIMEOUT_CAP + max(60, POLL_INTERVAL)
+                ):
+                    state_store.release_circuit_trial(
+                        lease["seriesKey"],
+                        lease["trialOwner"],
+                        "expired bound trial job could not be resolved",
+                    )
+                    reconciled += 1
+        except Exception as exc:
+            print(
+                f"{YELLOW}[CIRCUIT] Could not reconcile trial "
+                f"{lease.get('seriesKey')}: {exc}{RESET}"
+            )
+    return reconciled
+
+
 def main() -> int:
     global _status_tracker, _completed_cycle
     state_store = _initialize_state_store()
     _completed_cycle = state_store.completed_cycle()
     recovered_claims = state_store.recover_retry_claims()
+    reconciled_retry_claims = _reconcile_retry_claims(state_store)
+    recovered_trials = state_store.recover_abandoned_circuit_trials(
+        max_age_seconds=0
+    )
+    reconciled_trials = _reconcile_circuit_trial_leases(state_store)
     backfilled_retry_sizes = 0
     for plan in state_store.retry_plans(include_terminal=False):
         if plan.get("sourceCueCount") is not None or not plan.get("sourcePath"):
@@ -7056,6 +7344,9 @@ def main() -> int:
     print(
         f"[CYCLE] Restored completed-cycle sequence {_completed_cycle}; "
         f"released {recovered_claims} orphaned retry claim(s); "
+        f"reconciled {reconciled_retry_claims} submitted retry claim(s); "
+        f"released {recovered_trials} unbound circuit trial(s); "
+        f"reconciled {reconciled_trials} bound circuit trial(s); "
         f"backfilled {backfilled_retry_sizes} retry size(s)"
     )
     status_server = None

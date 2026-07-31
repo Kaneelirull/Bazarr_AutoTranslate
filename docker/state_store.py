@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 ACTIVE_RETRY_STATES = {
     "repair_retry_queued",
@@ -284,6 +284,11 @@ class StateStore:
                     retry_at REAL,
                     eligible_after_cycle INTEGER,
                     half_open_claimed INTEGER NOT NULL DEFAULT 0,
+                    trial_owner TEXT,
+                    trial_claimed_cycle INTEGER,
+                    trial_claimed_at REAL,
+                    trial_job_id INTEGER,
+                    trial_lease_state TEXT,
                     config_fingerprint TEXT NOT NULL,
                     last_reason TEXT,
                     updated_at REAL NOT NULL
@@ -299,6 +304,7 @@ class StateStore:
                     source_language TEXT,
                     target_path TEXT,
                     series_key TEXT,
+                    canonical_series_key TEXT,
                     series_title TEXT,
                     media_title TEXT,
                     source_cue_count INTEGER,
@@ -316,6 +322,13 @@ class StateStore:
                     artifact_path TEXT,
                     report_path TEXT,
                     last_reason TEXT,
+                    last_admitted_cycle INTEGER,
+                    admission_count INTEGER NOT NULL DEFAULT 0,
+                    no_progress_count INTEGER NOT NULL DEFAULT 0,
+                    last_deferral_class TEXT,
+                    claim_owner TEXT,
+                    claimed_at REAL,
+                    submission_attempt_id INTEGER,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     UNIQUE(item_type, item_id, target_language, source_hash)
@@ -324,6 +337,13 @@ class StateStore:
                     ON retry_plans(state, eligible_completed_cycle, first_failure_at);
                 CREATE INDEX IF NOT EXISTS idx_retry_plans_identity
                     ON retry_plans(item_type, item_id, target_language, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS series_identity_aliases (
+                    alias_key TEXT PRIMARY KEY,
+                    canonical_key TEXT NOT NULL,
+                    series_title TEXT,
+                    updated_at REAL NOT NULL
+                );
 
                 CREATE TABLE IF NOT EXISTS quarantine_attempts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -377,6 +397,21 @@ class StateStore:
                 self._connection.execute(
                     "ALTER TABLE retry_plans ADD COLUMN source_cue_count INTEGER"
                 )
+            retry_additions = {
+                "canonical_series_key": "TEXT",
+                "last_admitted_cycle": "INTEGER",
+                "admission_count": "INTEGER NOT NULL DEFAULT 0",
+                "no_progress_count": "INTEGER NOT NULL DEFAULT 0",
+                "last_deferral_class": "TEXT",
+                "claim_owner": "TEXT",
+                "claimed_at": "REAL",
+                "submission_attempt_id": "INTEGER",
+            }
+            for name, definition in retry_additions.items():
+                if name not in retry_columns:
+                    self._connection.execute(
+                        f"ALTER TABLE retry_plans ADD COLUMN {name} {definition}"
+                    )
             circuit_columns = {
                 row["name"]
                 for row in self._connection.execute(
@@ -388,6 +423,18 @@ class StateStore:
                     "ALTER TABLE circuit_breakers "
                     "ADD COLUMN eligible_after_cycle INTEGER"
                 )
+            circuit_additions = {
+                "trial_owner": "TEXT",
+                "trial_claimed_cycle": "INTEGER",
+                "trial_claimed_at": "REAL",
+                "trial_job_id": "INTEGER",
+                "trial_lease_state": "TEXT",
+            }
+            for name, definition in circuit_additions.items():
+                if name not in circuit_columns:
+                    self._connection.execute(
+                        f"ALTER TABLE circuit_breakers ADD COLUMN {name} {definition}"
+                    )
             attempt_columns = {
                 row["name"]
                 for row in self._connection.execute(
@@ -575,6 +622,7 @@ class StateStore:
             "sourceLanguage": row["source_language"],
             "targetPath": row["target_path"],
             "seriesKey": row["series_key"],
+            "canonicalSeriesKey": row["canonical_series_key"],
             "seriesTitle": row["series_title"],
             "mediaTitle": row["media_title"],
             "sourceCueCount": row["source_cue_count"],
@@ -592,6 +640,13 @@ class StateStore:
             "artifactPath": row["artifact_path"],
             "reportPath": row["report_path"],
             "lastReason": row["last_reason"],
+            "lastAdmittedCycle": row["last_admitted_cycle"],
+            "admissionCount": int(row["admission_count"] or 0),
+            "noProgressCount": int(row["no_progress_count"] or 0),
+            "lastDeferralClass": row["last_deferral_class"],
+            "claimOwner": row["claim_owner"],
+            "claimedAt": row["claimed_at"],
+            "submissionAttemptId": row["submission_attempt_id"],
             "createdAt": float(row["created_at"]),
             "updatedAt": float(row["updated_at"]),
         }
@@ -717,6 +772,156 @@ class StateStore:
             ).fetchone()
         return self._retry_plan_dict(row), repeated
 
+    def register_series_alias(
+        self, alias_key: str, canonical_key: str, series_title: str | None = None
+    ) -> int:
+        alias = str(alias_key or "").strip()
+        canonical = str(canonical_key or "").strip()
+        if not alias or not canonical:
+            return 0
+        now = time.time()
+        with self._transaction() as db:
+            db.execute(
+                """
+                INSERT INTO series_identity_aliases(
+                    alias_key, canonical_key, series_title, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(alias_key) DO UPDATE SET
+                    canonical_key=excluded.canonical_key,
+                    series_title=COALESCE(excluded.series_title, series_title),
+                    updated_at=excluded.updated_at
+                """,
+                (alias, canonical, series_title, now),
+            )
+            updated = db.execute(
+                """
+                UPDATE retry_plans
+                SET canonical_series_key=?, series_title=COALESCE(?, series_title),
+                    updated_at=?
+                WHERE series_key=? OR canonical_series_key=?
+                """,
+                (canonical, series_title, now, alias, alias),
+            ).rowcount
+            alias_circuit = db.execute(
+                "SELECT * FROM circuit_breakers WHERE series_key=?", (alias,)
+            ).fetchone()
+            canonical_circuit = db.execute(
+                "SELECT * FROM circuit_breakers WHERE series_key=?", (canonical,)
+            ).fetchone()
+            if alias != canonical and alias_circuit is not None:
+                if canonical_circuit is None:
+                    db.execute(
+                        """
+                        UPDATE circuit_breakers
+                        SET series_key=?, series_title=COALESCE(?, series_title),
+                            updated_at=?
+                        WHERE series_key=?
+                        """,
+                        (canonical, series_title, now, alias),
+                    )
+                else:
+                    active_rows = [
+                        row for row in (alias_circuit, canonical_circuit)
+                        if row["state"] in ("open", "half_open")
+                    ]
+                    bound_rows = [
+                        row for row in active_rows
+                        if row["state"] == "half_open"
+                        and row["trial_job_id"] is not None
+                    ]
+                    if len(bound_rows) > 1:
+                        return max(0, int(updated))
+                    bound = bound_rows[0] if bound_rows else None
+                    merged_state = (
+                        "half_open"
+                        if bound is not None
+                        else "open"
+                        if active_rows
+                        else "closed"
+                    )
+                    eligible_values = [
+                        int(row["eligible_after_cycle"])
+                        for row in active_rows
+                        if row["eligible_after_cycle"] is not None
+                    ]
+                    db.execute(
+                        """
+                        UPDATE circuit_breakers SET
+                            series_title=COALESCE(?, series_title),
+                            consecutive_failures=?,
+                            state=?, eligible_after_cycle=?,
+                            half_open_claimed=?, trial_owner=?,
+                            trial_claimed_cycle=?, trial_claimed_at=?,
+                            trial_job_id=?, trial_lease_state=?,
+                            last_reason=COALESCE(?, last_reason),
+                            updated_at=?
+                        WHERE series_key=?
+                        """,
+                        (
+                            series_title,
+                            max(
+                                int(alias_circuit["consecutive_failures"] or 0),
+                                int(canonical_circuit["consecutive_failures"] or 0),
+                            ),
+                            merged_state,
+                            (
+                                max(eligible_values)
+                                if eligible_values
+                                else self._completed_cycle_in(db)
+                                if active_rows
+                                else None
+                            ),
+                            1 if bound is not None else 0,
+                            bound["trial_owner"] if bound is not None else None,
+                            (
+                                bound["trial_claimed_cycle"]
+                                if bound is not None else None
+                            ),
+                            (
+                                bound["trial_claimed_at"]
+                                if bound is not None else None
+                            ),
+                            bound["trial_job_id"] if bound is not None else None,
+                            (
+                                bound["trial_lease_state"]
+                                if bound is not None else None
+                            ),
+                            alias_circuit["last_reason"],
+                            now,
+                            canonical,
+                        ),
+                    )
+                    db.execute(
+                        """
+                        UPDATE circuit_breakers SET state='closed',
+                            half_open_claimed=0, trial_owner=NULL,
+                            trial_claimed_cycle=NULL, trial_claimed_at=NULL,
+                            trial_job_id=NULL, trial_lease_state=NULL,
+                            last_reason=?, updated_at=?
+                        WHERE series_key=?
+                        """,
+                        (f"canonical alias: {canonical}", now, alias),
+                    )
+        return max(0, int(updated))
+
+    def _canonical_series_key_in(
+        self, db: sqlite3.Connection, series_key: str | None, item_type: str, item_id: int
+    ) -> str:
+        current = str(series_key or f"{item_type}:{item_id}")
+        seen: set[str] = set()
+        for _ in range(8):
+            if current in seen:
+                break
+            seen.add(current)
+            row = db.execute(
+                "SELECT canonical_key FROM series_identity_aliases WHERE alias_key=?",
+                (current,),
+            ).fetchone()
+            if row is None or not row["canonical_key"]:
+                break
+            current = str(row["canonical_key"])
+        return current
+
     def claim_due_retry_plans(
         self,
         completed_cycle: int,
@@ -724,7 +929,7 @@ class StateStore:
         limit: int,
         per_series_limit: int = 1,
     ) -> list[dict]:
-        selected: list[sqlite3.Row] = []
+        selected: list[tuple[sqlite3.Row, str]] = []
         series_counts: dict[str, int] = {}
         with self._transaction() as db:
             rows = db.execute(
@@ -732,7 +937,9 @@ class StateStore:
                 SELECT * FROM retry_plans
                 WHERE state = 'regeneration_waiting'
                   AND eligible_completed_cycle <= ?
-                ORDER BY eligible_completed_cycle,
+                ORDER BY CASE WHEN last_admitted_cycle IS NULL THEN 0 ELSE 1 END,
+                         last_admitted_cycle,
+                         eligible_completed_cycle,
                          CAST(first_failure_at / 86400 AS INTEGER),
                          CASE WHEN source_cue_count IS NULL THEN 1 ELSE 0 END,
                          source_cue_count, attempt_count, first_failure_at,
@@ -741,27 +948,46 @@ class StateStore:
                 (max(0, int(completed_cycle)),),
             ).fetchall()
             for row in rows:
-                series_bucket = row["series_key"] or f"{row['item_type']}:{row['item_id']}"
+                series_bucket = self._canonical_series_key_in(
+                    db,
+                    row["canonical_series_key"] or row["series_key"],
+                    row["item_type"],
+                    row["item_id"],
+                )
                 if series_counts.get(series_bucket, 0) >= max(1, per_series_limit):
                     continue
-                selected.append(row)
+                selected.append((row, series_bucket))
                 series_counts[series_bucket] = series_counts.get(series_bucket, 0) + 1
                 if len(selected) >= max(1, limit):
                     break
-            for row in selected:
+            for row, series_bucket in selected:
+                owner = (
+                    f"cycle:{max(0, int(completed_cycle))}:plan:{int(row['id'])}:"
+                    f"admission:{int(row['admission_count'] or 0) + 1}"
+                )
                 db.execute(
                     """
                     UPDATE retry_plans
-                    SET state = 'regeneration_queued', updated_at = ?
+                    SET state='regeneration_queued', canonical_series_key=?,
+                        last_admitted_cycle=?, admission_count=admission_count+1,
+                        claim_owner=?, claimed_at=?, last_deferral_class=NULL,
+                        submission_attempt_id=NULL, updated_at=?
                     WHERE id = ? AND state = 'regeneration_waiting'
                     """,
-                    (time.time(), row["id"]),
+                    (
+                        series_bucket,
+                        max(0, int(completed_cycle)),
+                        owner,
+                        time.time(),
+                        time.time(),
+                        row["id"],
+                    ),
                 )
             claimed = [
                 db.execute(
                     "SELECT * FROM retry_plans WHERE id = ?", (row["id"],)
                 ).fetchone()
-                for row in selected
+                for row, _series_bucket in selected
             ]
         return [self._retry_plan_dict(row) for row in claimed if row is not None]
 
@@ -778,19 +1004,107 @@ class StateStore:
         return int(row["count"]) if row else 0
 
     def recover_retry_claims(self) -> int:
-        """Release crash-orphaned claims without changing attempts or eligibility."""
+        """Release crash-orphaned claims while moving them behind other due work."""
         with self._transaction() as db:
+            completed = self._completed_cycle_in(db)
             cursor = db.execute(
                 """
                 UPDATE retry_plans
                 SET state = 'regeneration_waiting',
                     last_reason = 'recovered after service restart',
+                    last_deferral_class='restart_recovery',
+                    no_progress_count=no_progress_count+1,
+                    eligible_completed_cycle=MAX(eligible_completed_cycle, ?),
+                    claim_owner=NULL, claimed_at=NULL,
+                    submission_attempt_id=NULL,
                     updated_at = ?
-                WHERE state IN ('regeneration_queued', 'retry_in_progress')
+                WHERE state = 'regeneration_queued'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM translation_attempts attempt
+                    WHERE attempt.id=retry_plans.submission_attempt_id
+                      AND attempt.status='submitted'
+                      AND attempt.lingarr_job_id IS NOT NULL
+                  )
                 """,
-                (time.time(),),
+                (completed + 1, time.time()),
             )
             return max(0, int(cursor.rowcount))
+
+    def retry_claims_with_submissions(self) -> list[dict]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT plan.*,
+                    (
+                        SELECT attempt.lingarr_job_id
+                        FROM translation_attempts attempt
+                        WHERE attempt.id=plan.submission_attempt_id
+                          AND attempt.status='submitted'
+                    ) AS retry_job_id
+                FROM retry_plans plan
+                WHERE plan.state IN ('regeneration_queued', 'retry_in_progress')
+                """
+            ).fetchall()
+        result = []
+        for row in rows:
+            plan = self._retry_plan_dict(row)
+            plan["lingarrJobId"] = row["retry_job_id"]
+            result.append(plan)
+        return result
+
+    def bind_retry_submission(
+        self, plan_id: int, claim_owner: str, attempt_id: int
+    ) -> bool:
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                UPDATE retry_plans SET submission_attempt_id=?, updated_at=?
+                WHERE id=? AND state='regeneration_queued'
+                  AND claim_owner=?
+                """,
+                (
+                    int(attempt_id),
+                    time.time(),
+                    int(plan_id),
+                    str(claim_owner),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def reschedule_retry_no_progress(
+        self,
+        plan_id: int,
+        *,
+        completed_cycle: int,
+        deferral_class: str,
+        reason: str,
+        delay_cycles: int = 1,
+    ) -> dict | None:
+        eligible = max(0, int(completed_cycle)) + max(1, int(delay_cycles))
+        with self._transaction() as db:
+            db.execute(
+                """
+                UPDATE retry_plans SET
+                    state='regeneration_waiting',
+                    eligible_completed_cycle=MAX(eligible_completed_cycle, ?),
+                    no_progress_count=no_progress_count+1,
+                    last_deferral_class=?, last_reason=?,
+                    claim_owner=NULL, claimed_at=NULL,
+                    submission_attempt_id=NULL, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    eligible,
+                    str(deferral_class)[:80],
+                    str(reason)[:500],
+                    time.time(),
+                    int(plan_id),
+                ),
+            )
+            row = db.execute(
+                "SELECT * FROM retry_plans WHERE id=?", (int(plan_id),)
+            ).fetchone()
+        return self._retry_plan_dict(row)
 
     def set_retry_source_cue_count(self, plan_id: int, cue_count: int) -> bool:
         with self._transaction() as db:
@@ -829,6 +1143,15 @@ class StateStore:
                     last_reason = COALESCE(?, last_reason),
                     end_cycle_repair_attempted =
                         COALESCE(?, end_cycle_repair_attempted),
+                    claim_owner=CASE
+                        WHEN ?='regeneration_waiting' THEN NULL
+                        ELSE claim_owner END,
+                    claimed_at=CASE
+                        WHEN ?='regeneration_waiting' THEN NULL
+                        ELSE claimed_at END,
+                    submission_attempt_id=CASE
+                        WHEN ?='regeneration_waiting' THEN NULL
+                        ELSE submission_attempt_id END,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -839,7 +1162,7 @@ class StateStore:
                         int(end_cycle_repair_attempted)
                         if end_cycle_repair_attempted is not None else None
                     ),
-                    time.time(), int(plan_id),
+                    state, state, state, time.time(), int(plan_id),
                 ),
             )
             row = db.execute(
@@ -859,7 +1182,9 @@ class StateStore:
             cursor = db.execute(
                 """
                 UPDATE retry_plans
-                SET state = ?, final_outcome = ?, updated_at = ?
+                SET state = ?, final_outcome = ?, claim_owner=NULL,
+                    claimed_at=NULL, submission_attempt_id=NULL,
+                    last_deferral_class=NULL, updated_at = ?
                 WHERE item_type = ? AND item_id = ? AND target_language = ?
                   AND state IN (
                     'repair_retry_queued', 'regeneration_waiting',
@@ -1047,6 +1372,7 @@ class StateStore:
         series_title: str,
         config_fingerprint: str,
         claim: bool = True,
+        trial_owner: str | None = None,
         completed_cycle: int | None = None,
         now: float | None = None,
     ) -> dict:
@@ -1073,6 +1399,9 @@ class StateStore:
                         series_title=excluded.series_title,
                         consecutive_failures=0, state='closed', opened_at=NULL,
                         retry_at=NULL, eligible_after_cycle=NULL, half_open_claimed=0,
+                        trial_owner=NULL, trial_claimed_cycle=NULL,
+                        trial_claimed_at=NULL, trial_job_id=NULL,
+                        trial_lease_state=NULL,
                         config_fingerprint=excluded.config_fingerprint,
                         last_reason=NULL, updated_at=excluded.updated_at
                     """,
@@ -1096,18 +1425,28 @@ class StateStore:
                 if not claim:
                     return {
                         "allowed": True,
-                        "state": "half_open",
+                        "state": "eligible",
                         "failures": row["consecutive_failures"],
                         "eligibleAfterCycle": int(eligible),
                         "completedCyclesRemaining": 0,
                     }
+                owner = str(trial_owner or f"series:{series_key}:{now}")
                 claimed = connection.execute(
                     """
                     UPDATE circuit_breakers
-                    SET state='half_open', half_open_claimed=1, updated_at=?
+                    SET state='half_open', half_open_claimed=1,
+                        trial_owner=?, trial_claimed_cycle=?,
+                        trial_claimed_at=?, trial_job_id=NULL,
+                        trial_lease_state='claimed', updated_at=?
                     WHERE series_key=? AND state='open' AND half_open_claimed=0
                     """,
-                    (now, series_key),
+                    (
+                        owner,
+                        current_cycle,
+                        now,
+                        now,
+                        series_key,
+                    ),
                 ).rowcount
                 return {
                     "allowed": bool(claimed),
@@ -1115,6 +1454,7 @@ class StateStore:
                     "failures": row["consecutive_failures"],
                     "eligibleAfterCycle": int(eligible),
                     "completedCyclesRemaining": 0,
+                    "trialOwner": owner if claimed else None,
                 }
             allowed = state == "closed"
             return {
@@ -1125,6 +1465,120 @@ class StateStore:
                 "completedCyclesRemaining": remaining,
                 "reason": row["last_reason"],
             }
+
+    def reset_circuit(self, series_key: str, reason: str) -> bool:
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                UPDATE circuit_breakers SET
+                    consecutive_failures=0, state='closed', opened_at=NULL,
+                    retry_at=NULL, eligible_after_cycle=NULL,
+                    half_open_claimed=0, trial_owner=NULL,
+                    trial_claimed_cycle=NULL, trial_claimed_at=NULL,
+                    trial_job_id=NULL, trial_lease_state=NULL,
+                    last_reason=?, updated_at=?
+                WHERE series_key=?
+                """,
+                (str(reason)[:500], time.time(), str(series_key)),
+            )
+            return cursor.rowcount == 1
+
+    def bind_circuit_trial_job(
+        self, series_key: str, trial_owner: str, job_id: int
+    ) -> bool:
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                UPDATE circuit_breakers
+                SET trial_job_id=?, trial_lease_state='bound', updated_at=?
+                WHERE series_key=? AND state='half_open' AND trial_owner=?
+                """,
+                (int(job_id), time.time(), series_key, str(trial_owner)),
+            )
+            return cursor.rowcount == 1
+
+    def mark_circuit_trial_validation_pending(
+        self, series_key: str, trial_owner: str | None
+    ) -> bool:
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                UPDATE circuit_breakers
+                SET trial_lease_state='validation_pending', updated_at=?
+                WHERE series_key=? AND state='half_open'
+                  AND (? IS NULL OR trial_owner=?)
+                """,
+                (time.time(), series_key, trial_owner, trial_owner),
+            )
+            return cursor.rowcount == 1
+
+    def release_circuit_trial(
+        self, series_key: str, trial_owner: str | None, reason: str
+    ) -> bool:
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                UPDATE circuit_breakers
+                SET state='open', half_open_claimed=0, trial_owner=NULL,
+                    trial_claimed_cycle=NULL, trial_claimed_at=NULL,
+                    trial_job_id=NULL, trial_lease_state=NULL,
+                    last_reason=?, updated_at=?
+                WHERE series_key=? AND state='half_open'
+                  AND (? IS NULL OR trial_owner=?)
+                """,
+                (
+                    str(reason)[:500],
+                    time.time(),
+                    series_key,
+                    trial_owner,
+                    trial_owner,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def recover_abandoned_circuit_trials(
+        self, *, max_age_seconds: float, now: float | None = None
+    ) -> int:
+        timestamp = time.time() if now is None else float(now)
+        cutoff = timestamp - max(0.0, float(max_age_seconds))
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                UPDATE circuit_breakers
+                SET state='open', half_open_claimed=0, trial_owner=NULL,
+                    trial_claimed_cycle=NULL, trial_claimed_at=NULL,
+                    trial_job_id=NULL, trial_lease_state=NULL,
+                    last_reason='recovered abandoned half-open trial',
+                    updated_at=?
+                WHERE state='half_open'
+                  AND trial_job_id IS NULL
+                  AND (trial_claimed_at IS NULL OR trial_claimed_at <= ?)
+                """,
+                (timestamp, cutoff),
+            )
+            return max(0, int(cursor.rowcount))
+
+    def circuit_trial_leases(self) -> list[dict]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT series_key, series_title, trial_owner, trial_job_id,
+                       trial_claimed_at, trial_lease_state
+                FROM circuit_breakers
+                WHERE state='half_open'
+                """
+            ).fetchall()
+        return [
+            {
+                "seriesKey": row["series_key"],
+                "seriesTitle": row["series_title"],
+                "trialOwner": row["trial_owner"],
+                "trialJobId": row["trial_job_id"],
+                "trialClaimedAt": row["trial_claimed_at"],
+                "trialLeaseState": row["trial_lease_state"],
+            }
+            for row in rows
+        ]
 
     def record_circuit_outcome(
         self,
@@ -1166,6 +1620,9 @@ class StateStore:
                     state=excluded.state, opened_at=excluded.opened_at,
                     retry_at=NULL, eligible_after_cycle=excluded.eligible_after_cycle,
                     half_open_claimed=0,
+                    trial_owner=NULL, trial_claimed_cycle=NULL,
+                    trial_claimed_at=NULL, trial_job_id=NULL,
+                    trial_lease_state=NULL,
                     config_fingerprint=excluded.config_fingerprint,
                     last_reason=excluded.last_reason, updated_at=excluded.updated_at
                 """,
@@ -1197,7 +1654,7 @@ class StateStore:
             rows = self._connection.execute(
                 """
                 SELECT series_key, series_title, consecutive_failures, state,
-                       eligible_after_cycle, last_reason
+                       eligible_after_cycle, last_reason, trial_job_id
                 FROM circuit_breakers
                 WHERE state IN ('open', 'half_open')
                   AND trim(series_title) != ''
@@ -1218,6 +1675,7 @@ class StateStore:
                     - completed_cycle,
                 ),
                 "reason": row["last_reason"],
+                "trialJobId": row["trial_job_id"],
             }
             for row in rows
         ]

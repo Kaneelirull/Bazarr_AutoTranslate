@@ -191,7 +191,15 @@ A source-less subtitle whose only validation issue is `excessive_lines` is retai
 
 Quarantine retention and retry eligibility are independent. Invalid artifacts and reports remain available for audit for `QUARANTINE_ARTIFACT_RETENTION_DAYS`, including after a later success. Cue-local failures use the bounded repair path and may receive one end-of-cycle retry. Structurally unsafe target output is regenerated from the current source after persistent completed-cycle backoff. Service failures use normal cooldown and circuit protection and do not create subtitle quarantine plans. Retry state survives restart, unchanged failed hashes do not consume attempts, and exhausted plans remain visible for manual review. The legacy `CLEANUP_QUARANTINE_HOLD_DAYS` variable is accepted with a warning but no longer affects eligibility.
 
-Schema v5 retains the schema-v4 retry migration and adds retry-size ordering plus sanitized Lingarr terminal failure records. Existing files are untouched, eligible retries remain capped by the batch and per-series limits, and orphaned retry claims are released safely after restart without moving their eligibility. Before upgrading, back up `/config/bazarr-autotranslate.sqlite3`; rolling back to an older image requires restoring that backup.
+Schema v8 is additive. It records retry admission rotation, canonical series aliases,
+no-progress deferrals, and owned half-open circuit leases. Existing attempts,
+eligibility, circuit history, and quarantine files remain untouched. Retry claims
+recovered after a crash move to the next completed cycle without consuming a
+translation attempt, preventing the same no-progress batch from starving later
+work. Half-open protection is claimed only immediately before submission, bound
+to the Lingarr job, and released when no job was created. Before upgrading, back
+up `/config/bazarr-autotranslate.sqlite3`; rolling back to an older image requires
+restoring that backup.
 
 Source-anchored recovery normalizes BOMs, newlines, trailing whitespace, timestamp spacing, repeated separators, and blank lines inside cues. Orphan text is folded into its preceding cue only when every numbered timestamp anchor still matches the source in order. Missing, duplicate, reordered, or mismatched anchors are never guessed.
 

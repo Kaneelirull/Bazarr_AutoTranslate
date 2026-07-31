@@ -988,6 +988,9 @@ class StatusTracker:
                             "lastFailureAt", "lastReason", "finalOutcome",
                             "archivedAttemptCount", "latestDonorAttempt",
                             "displayTitle", "episodeCode", "episodeTitle",
+                            "canonicalSeriesKey", "lastAdmittedCycle",
+                            "admissionCount", "noProgressCount",
+                            "lastDeferralClass",
                         )
                     }
                     public_plan.update(retry_media_identity(plan))
