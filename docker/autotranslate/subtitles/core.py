@@ -9,6 +9,7 @@ import sys
 import signal
 import tempfile
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -1141,6 +1142,7 @@ def repair_subtitle_file(
     donor_similarity: float = 0.95,
     donor_timestamp_tolerance_ms: int = 500,
     donor_event_logger: Optional[Callable[[dict], None]] = None,
+    artifact_access=None,
     exhausted_strategies: Optional[dict[str, set[str]]] = None,
     cancellation_requested: Optional[Callable[[], bool]] = None,
     **validation_kwargs,
@@ -1453,16 +1455,22 @@ def repair_subtitle_file(
             for donor_attempt in donor_attempts:
                 artifact_path = donor_attempt.get("artifactPath")
                 signatures = donor_attempt.get("cueSignatures") or []
-                donor_raw = (
-                    read_text_best_effort(Path(artifact_path))
-                    if artifact_path else None
+                access = (
+                    artifact_access.hold(artifact_path)
+                    if artifact_access is not None and artifact_path
+                    else nullcontext()
                 )
-                try:
-                    artifact_hash = (
-                        file_sha256(Path(artifact_path)) if artifact_path else None
+                with access:
+                    donor_raw = (
+                        read_text_best_effort(Path(artifact_path))
+                        if artifact_path else None
                     )
-                except OSError:
-                    artifact_hash = None
+                    try:
+                        artifact_hash = (
+                            file_sha256(Path(artifact_path)) if artifact_path else None
+                        )
+                    except OSError:
+                        artifact_hash = None
                 if (
                     donor_raw is None
                     or not donor_attempt.get("targetHash")
@@ -1907,6 +1915,7 @@ def quarantine_subtitle(
     quarantine_root: Path | str,
     *,
     destination: Path | str | None = None,
+    access_coordinator=None,
 ) -> Path:
     source = Path(path)
     destination = (
@@ -1914,9 +1923,16 @@ def quarantine_subtitle(
         if destination is not None
         else quarantine_destination(source, roots, quarantine_root)
     )
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    normalize_managed_file(source)
-    shutil.move(str(source), str(destination))
+    access = (
+        access_coordinator.hold(source, destination)
+        if access_coordinator is not None else nullcontext()
+    )
+    with access:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        normalize_managed_file(source)
+        shutil.move(str(source), str(destination))
+        # Retention begins at quarantine time, not at the source sidecar's age.
+        os.utime(destination, None)
     return destination
 
 
@@ -1953,6 +1969,7 @@ def purge_old_files(
     *,
     now_timestamp: Optional[float] = None,
     exclude: Iterable[Path | str] = (),
+    access_coordinator=None,
 ) -> list[Path]:
     """Delete files older than the retention cutoff and remove empty child directories."""
     directory = Path(root)
@@ -1969,9 +1986,14 @@ def purge_old_files(
         if str(path.resolve()) in excluded:
             continue
         try:
-            if path.stat().st_mtime < cutoff:
-                path.unlink()
-                removed.append(path)
+            access = (
+                access_coordinator.hold(path)
+                if access_coordinator is not None else nullcontext()
+            )
+            with access:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed.append(path)
         except FileNotFoundError:
             continue
 

@@ -13,7 +13,16 @@ from .capacity import CapacityCoordinator
 @dataclass
 class _ActiveRepair:
     job_id: int
+    scope_id: str
     future: Future
+
+
+@dataclass(frozen=True)
+class RepairDrainResult:
+    completed: int
+    failed: int
+    persisted: int
+    results: tuple[Any, ...] = ()
 
 
 class RepairCoordinator:
@@ -35,7 +44,13 @@ class RepairCoordinator:
         self._active: dict[int, _ActiveRepair] = {}
         self._accepting = True
 
-    def submit(self, dedupe_key: str, metadata: dict, work: Callable[[], Any]) -> int | None:
+    def submit(
+        self,
+        scope_id: str,
+        dedupe_key: str,
+        metadata: dict,
+        work: Callable[[], Any],
+    ) -> int | None:
         with self._lock:
             if not self._accepting:
                 return None
@@ -54,8 +69,7 @@ class RepairCoordinator:
             if job_id in self._active:
                 return None
             future = self._executor.submit(self._run, job_id, work)
-            self._active[job_id] = _ActiveRepair(job_id, future)
-            future.add_done_callback(lambda _future, identifier=job_id: self._finished(identifier))
+            self._active[job_id] = _ActiveRepair(job_id, str(scope_id), future)
             return job_id
 
     def _run(self, job_id: int, work: Callable[[], Any]) -> Any:
@@ -76,19 +90,54 @@ class RepairCoordinator:
         )
         try:
             result = work()
-            self.state.transition_repair_job(job_id, "completed")
+            self.state.transition_repair_job(
+                job_id, "completed", expected_states=("active",)
+            )
             return result
         except Exception as exc:
             self.state.transition_repair_job(
-                job_id, "failed", error_code=type(exc).__name__
+                job_id, "failed", error_code=type(exc).__name__,
+                expected_states=("active",),
             )
             raise
         finally:
             self.capacity.release(token)
 
-    def _finished(self, job_id: int) -> None:
+    def drain(self, scope_id: str) -> RepairDrainResult:
+        scope = str(scope_id)
         with self._lock:
-            self._active.pop(job_id, None)
+            entries = [
+                entry for entry in self._active.values()
+                if entry.scope_id == scope
+            ]
+        if not entries:
+            return RepairDrainResult(0, 0, 0)
+        wait([entry.future for entry in entries])
+        completed = failed = persisted = 0
+        results: list[Any] = []
+        for entry in entries:
+            try:
+                result = entry.future.result()
+                results.append(result)
+                row = next((
+                    job for job in self.state.repair_jobs_for_restart()
+                    if job["id"] == entry.job_id
+                ), None)
+                if row is not None:
+                    persisted += 1
+                else:
+                    completed += 1
+            except Exception:
+                failed += 1
+            finally:
+                with self._lock:
+                    self._active.pop(entry.job_id, None)
+        return RepairDrainResult(
+            completed=completed,
+            failed=failed,
+            persisted=persisted,
+            results=tuple(results),
+        )
 
     def shutdown(self) -> int:
         with self._lock:
@@ -103,6 +152,7 @@ class RepairCoordinator:
                     entry.job_id,
                     "persisted_for_restart",
                     shutdown_classification="interrupted",
+                    expected_states=("queued", "active"),
                 )
         self._executor.shutdown(wait=False, cancel_futures=True)
         return len(pending)

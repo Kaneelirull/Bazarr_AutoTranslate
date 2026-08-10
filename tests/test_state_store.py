@@ -1001,6 +1001,78 @@ class StateStoreTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_successful_source_readiness_is_hash_duration_and_config_scoped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            store = StateStore(
+                database, validator_version="validator-v1",
+                config_fingerprint="config-v1",
+            )
+            try:
+                store.record_source_readiness(
+                    media_identity="episode-1",
+                    video_path=Path(directory) / "episode.mkv",
+                    source_path=Path(directory) / "episode.eng.srt",
+                    source_language="en",
+                    source_hash="source-a",
+                    media_duration_seconds=2700,
+                    target_language="et",
+                )
+                self.assertIsNotNone(store.source_readiness(
+                    media_identity="episode-1", source_language="en",
+                    source_hash="source-a", media_duration_seconds=2700.4,
+                ))
+                self.assertIsNone(store.source_readiness(
+                    media_identity="episode-1", source_language="en",
+                    source_hash="source-b", media_duration_seconds=2700,
+                ))
+                self.assertIsNone(store.source_readiness(
+                    media_identity="episode-1", source_language="en",
+                    source_hash="source-a", media_duration_seconds=2701,
+                ))
+            finally:
+                store.close()
+            changed = StateStore(
+                database, validator_version="validator-v1",
+                config_fingerprint="config-v2",
+            )
+            try:
+                self.assertIsNone(changed.source_readiness(
+                    media_identity="episode-1", source_language="en",
+                    source_hash="source-a", media_duration_seconds=2700,
+                ))
+            finally:
+                changed.close()
+
+    def test_retention_protects_nonterminal_repair_and_retry_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = StateStore(root / "state.sqlite3")
+            try:
+                source = root / "source.eng.srt"
+                target = root / "target.et.srt"
+                artifact = root / "quarantine" / "target.et.srt"
+                store.enqueue_repair_job(
+                    dedupe_key="repair", target_language="et",
+                    source_path=source, target_path=target,
+                )
+                store.schedule_retry_plan(
+                    item_type="episodes", item_id=1, target_language="et",
+                    source_hash="source", failure_class="validation",
+                    rules=["invalid"], state="regeneration_waiting",
+                    eligible_completed_cycle=0, artifact_path=artifact,
+                )
+                protected = {
+                    os.path.normcase(os.path.abspath(path))
+                    for path in store.protected_artifact_paths()
+                }
+                self.assertTrue({
+                    os.path.normcase(os.path.abspath(path))
+                    for path in (source, target, artifact)
+                }.issubset(protected))
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()
