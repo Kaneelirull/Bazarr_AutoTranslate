@@ -12,6 +12,7 @@ sys.path.insert(0, str(REPO_ROOT / "docker"))
 
 from autotranslate.config import Config, ConfigError  # noqa: E402
 from autotranslate.lifecycle import LifecycleController  # noqa: E402
+from autotranslate.persistence.migrations import LATEST_SCHEMA_VERSION  # noqa: E402
 from autotranslate.scheduling.capacity import CapacityCoordinator  # noqa: E402
 from autotranslate.scheduling.locks import KeyedLockRegistry  # noqa: E402
 from autotranslate.scheduling.repairs import RepairCoordinator  # noqa: E402
@@ -158,7 +159,8 @@ class ArchitectureUpgradeTests(unittest.TestCase):
                         "SELECT version FROM schema_migrations"
                     )
                 }
-                self.assertTrue({9, 10, 11, 12, 13}.issubset(versions))
+                self.assertTrue({9, 10, 11, 12, 13, 14}.issubset(versions))
+                self.assertEqual(LATEST_SCHEMA_VERSION, max(versions))
                 self.assertEqual(store._connection.execute("PRAGMA user_version").fetchone()[0], 8)
                 tables = {
                     row[0] for row in store._connection.execute(
