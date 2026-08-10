@@ -11,7 +11,7 @@ class Migration:
     apply: Callable[[object], None]
 
 
-LATEST_SCHEMA_VERSION = 13
+LATEST_SCHEMA_VERSION = 14
 
 
 def applied_versions(connection) -> set[int]:
