@@ -109,6 +109,14 @@
       waiting_repair_completion: "Waiting for repairs",
       synchronizing: "Synchronizing Bazarr",
       pruning: "Pruning sidecars",
+      startup_wait: "Startup wait",
+      startup_sync: "Startup synchronization",
+      startup_cleanup: "Startup cleanup",
+      cycle_work: "Cycle work",
+      retry_recovery: "Retry recovery",
+      repair_drain: "Repair drain",
+      post_cycle_maintenance: "Post-cycle maintenance",
+      cooldown: "Cooldown",
     }[clean] || clean.replaceAll("_", " ");
   };
 
@@ -507,7 +515,7 @@
       </article>`;
     };
     const activeCircuits = (circuits || []).filter(
-      (entry) => (entry.state === "open" || entry.state === "half_open")
+      (entry) => (entry.state === "open" || entry.state === "half_open" || entry.state === "eligible")
         && entry.seriesTitle,
     );
     const breakerRows = activeCircuits.map((entry) => {
@@ -554,6 +562,33 @@
     </section>`;
   };
 
+  const renderRecoveryDiagnostics = (diagnostics) => {
+    const donors = diagnostics?.donors || {};
+    const repairs = diagnostics?.repairs || {};
+    const admissions = diagnostics?.retryAdmissions || {};
+    const provider = diagnostics?.providerHealth || {};
+    const maintenance = diagnostics?.maintenance || null;
+    const rows = [
+      ["Donor candidates selected", donors.selected],
+      ["Donors rejected by validation", donors.current_validation_failed],
+      ["Retry plans examined", admissions.examined],
+      ["Retry submissions", admissions.submitted],
+      ["No-progress admissions", admissions.no_progress],
+      ["Queued repair jobs", repairs.queued],
+      ["Restart-persisted repairs", repairs.persisted_for_restart],
+      ["Malformed provider responses", provider.malformed_response],
+    ];
+    const cards = rows.map(([label, value]) => (
+      `<div class="maintenance-item"><span class="maintenance-label">${escapeHtml(label)}</span>`
+      + `<strong class="maintenance-value">${number(value).toLocaleString()}</strong></div>`
+    )).join("");
+    const maintenanceNote = maintenance
+      ? `Latest maintenance: ${operationLabel(maintenance.operation)} - ${labelForState(maintenance.state)}`
+      : "No persisted maintenance run yet.";
+    return `<section class="panel">${panelHeader("Recovery reliability", maintenanceNote)}`
+      + `<div class="maintenance-grid">${cards}</div></section>`;
+  };
+
   const retryMedia = (plan) => ({
     title: plan.displayTitle || `${plan.itemType || "media"} ${plan.itemId ?? "?"}`,
     detail: [plan.episodeCode, plan.episodeTitle].filter(Boolean).join(" - "),
@@ -581,6 +616,7 @@
   };
 
   const retryNextAction = (plan, completedCycle) => {
+    if (plan.manualReview) return "Manual review";
     const reason = String(plan.lastReason || "").toLowerCase();
     if (reason.includes("circuit")) return "Waiting for circuit";
     if (plan.runtimeState === "waiting_lane") return "Waiting for lane";
@@ -886,6 +922,7 @@
       ${renderHeader(service, cycle)}
       ${renderOverview(cycle, service)}
       ${renderDiagnostics(snapshot.timing || {}, snapshot.circuits || [])}
+      ${renderRecoveryDiagnostics(service.recoveryDiagnostics || {})}
       ${renderRetryPlans(
         snapshot.retryPlans || [],
         snapshot.completedCycle || 0,

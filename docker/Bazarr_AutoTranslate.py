@@ -12,7 +12,13 @@ import logging
 import logging.handlers
 import queue
 import atexit
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    CancelledError,
+    Future,
+    ThreadPoolExecutor,
+    as_completed,
+    wait,
+)
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +96,68 @@ class _TeeStream:
     def encoding(self):
         return self.primary.encoding
 
+
+class _DaemonRepairExecutor:
+    """Minimal Future executor whose workers cannot block interpreter exit."""
+
+    def __init__(self, max_workers: int, thread_name_prefix: str):
+        self._queue: queue.Queue = queue.Queue()
+        self._lock = threading.Lock()
+        self._stopped = False
+        self._threads = [
+            threading.Thread(
+                target=self._worker,
+                name=f"{thread_name_prefix}_{index}",
+                daemon=True,
+            )
+            for index in range(max(1, int(max_workers)))
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def submit(self, function, /, *args, **kwargs) -> Future:
+        future = Future()
+        with self._lock:
+            if self._stopped:
+                raise RuntimeError("repair executor is shut down")
+            self._queue.put((future, function, args, kwargs))
+        return future
+
+    def _worker(self) -> None:
+        while True:
+            work = self._queue.get()
+            try:
+                if work is None:
+                    return
+                future, function, args, kwargs = work
+                if not future.set_running_or_notify_cancel():
+                    continue
+                try:
+                    future.set_result(function(*args, **kwargs))
+                except BaseException as exc:
+                    future.set_exception(exc)
+            finally:
+                self._queue.task_done()
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        with self._lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            if cancel_futures:
+                while True:
+                    try:
+                        work = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if work is not None:
+                        work[0].cancel()
+                    self._queue.task_done()
+            for _thread in self._threads:
+                self._queue.put(None)
+        if wait:
+            for thread in self._threads:
+                thread.join()
 
 class _DailyLogHandler(logging.Handler):
     def __init__(self, sink: _DailyLogSink):
@@ -225,6 +293,9 @@ CLEANUP_MAX_REPAIR_ATTEMPTS = max(1, int(os.getenv("CLEANUP_MAX_REPAIR_ATTEMPTS"
 CLEANUP_REPAIR_CONTEXT_LINES = max(0, int(os.getenv("CLEANUP_REPAIR_CONTEXT_LINES", "5")))
 CLEANUP_FORMAT_REPAIR_ENABLED = os.getenv("CLEANUP_FORMAT_REPAIR_ENABLED", "true").lower() in ("1", "true", "yes")
 CLEANUP_REPAIR_QUEUE_MAX = max(1, int(os.getenv("CLEANUP_REPAIR_QUEUE_MAX", "100")))
+REPAIR_SHUTDOWN_GRACE_SECONDS = max(
+    1, int(os.getenv("REPAIR_SHUTDOWN_GRACE_SECONDS", "30"))
+)
 CLEANUP_UNDERSIZED_ENABLED = os.getenv("CLEANUP_UNDERSIZED_ENABLED", "true").lower() in ("1", "true", "yes")
 CLEANUP_MIN_MEDIA_DURATION = max(0.0, float(os.getenv("CLEANUP_MIN_MEDIA_DURATION", "900")))
 CLEANUP_MIN_CUES_PER_MINUTE = max(0.0, float(os.getenv("CLEANUP_MIN_CUES_PER_MINUTE", "1.5")))
@@ -383,6 +454,7 @@ _validation_state_lock = threading.Lock()
 _cleanup_scan_lock = threading.Lock()
 _repair_executor = None
 _repair_executor_lock = threading.Lock()
+_repair_shutdown_event = threading.Event()
 _repair_capacity = threading.BoundedSemaphore(PARALLEL_TRANSLATES + CLEANUP_REPAIR_QUEUE_MAX)
 _pending_repairs: dict[Future, dict] = {}
 _pending_repairs_lock = threading.Lock()
@@ -974,12 +1046,19 @@ def _refresh_status_diagnostics() -> None:
                 if donor.get("sourceAttempt") is not None
             ]
             plan["latestDonorAttempt"] = donor_sources[0] if donor_sources else None
+            plan.update(
+                _get_validation_state().recovery_summary(
+                    plan["itemType"], plan["itemId"], plan["targetLanguage"]
+                )
+            )
+            plan["manualReview"] = plan.get("lastDeferralClass") == "manual_review"
         _status_tracker.set_diagnostics(
             timing={"file": file_timing, "repair": repair_timing},
             circuits=_get_validation_state().circuit_breakers(),
             retries=retry_plans,
             completed_cycle=_get_validation_state().completed_cycle(),
             retry_max_attempts=REGENERATION_MAX_ATTEMPTS,
+            recovery=_get_validation_state().diagnostic_aggregates(),
         )
     except (OSError, StateStoreError) as exc:
         print(f"{YELLOW}[STATUS] Could not refresh diagnostics: {exc}{RESET}")
@@ -1979,26 +2058,96 @@ def lingarr_translate_line(
     cue_number: int | None = None,
     attempt: int | None = None,
     outcome_meta: dict | None = None,
+    strict: bool = False,
+    cancellation_requested=None,
 ) -> str | None:
+    def record_provider_event(
+        classification: str,
+        *,
+        retryable: bool,
+        http_status: int | None = None,
+        payload=None,
+    ) -> None:
+        try:
+            state = _get_validation_state()
+            if not hasattr(state, "record_provider_event"):
+                return
+            shape = None
+            if payload is not None:
+                from autotranslate.services.lingarr import response_shape
+                shape = response_shape(payload)
+            state.record_provider_event(
+                provider="lingarr",
+                operation="translate_line",
+                classification=classification,
+                retryable=retryable,
+                http_status=http_status,
+                response_shape=shape,
+            )
+        except (OSError, StateStoreError):
+            pass
+
     body = {
         "subtitleLine": subtitle_line,
         "sourceLanguage": source_lang,
         "targetLanguage": target_lang,
-        "contextLinesBefore": context_before,
-        "contextLinesAfter": context_after,
+        "contextLinesBefore": [] if strict else context_before,
+        "contextLinesAfter": [] if strict else context_after,
     }
+    if strict:
+        body["instructions"] = (
+            "Return only the translated subtitle cue in the requested target "
+            "language and script. Do not include commentary or surrounding dialogue."
+        )
     dbg(
         f"lingarr_translate_line: POST source={source_lang} target={target_lang} "
         f"before={len(context_before)} after={len(context_after)} chars={len(subtitle_line)}"
     )
     started = time.monotonic()
     try:
-        r = requests.post(
-            lingarr_url("Translate/line"),
-            headers=LINGARR_HEADERS,
-            json=body,
-            timeout=max(CONNECT_TIMEOUT, 120),
-        )
+        request_args = {
+            "headers": LINGARR_HEADERS,
+            "json": body,
+            # Normal provider reliability is independent of shutdown grace.
+            "timeout": max(CONNECT_TIMEOUT, 120),
+        }
+        if cancellation_requested is None:
+            r = requests.post(lingarr_url("Translate/line"), **request_args)
+        else:
+            request_result: queue.Queue = queue.Queue(maxsize=1)
+
+            def run_request() -> None:
+                try:
+                    request_result.put((requests.post(
+                        lingarr_url("Translate/line"), **request_args
+                    ), None))
+                except Exception as exc:  # forwarded to the repair worker
+                    request_result.put((None, exc))
+
+            # A timed-out provider socket must not hold application shutdown.
+            # The daemon owns only the HTTP call; all state writes remain here.
+            threading.Thread(
+                target=run_request,
+                name="lingarr-line-request",
+                daemon=True,
+            ).start()
+            while True:
+                if cancellation_requested():
+                    if outcome_meta is not None:
+                        outcome_meta.update({
+                            "cancelled": True,
+                            "httpDurationSeconds": round(
+                                time.monotonic() - started, 3
+                            ),
+                        })
+                    return None
+                try:
+                    r, request_error = request_result.get(timeout=0.1)
+                    break
+                except queue.Empty:
+                    continue
+            if request_error is not None:
+                raise request_error
         elapsed = time.monotonic() - started
         if outcome_meta is not None:
             outcome_meta.update({"httpStatus": r.status_code, "httpDurationSeconds": round(elapsed, 3)})
@@ -2012,17 +2161,43 @@ def lingarr_translate_line(
             payload = r.text
 
         if isinstance(payload, str) and payload.strip():
+            record_provider_event(
+                "success", retryable=False, http_status=r.status_code, payload=payload
+            )
             return payload.strip()
         if isinstance(payload, dict):
             for key in ("translatedSubtitle", "translatedLine", "translation", "text"):
                 value = payload.get(key)
                 if isinstance(value, str) and value.strip():
+                    record_provider_event(
+                        "success",
+                        retryable=False,
+                        http_status=r.status_code,
+                        payload=payload,
+                    )
                     return value.strip()
+        record_provider_event(
+            "malformed_response",
+            retryable=True,
+            http_status=r.status_code,
+            payload=payload,
+        )
         print(f"{RED}[ERROR] lingarr_translate_line: unexpected response shape{RESET}")
     except Exception as e:
         elapsed = time.monotonic() - started
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        retryable = status is None or status == 429 or status >= 500
+        record_provider_event(
+            (
+                "transport"
+                if status is None
+                else "http_retryable" if retryable else "http_permanent"
+            ),
+            retryable=retryable,
+            http_status=status,
+        )
         if outcome_meta is not None:
-            outcome_meta.update({"httpStatus": getattr(getattr(e, "response", None), "status_code", None), "httpDurationSeconds": round(elapsed, 3)})
+            outcome_meta.update({"httpStatus": status, "httpDurationSeconds": round(elapsed, 3)})
         print(f"{RED}[ERROR] lingarr_translate_line failed after {elapsed:.1f}s: {e}{RESET}")
     return None
 
@@ -3012,6 +3187,8 @@ def _apply_cleanup_action(
     item_type: str | None = None,
     item_id: int | None = None,
     donor_history: list[dict] | None = None,
+    candidate_raw: str | None = None,
+    partial_candidate_id: int | None = None,
     dry_run: bool = False,
 ) -> str:
     from clean_et_subs import (
@@ -3022,7 +3199,10 @@ def _apply_cleanup_action(
 
     target = Path(target_path)
     source_hash = _file_hash_or_none(source_path)
-    target_hash = _file_hash_or_none(target)
+    candidate_temp: Path | None = None
+    if candidate_raw is not None:
+        candidate_temp = _write_recovery_candidate(target, candidate_raw)
+    target_hash = _file_hash_or_none(candidate_temp or target)
     audit = {
         "sourcePath": str(source_path) if source_path is not None else None,
         "targetPath": str(target),
@@ -3066,6 +3246,58 @@ def _apply_cleanup_action(
             destination = quarantine_destination(
                 target, CLEANUP_ROOTS, CLEANUP_QUARANTINE_DIR
             )
+            input_destination = None
+            pending_metadata = {
+                "rules": [issue.rule for issue in report.issues],
+                "holdIdentity": _quarantine_identity(target_lang, target_path=target),
+                "phase": "intent",
+                "audit": audit,
+            }
+            if candidate_temp is not None:
+                input_destination = destination.with_name(
+                    f"{destination.stem}.input{destination.suffix}"
+                )
+                counter = 1
+                while input_destination.exists():
+                    input_destination = destination.with_name(
+                        f"{destination.stem}.input.{counter}{destination.suffix}"
+                    )
+                    counter += 1
+                pending_metadata.update({
+                    "candidatePath": str(candidate_temp),
+                    "candidateHash": target_hash,
+                    "inputDestination": str(input_destination),
+                })
+            attempt_payload = None
+            if (
+                item_type in ("episodes", "movies")
+                and item_id is not None
+                and source_hash is not None
+            ):
+                from clean_et_subs import source_cue_signatures
+                state_store = _get_validation_state()
+                active_plan = state_store.active_retry_plan(
+                    item_type, item_id, target_lang
+                )
+                attempt_payload = {
+                    "item_type": item_type,
+                    "item_id": item_id,
+                    "target_language": target_lang,
+                    "source_hash": source_hash,
+                    "target_hash": target_hash,
+                    "attempt_number": (
+                        int(active_plan["attemptCount"]) + 1
+                        if active_plan else 1
+                    ),
+                    "artifact_path": str(destination),
+                    "report_path": f"{destination}.validation.json",
+                    "failure_rules": [issue.rule for issue in report.issues],
+                    "cue_signatures": source_cue_signatures(source_path),
+                    "repair_provenance": attempt_history or [],
+                    "donor_provenance": donor_history or [],
+                }
+                pending_metadata["quarantineAttempt"] = attempt_payload
+                pending_metadata["partialCandidateId"] = partial_candidate_id
             artifact = _get_validation_state().latest_artifact(target, target_hash)
             if artifact is None:
                 artifact_id = _get_validation_state().record_artifact_version(
@@ -3082,12 +3314,7 @@ def _apply_cleanup_action(
                     ),
                     disposition="quarantine_pending",
                     pending_destination=destination,
-                    pending_metadata={
-                        "rules": [issue.rule for issue in report.issues],
-                        "holdIdentity": _quarantine_identity(
-                            target_lang, target_path=target
-                        ),
-                    },
+                    pending_metadata=pending_metadata,
                 )
             else:
                 artifact_id = int(artifact["id"])
@@ -3095,25 +3322,67 @@ def _apply_cleanup_action(
                     artifact_id,
                     "quarantine_pending",
                     pending_destination=destination,
-                    pending_metadata={
-                        "rules": [issue.rule for issue in report.issues],
-                        "holdIdentity": _quarantine_identity(
-                            target_lang, target_path=target
-                        ),
-                    },
+                    pending_metadata=pending_metadata,
                 )
-            destination = quarantine_subtitle(
-                target,
-                CLEANUP_ROOTS,
-                CLEANUP_QUARANTINE_DIR,
-                destination=destination,
-            )
+            if candidate_temp is not None:
+                candidate_to_move = candidate_temp
+                # The persisted operation owns this temporary file now; the
+                # local cleanup path must not delete it after an interruption.
+                candidate_temp = None
+                # Remove the invalid published sidecar first. If the process
+                # stops after this move, startup reconciliation can finish the
+                # candidate move without republishing the invalid input.
+                quarantine_subtitle(
+                    target,
+                    CLEANUP_ROOTS,
+                    CLEANUP_QUARANTINE_DIR,
+                    destination=input_destination,
+                )
+                pending_metadata["phase"] = "input_archived"
+                _get_validation_state().set_artifact_disposition(
+                    artifact_id, "quarantine_pending",
+                    pending_destination=destination,
+                    pending_metadata=pending_metadata,
+                )
+                destination = quarantine_subtitle(
+                    candidate_to_move, CLEANUP_ROOTS, CLEANUP_QUARANTINE_DIR,
+                    destination=destination,
+                )
+                audit["supersededInputArtifact"] = input_destination.name
+                audit["partialCandidate"] = True
+            else:
+                destination = quarantine_subtitle(
+                    target, CLEANUP_ROOTS, CLEANUP_QUARANTINE_DIR,
+                    destination=destination,
+                )
+            if _file_hash_or_none(destination) != target_hash:
+                raise StateStoreError(
+                    "quarantine destination hash does not match persisted intent"
+                )
+            pending_metadata["phase"] = "candidate_archived"
+            pending_metadata["audit"] = audit
             _get_validation_state().set_artifact_disposition(
-                artifact_id, "quarantined"
+                artifact_id, "quarantine_pending",
+                pending_destination=destination,
+                pending_metadata=pending_metadata,
             )
-            event, repeated = _record_quarantine_event(
-                target, target_lang, target_hash, report, origin
+            hold_identity = _quarantine_identity(
+                target_lang, target_path=target
             )
+            if hold_identity is not None:
+                event, repeated, pending_metadata = (
+                    _get_validation_state().record_pending_quarantine_hold(
+                        artifact_id,
+                        identity=hold_identity,
+                        target_path=target,
+                        target_hash=target_hash,
+                        target_language=target_lang,
+                        rules=(issue.rule for issue in report.issues),
+                        origin=origin,
+                    )
+                )
+            else:
+                event, repeated = None, False
             suppression = _cycle_suppressions.suppress(
                 _quarantine_identity(target_lang, target_path=target),
                 action="quarantined",
@@ -3122,47 +3391,30 @@ def _apply_cleanup_action(
             if event is not None:
                 audit["quarantineEvent"] = event
                 audit["repeatOffender"] = repeated
+                if repeated:
+                    print(
+                        f"[CLEANUP] Repeat offender hash for "
+                        f"{os.path.basename(str(target))}; historical occurrence "
+                        f"{event['occurrences']}"
+                    )
             if suppression is not None:
                 audit["cycleSuppression"] = suppression
-            report_path = None
-            try:
-                report_path = write_validation_report(destination, audit)
-            except OSError as e:
-                print(f"{YELLOW}[WARNING] Quarantined file but could not write report: {e}{RESET}")
-            if (
-                item_type in ("episodes", "movies")
-                and item_id is not None
-                and source_hash is not None
-                and target_hash is not None
-            ):
-                from clean_et_subs import source_cue_signatures
-                try:
-                    state_store = _get_validation_state()
-                    active_plan = state_store.active_retry_plan(
-                        item_type, item_id, target_lang
-                    )
-                    state_store.record_quarantine_attempt(
-                        item_type=item_type,
-                        item_id=item_id,
-                        target_language=target_lang,
-                        source_hash=source_hash,
-                        target_hash=target_hash,
-                        attempt_number=(
-                            int(active_plan["attemptCount"]) + 1
-                            if active_plan else 1
-                        ),
-                        artifact_path=destination,
-                        report_path=report_path,
-                        failure_rules=(issue.rule for issue in report.issues),
-                        cue_signatures=source_cue_signatures(source_path),
-                        repair_provenance=attempt_history or [],
-                        donor_provenance=donor_history or [],
-                    )
-                except StateStoreError as exc:
-                    print(
-                        f"{YELLOW}[WARNING] Quarantined file but could not "
-                        f"archive donor metadata: {exc}{RESET}"
-                    )
+            report_path = write_validation_report(destination, audit)
+            pending_metadata["phase"] = "report_written"
+            pending_metadata["audit"] = audit
+            if attempt_payload is not None:
+                attempt_payload["report_path"] = str(report_path)
+                pending_metadata["quarantineAttempt"] = attempt_payload
+            _get_validation_state().set_artifact_disposition(
+                artifact_id, "quarantine_pending",
+                pending_destination=destination,
+                pending_metadata=pending_metadata,
+            )
+            _get_validation_state().finalize_quarantine_operation(
+                artifact_id,
+                attempt=attempt_payload,
+                partial_candidate_id=partial_candidate_id,
+            )
             _record_validation_result(
                 target,
                 source_hash,
@@ -3183,6 +3435,12 @@ def _apply_cleanup_action(
         except (OSError, StateStoreError) as e:
             print(f"{RED}[ERROR] Could not quarantine {target}: {e}{RESET}")
             return "action-failed"
+        finally:
+            if candidate_temp is not None:
+                try:
+                    candidate_temp.unlink()
+                except OSError:
+                    pass
 
     try:
         if target_hash is None:
@@ -3373,10 +3631,28 @@ def _perform_repair(
     series_key: str | None = None,
     series_title: str | None = None,
     status_ref: dict | None = None,
+    cancellation_requested=None,
+    publication_guard=None,
+    trial_owner: str | None = None,
+    trial_job_id: int | None = None,
+    trial_plan_id: int | None = None,
+    trial_generation: int | None = None,
 ) -> RepairJobResult:
     from clean_et_subs import repair_subtitle_file, target_language_for_code
 
     label = title or os.path.basename(target_path)
+    publication_admitted = False
+
+    def admit_publication() -> bool:
+        nonlocal publication_admitted
+        if publication_admitted:
+            return True
+        if cancellation_requested is not None and cancellation_requested():
+            return False
+        if publication_guard is not None and not publication_guard():
+            return False
+        publication_admitted = True
+        return True
     detector = _get_cleanup_detector()
     target_language = target_language_for_code(target_lang)
     if detector is None or target_language is None:
@@ -3418,6 +3694,29 @@ def _perform_repair(
         def attempt_logger(event: dict) -> None:
             attempt_state.clear()
             attempt_state.update(event)
+            if (
+                event.get("event") == "rejected"
+                and event.get("outputFingerprint")
+                and event.get("sourceCueHash")
+                and item_type in ("episodes", "movies")
+                and item_id is not None
+                and expected_source_hash
+            ):
+                try:
+                    _get_validation_state().record_failure_fingerprint(
+                        item_type=item_type,
+                        item_id=item_id,
+                        target_language=target_lang,
+                        source_file_hash=expected_source_hash,
+                        source_cue_hash=event["sourceCueHash"],
+                        strategy_key=event.get("strategy") or "unknown",
+                        provider="lingarr",
+                        config_fingerprint=_VALIDATION_CONFIG_FINGERPRINT,
+                        output_fingerprint=event["outputFingerprint"],
+                        failure_class=",".join(event.get("validationRules") or ["validation"]),
+                    )
+                except StateStoreError as exc:
+                    print(f"{YELLOW}[REPAIR] Could not persist failure fingerprint: {exc}{RESET}")
             if event["event"] == "donor_accepted":
                 print(
                     f"[DONOR] Cue {event.get('cueNumber')} recovered from "
@@ -3487,6 +3786,8 @@ def _perform_repair(
             _status_ref_transition(status_ref, state, details=details)
 
         def translator(line: str, before: list[str], after: list[str]):
+            if cancellation_requested is not None and cancellation_requested():
+                return None, {"cancelled": True}
             outcome_meta: dict = {}
             translated = lingarr_translate_line(
                 line,
@@ -3498,13 +3799,32 @@ def _perform_repair(
                 cue_number=attempt_state.get("cueNumber"),
                 attempt=attempt_state.get("attempt"),
                 outcome_meta=outcome_meta,
+                strict=attempt_state.get("strategy") == "strict_isolated",
+                cancellation_requested=cancellation_requested,
             )
             return translated, outcome_meta
+
+        def donor_event_logger(event: dict) -> None:
+            if item_type not in ("episodes", "movies") or item_id is None:
+                return
+            try:
+                _get_validation_state().record_donor_event(
+                    item_type=item_type,
+                    item_id=item_id,
+                    target_language=target_lang,
+                    cue_number=event.get("cueNumber"),
+                    donor_attempt_id=event.get("donorAttemptId"),
+                    reason_code=event.get("reasonCode") or "current_validation_failed",
+                )
+            except StateStoreError as exc:
+                print(f"{YELLOW}[DONOR] Could not persist donor diagnostic: {exc}{RESET}")
 
         cue_list = ", ".join(str(i + 1) for i in initial_report.repairable_cue_indexes)
         print(f"[REPAIR] Retrying {label} '{target_lang}' cue position(s): {cue_list}")
         try:
             donor_attempts = []
+            cue_recoveries = []
+            exhausted_strategies = {}
             if (
                 DONOR_RECOVERY_ENABLED
                 and item_type in ("episodes", "movies")
@@ -3513,6 +3833,25 @@ def _perform_repair(
                 donor_attempts = _get_validation_state().quarantine_attempts(
                     item_type, item_id, target_lang
                 )
+                cue_recoveries = _get_validation_state().cue_recoveries(
+                    item_type,
+                    item_id,
+                    target_lang,
+                    source_file_hash=expected_source_hash,
+                )
+                if expected_source_hash and hasattr(
+                    _get_validation_state(), "exhausted_recovery_strategies"
+                ):
+                    exhausted_strategies = (
+                        _get_validation_state().exhausted_recovery_strategies(
+                            item_type=item_type,
+                            item_id=item_id,
+                            target_language=target_lang,
+                            source_file_hash=expected_source_hash,
+                            provider="lingarr",
+                            config_fingerprint=_VALIDATION_CONFIG_FINGERPRINT,
+                        )
+                    )
             repair = repair_subtitle_file(
                 Path(source_path),
                 working_path,
@@ -3525,12 +3864,30 @@ def _perform_repair(
                 attempt_logger=attempt_logger,
                 progress_callback=progress_callback,
                 donor_attempts=donor_attempts,
+                cue_recoveries=cue_recoveries,
+                donor_event_logger=donor_event_logger,
+                exhausted_strategies=exhausted_strategies,
+                cancellation_requested=lambda: (
+                    cancellation_requested is not None and cancellation_requested()
+                ) if cancellation_requested is not None else None,
                 **_validation_kwargs(),
             )
             second_attempts = sum(
                 entry.get("attempt", 0) > 1 and entry.get("withoutContext")
                 for entry in repair.attempt_history
             )
+            if repair.interrupted or (
+                cancellation_requested is not None and cancellation_requested()
+            ):
+                print(
+                    f"[REPAIR] Persisted {label} '{target_lang}' for restart "
+                    "after shutdown interruption"
+                )
+                return RepairJobResult(
+                    "repair-deferred", repair.report, label, target_lang,
+                    item_type, item_id, repair.attempts, second_attempts,
+                    str(target_path),
+                )
             if repair.success:
                 if (
                     expected_source_hash is not None
@@ -3563,6 +3920,12 @@ def _perform_repair(
                 )
                 candidate_hash = _file_hash_or_none(recovery_temp)
                 if candidate_hash is None:
+                    return RepairJobResult(
+                        "repair-deferred", repair.report, label, target_lang,
+                        item_type, item_id, repair.attempts, second_attempts,
+                        str(target_path),
+                    )
+                if not admit_publication():
                     return RepairJobResult(
                         "repair-deferred", repair.report, label, target_lang,
                         item_type, item_id, repair.attempts, second_attempts,
@@ -3651,6 +4014,72 @@ def _perform_repair(
                 )
 
             print(f"{YELLOW}[REPAIR] Could not repair {label} '{target_lang}': {repair.reason}{RESET}")
+            if repair.manual_review:
+                setattr(repair.report, "manual_review", True)
+            partial_id = None
+            if (
+                repair.partial_raw
+                and repair.repaired_cues
+                and item_type in ("episodes", "movies")
+                and item_id is not None
+                and expected_source_hash
+            ):
+                try:
+                    from clean_et_subs import (
+                        cue_source_signature,
+                        parse_srt_cues,
+                        read_text_best_effort,
+                    )
+                    source_raw = read_text_best_effort(Path(source_path)) or ""
+                    source_cues, source_errors = parse_srt_cues(source_raw)
+                    partial_cues, partial_errors = parse_srt_cues(repair.partial_raw)
+                    partial_hash = hashlib.sha256(
+                        repair.partial_raw.encode("utf-8")
+                    ).hexdigest()
+                    if not source_errors and not partial_errors:
+                        partial_id = _get_validation_state().record_partial_candidate(
+                            item_type=item_type,
+                            item_id=item_id,
+                            source_language=source_lang,
+                            target_language=target_lang,
+                            source_hash=expected_source_hash,
+                            target_hash=partial_hash,
+                            changed_cues=repair.repaired_cues,
+                            unresolved_cues=repair.unresolved_cues,
+                            provenance=repair.attempt_history + repair.donor_history,
+                            artifact_path=None,
+                        )
+                        changed = set(repair.repaired_cues)
+                        by_number = {cue.number: cue for cue in partial_cues}
+                        for source_cue in source_cues:
+                            target_cue = by_number.get(source_cue.number)
+                            if source_cue.number not in changed or target_cue is None:
+                                continue
+                            signature = cue_source_signature(source_cue)
+                            target_text = target_cue.text
+                            _get_validation_state().record_cue_recovery(
+                                partial_candidate_id=partial_id,
+                                item_type=item_type,
+                                item_id=item_id,
+                                source_language=source_lang,
+                                target_language=target_lang,
+                                source_file_hash=expected_source_hash,
+                                source_cue_number=source_cue.number,
+                                source_cue_hash=signature["sourceHash"],
+                                source_signature=signature,
+                                cue_start_ms=signature.get("startMs"),
+                                target_text=target_text,
+                                target_hash=hashlib.sha256(target_text.encode("utf-8")).hexdigest(),
+                                recovery_stage="cue_repair",
+                            )
+                except (OSError, StateStoreError) as exc:
+                    print(f"{YELLOW}[REPAIR] Could not persist partial progress: {exc}{RESET}")
+            if not admit_publication():
+                return RepairJobResult(
+                    "repair-deferred", repair.report, label, target_lang,
+                    item_type, item_id, repair.attempts, second_attempts,
+                    str(target_path),
+                )
             action = _apply_cleanup_action(
                 target_path,
                 source_path,
@@ -3666,6 +4095,10 @@ def _perform_repair(
                 item_type=item_type,
                 item_id=item_id,
                 donor_history=repair.donor_history,
+                candidate_raw=(
+                    repair.partial_raw if CLEANUP_ACTION == "quarantine" else None
+                ),
+                partial_candidate_id=partial_id,
             )
             if action in ("quarantined", "deleted") and item_id is not None:
                 _clear_submission(item_id, target_lang, item_type)
@@ -3683,11 +4116,14 @@ def _perform_repair(
                     pass
 
 
-def _get_repair_executor() -> ThreadPoolExecutor:
+def _get_repair_executor() -> _DaemonRepairExecutor:
     global _repair_executor
     with _repair_executor_lock:
         if _repair_executor is None:
-            _repair_executor = ThreadPoolExecutor(
+            if shutdown_requested:
+                raise RuntimeError("repair admission stopped during shutdown")
+            _repair_shutdown_event.clear()
+            _repair_executor = _DaemonRepairExecutor(
                 max_workers=PARALLEL_TRANSLATES,
                 thread_name_prefix="repair-worker",
             )
@@ -3697,9 +4133,11 @@ def _get_repair_executor() -> ThreadPoolExecutor:
 def _run_repair_with_capacity(
     capacity_token: int,
     job_kwargs: dict,
-    status_ref: dict | None = None,
+    metadata: dict,
 ) -> RepairJobResult:
     """Run one repair after its priority reservation obtains shared capacity."""
+    status_ref = metadata.get("status_ref")
+    durable_job_id = metadata.get("durable_job_id")
     _status_ref_transition(
         status_ref,
         "repair_waiting_capacity",
@@ -3707,14 +4145,56 @@ def _run_repair_with_capacity(
     )
     if not _shared_capacity.start_repair(capacity_token):
         _shared_capacity.release(capacity_token)
-        raise RuntimeError("shared repair capacity unavailable during shutdown")
+        if durable_job_id is not None:
+            try:
+                _get_validation_state().transition_repair_job(
+                    durable_job_id,
+                    "persisted_for_restart",
+                    shutdown_classification="cancelled_before_start",
+                    expected_states=("queued", "persisted_for_restart"),
+                )
+            except StateStoreError:
+                pass
+        return RepairJobResult(
+            "repair-deferred",
+            job_kwargs.get("initial_report"),
+            job_kwargs.get("title") or "",
+            job_kwargs.get("target_lang") or "",
+            job_kwargs.get("item_type"),
+            job_kwargs.get("item_id"),
+            target_path=str(job_kwargs.get("target_path") or ""),
+        )
     try:
+        if durable_job_id is not None:
+            try:
+                _get_validation_state().transition_repair_job(
+                    durable_job_id,
+                    "active",
+                    lease_owner=f"worker:{threading.current_thread().name}",
+                    lease_expires_at=time.time() + REPAIR_SHUTDOWN_GRACE_SECONDS,
+                    expected_states=("queued", "persisted_for_restart"),
+                )
+            except StateStoreError as exc:
+                print(f"{YELLOW}[REPAIR] Durable lease update failed: {exc}{RESET}")
         _status_ref_transition(
             status_ref, "repairing", details={"repairStage": "starting"}
         )
         repair_kwargs = dict(job_kwargs)
         repair_kwargs.pop("maintenance_scan_job_id", None)
-        return _perform_repair(**repair_kwargs, status_ref=status_ref)
+        repair_kwargs["cancellation_requested"] = _repair_shutdown_event.is_set
+
+        def begin_publication() -> bool:
+            with metadata["publication_lock"]:
+                if _repair_shutdown_event.is_set():
+                    return False
+                metadata["publication_started"] = True
+                return True
+
+        return _perform_repair(
+            **repair_kwargs,
+            status_ref=status_ref,
+            publication_guard=begin_publication,
+        )
     finally:
         _shared_capacity.release(capacity_token)
 
@@ -3729,7 +4209,24 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
             metadata["status_published"] = True
     try:
         result = future.result()
+    except CancelledError:
+        _complete_repair_status(
+            metadata,
+            "deferred",
+            reason="repair persisted for restart during shutdown",
+        )
+        _scan_child_finished(metadata.get("maintenance_scan_job_id"), "deferred")
+        return
     except Exception:
+        durable_job_id = metadata.get("durable_job_id")
+        if durable_job_id is not None and not metadata.get("shutdown_classification"):
+            try:
+                _get_validation_state().transition_repair_job(
+                    durable_job_id, "failed", error_code="worker_exception",
+                    expected_states=("queued", "active"),
+                )
+            except StateStoreError:
+                pass
         _complete_repair_status(
             metadata,
             "failed",
@@ -3737,6 +4234,26 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
         )
         _scan_child_finished(metadata.get("maintenance_scan_job_id"), "failed")
         return
+
+    durable_job_id = metadata.get("durable_job_id")
+    if durable_job_id is not None:
+        try:
+            if result.action == "repair-deferred":
+                _get_validation_state().transition_repair_job(
+                    durable_job_id,
+                    "persisted_for_restart",
+                    shutdown_classification="deferred",
+                    expected_states=("queued", "active"),
+                )
+            else:
+                _get_validation_state().transition_repair_job(
+                    durable_job_id,
+                    "completed" if result.action in ("repaired", "quarantined", "deleted") else "failed",
+                    error_code=(None if result.action in ("repaired", "quarantined", "deleted") else result.action),
+                    expected_states=("queued", "active"),
+                )
+        except StateStoreError as exc:
+            print(f"{YELLOW}[REPAIR] Durable completion update failed: {exc}{RESET}")
 
     if result.action in ("repaired", "quarantined", "deleted"):
         series_key = metadata.get("series_key")
@@ -3755,6 +4272,10 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
                     threshold=CIRCUIT_FAILURE_THRESHOLD,
                     open_cycles=CIRCUIT_OPEN_CYCLES,
                     config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+                    trial_owner=metadata.get("trial_owner"),
+                    trial_job_id=metadata.get("trial_job_id"),
+                    trial_plan_id=metadata.get("trial_plan_id"),
+                    lease_generation=metadata.get("trial_generation"),
                 )
                 _refresh_status_diagnostics()
             except StateStoreError as exc:
@@ -3875,20 +4396,47 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
                 status_ref, "deferred", reason="repair queue full"
             )
             return "repair-deferred"
-        _repair_keys.add(repair_key)
-        capacity_token = _shared_capacity.reserve_repair()
-        try:
-            future = _get_repair_executor().submit(
-                _run_repair_with_capacity, capacity_token, job_kwargs, status_ref
-            )
-        except Exception:
-            _repair_keys.discard(repair_key)
-            _shared_capacity.release(capacity_token)
-            _repair_capacity.release()
-            _status_ref_complete(
-                status_ref, "failed", reason="repair worker submission failed"
-            )
-            raise
+        durable_job_id = None
+        state = _get_validation_state()
+        if hasattr(state, "enqueue_repair_job"):
+            try:
+                durable_key = hashlib.sha256(
+                    repr((
+                        job_kwargs.get("item_type"), job_kwargs.get("item_id"),
+                        target_lang, job_kwargs.get("expected_source_hash"),
+                        job_kwargs.get("expected_target_hash"),
+                        tuple(getattr(report, "repairable_cue_indexes", []) or []),
+                    )).encode("utf-8")
+                ).hexdigest()
+                durable_job_id = state.enqueue_repair_job(
+                    dedupe_key=durable_key,
+                    item_type=job_kwargs.get("item_type"),
+                    item_id=job_kwargs.get("item_id"),
+                    target_language=target_lang,
+                    source_path=job_kwargs.get("source_path"),
+                    target_path=job_kwargs.get("target_path"),
+                    source_hash=job_kwargs.get("expected_source_hash"),
+                    target_hash=job_kwargs.get("expected_target_hash"),
+                    cue_indexes=getattr(report, "repairable_cue_indexes", []) or [],
+                    payload={
+                        "origin": job_kwargs.get("origin"),
+                        "sourceLanguage": job_kwargs.get("source_lang"),
+                        "title": job_kwargs.get("title"),
+                        "seriesKey": job_kwargs.get("series_key"),
+                        "seriesTitle": job_kwargs.get("series_title"),
+                        "trialOwner": job_kwargs.get("trial_owner"),
+                        "trialJobId": job_kwargs.get("trial_job_id"),
+                        "trialPlanId": job_kwargs.get("trial_plan_id"),
+                        "trialGeneration": job_kwargs.get("trial_generation"),
+                    },
+                )
+            except StateStoreError as exc:
+                _repair_capacity.release()
+                _status_ref_complete(
+                    status_ref, "deferred", reason="repair persistence unavailable"
+                )
+                print(f"{YELLOW}[REPAIR] Could not persist repair before submit: {exc}{RESET}")
+                return "repair-deferred"
         metadata = {
             "key": repair_key,
             "report": report,
@@ -3900,12 +4448,36 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             "source_path": job_kwargs.get("source_path"),
             "series_key": job_kwargs.get("series_key"),
             "series_title": job_kwargs.get("series_title"),
+            "trial_owner": job_kwargs.get("trial_owner"),
+            "trial_job_id": job_kwargs.get("trial_job_id"),
+            "trial_plan_id": job_kwargs.get("trial_plan_id"),
+            "trial_generation": job_kwargs.get("trial_generation"),
             "queued_monotonic": time.monotonic(),
             "status_ref": status_ref,
             "maintenance_scan_job_id": job_kwargs.get("maintenance_scan_job_id"),
             "status_lock": threading.Lock(),
             "status_published": False,
+            "durable_job_id": durable_job_id,
+            "publication_lock": threading.Lock(),
+            "publication_started": False,
         }
+        _repair_keys.add(repair_key)
+        capacity_token = _shared_capacity.reserve_repair()
+        try:
+            future = _get_repair_executor().submit(
+                _run_repair_with_capacity,
+                capacity_token,
+                job_kwargs,
+                metadata,
+            )
+        except Exception:
+            _repair_keys.discard(repair_key)
+            _shared_capacity.release(capacity_token)
+            _repair_capacity.release()
+            _status_ref_complete(
+                status_ref, "failed", reason="repair worker submission failed"
+            )
+            raise
         _pending_repairs[future] = metadata
         _scan_child_queued(metadata.get("maintenance_scan_job_id"))
     future.add_done_callback(
@@ -3993,8 +4565,69 @@ def _shutdown_repair_executor() -> None:
         executor = _repair_executor
         _repair_executor = None
     if executor is not None:
-        print("[REPAIR] Waiting for active repair worker(s) to stop")
-        executor.shutdown(wait=True, cancel_futures=False)
+        _repair_shutdown_event.set()
+        print(
+            f"[REPAIR] Draining active repair worker(s) for up to "
+            f"{REPAIR_SHUTDOWN_GRACE_SECONDS}s"
+        )
+        with _pending_repairs_lock:
+            pending_metadata = list(_pending_repairs.items())
+            futures = [future for future, _metadata in pending_metadata]
+        for future, metadata in pending_metadata:
+            if future.running() or future.done():
+                continue
+            # Future.cancel() invokes callbacks synchronously. Persist and
+            # classify first so the callback cannot misreport cancellation as
+            # a worker failure.
+            metadata["shutdown_classification"] = "cancelled_before_start"
+            durable_job_id = metadata.get("durable_job_id")
+            if durable_job_id is not None:
+                try:
+                    _get_validation_state().transition_repair_job(
+                        durable_job_id,
+                        "persisted_for_restart",
+                        shutdown_classification="cancelled_before_start",
+                        expected_states=("queued",),
+                    )
+                except StateStoreError:
+                    pass
+            future.cancel()
+        deadline = time.monotonic() + max(0, REPAIR_SHUTDOWN_GRACE_SECONDS)
+        _done, pending = wait(
+            futures,
+            timeout=max(0.0, deadline - time.monotonic()),
+        )
+        for future, metadata in pending_metadata:
+            if future not in pending:
+                continue
+            if future.done():
+                continue
+            with metadata["publication_lock"]:
+                publication_started = bool(metadata.get("publication_started"))
+            classification = (
+                "publishing_interrupted"
+                if publication_started
+                else "interrupted" if future.running()
+                else "cancelled_before_start"
+            )
+            metadata["shutdown_classification"] = classification
+            durable_job_id = metadata.get("durable_job_id")
+            if durable_job_id is not None:
+                try:
+                    _get_validation_state().transition_repair_job(
+                        durable_job_id,
+                        "active" if publication_started else "persisted_for_restart",
+                        shutdown_classification=classification,
+                        expected_states=("active",) if publication_started else ("queued", "active"),
+                    )
+                except StateStoreError:
+                    pass
+            if not publication_started:
+                future.cancel()
+        # Running repairs observe the cancellation event; their HTTP call is
+        # isolated in a daemon request thread. Never introduce an unbounded
+        # executor join after the configured drain deadline.
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _regeneration_delay_cycles(attempts: int) -> int:
@@ -4103,6 +4736,14 @@ def _schedule_validation_retry(
             eligible_completed_cycle=eligible_cycle,
             reason=getattr(report, "summary", lambda: action)(),
         )
+        if getattr(report, "manual_review", False):
+            plan = state_store.reschedule_retry_no_progress(
+                plan["id"],
+                completed_cycle=_completed_cycle,
+                deferral_class="manual_review",
+                reason="no materially new recovery strategy remains",
+                delay_cycles=1,
+            ) or plan
         print(
             f"[RETRY] {'Observed unchanged' if repeated else 'Scheduled'} "
             f"{title} '{target_lang}': state={plan['state']} "
@@ -4160,6 +4801,10 @@ def _validate_translated_file(
     series_key: str | None = None,
     series_title: str | None = None,
     maintenance_scan_job_id: str | None = None,
+    trial_owner: str | None = None,
+    trial_job_id: int | None = None,
+    trial_plan_id: int | None = None,
+    trial_generation: int | None = None,
 ) -> tuple[str, object]:
     if target_lang not in CLEANUP_LANGUAGES:
         from clean_et_subs import validate_srt_structure
@@ -4533,6 +5178,10 @@ def _validate_translated_file(
             "series_key": series_key,
             "series_title": series_title,
             "maintenance_scan_job_id": maintenance_scan_job_id,
+            "trial_owner": trial_owner,
+            "trial_job_id": trial_job_id,
+            "trial_plan_id": trial_plan_id,
+            "trial_generation": trial_generation,
         }
         if defer_repair:
             repair_key = (
@@ -4559,6 +5208,10 @@ def _validate_translated_file(
             return queued_action, report
         synchronous_kwargs = dict(job_kwargs)
         synchronous_kwargs.pop("maintenance_scan_job_id", None)
+        for coordination_key in (
+            "trial_owner", "trial_job_id", "trial_plan_id", "trial_generation"
+        ):
+            synchronous_kwargs.pop(coordination_key, None)
         result = _perform_repair(**synchronous_kwargs)
         return result.action, result.report
 
@@ -4615,7 +5268,15 @@ def _mark_activity(stats: dict, item_type: str) -> None:
 
 
 def _record_invalid_circuit_outcome(
-    series_key: str, series_title: str, action: str, report
+    series_key: str,
+    series_title: str,
+    action: str,
+    report,
+    *,
+    trial_owner: str | None = None,
+    trial_job_id: int | None = None,
+    trial_plan_id: int | None = None,
+    trial_generation: int | None = None,
 ) -> None:
     if action not in ("quarantined", "deleted"):
         return
@@ -4629,6 +5290,10 @@ def _record_invalid_circuit_outcome(
             threshold=CIRCUIT_FAILURE_THRESHOLD,
             open_cycles=CIRCUIT_OPEN_CYCLES,
             config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+            trial_owner=trial_owner,
+            trial_job_id=trial_job_id,
+            trial_plan_id=trial_plan_id,
+            lease_generation=trial_generation,
         )
         _refresh_status_diagnostics()
     except StateStoreError as exc:
@@ -4741,6 +5406,7 @@ def process_item(
     stats: dict,
     stats_lock: threading.Lock,
     retry_plan: dict | None = None,
+    retry_submission_callback=None,
 ) -> None:
     if shutdown_requested:
         return
@@ -5451,18 +6117,21 @@ def process_item(
         job_id: int | None = None
         trial_owner = f"attempt:{attempt_id}"
         trial_claimed = False
+        trial_generation: int | None = None
         try:
             try:
                 circuit = _get_validation_state().circuit_permission(
                     series_key=series_key,
                     series_title=series_title,
                     config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
-                    claim=True,
+                    claim=retry_plan is not None,
                     trial_owner=trial_owner,
                 )
             except StateStoreError as exc:
                 print(f"{YELLOW}[CIRCUIT] State unavailable for {title}: {exc}{RESET}")
                 circuit = {"allowed": True, "state": "unknown", "failures": 0}
+            if circuit.get("state") == "eligible" and retry_plan is None:
+                circuit = {**circuit, "allowed": False}
             if not circuit["allowed"]:
                 _mark_submission_failed(attempt_id)
                 eligible_cycle = circuit.get("eligibleAfterCycle")
@@ -5486,6 +6155,7 @@ def process_item(
                 _shared_capacity.release(shared_token)
                 continue
             trial_claimed = circuit.get("state") == "half_open"
+            trial_generation = circuit.get("leaseGeneration")
             job_id = lingarr_submit_file(
                 media_id,
                 source_path,
@@ -5519,10 +6189,24 @@ def process_item(
                 _shared_capacity.release(shared_token)
                 continue
 
+            if retry_plan is not None:
+                if retry_submission_callback is not None:
+                    retry_submission_callback(retry_plan)
+                try:
+                    _get_validation_state().record_retry_admission(
+                        retry_plan["id"], _completed_cycle, "submitted"
+                    )
+                except StateStoreError:
+                    pass
+
             if trial_claimed:
                 try:
                     trial_bound = _get_validation_state().bind_circuit_trial_job(
-                        series_key, trial_owner, job_id
+                        series_key,
+                        trial_owner,
+                        job_id,
+                        trial_plan_id=retry_plan["id"] if retry_plan is not None else None,
+                        lease_generation=trial_generation,
                     )
                 except StateStoreError as exc:
                     trial_bound = False
@@ -5690,6 +6374,10 @@ def process_item(
                     threshold=CIRCUIT_FAILURE_THRESHOLD,
                     open_cycles=CIRCUIT_OPEN_CYCLES,
                     config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+                    trial_owner=trial_owner if trial_claimed else None,
+                    trial_job_id=job_id if trial_claimed else None,
+                    trial_plan_id=(retry_plan["id"] if trial_claimed and retry_plan else None),
+                    lease_generation=trial_generation if trial_claimed else None,
                 )
             except StateStoreError as exc:
                 print(f"{YELLOW}[CIRCUIT] Could not record failure: {exc}{RESET}")
@@ -5815,6 +6503,10 @@ def process_item(
             provenance_source_hash=source_hash,
             series_key=series_key,
             series_title=series_title,
+            trial_owner=trial_owner if trial_claimed else None,
+            trial_job_id=job_id if trial_claimed else None,
+            trial_plan_id=(retry_plan["id"] if trial_claimed and retry_plan else None),
+            trial_generation=trial_generation if trial_claimed else None,
         )
         if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
             try:
@@ -5835,6 +6527,10 @@ def process_item(
                     threshold=CIRCUIT_FAILURE_THRESHOLD,
                     open_cycles=CIRCUIT_OPEN_CYCLES,
                     config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+                    trial_owner=trial_owner if trial_claimed else None,
+                    trial_job_id=job_id if trial_claimed else None,
+                    trial_plan_id=(retry_plan["id"] if trial_claimed and retry_plan else None),
+                    lease_generation=trial_generation if trial_claimed else None,
                 )
             except StateStoreError as exc:
                 print(f"{YELLOW}[TIMING] Could not persist successful sample: {exc}{RESET}")
@@ -5858,7 +6554,14 @@ def process_item(
                 )
         else:
             _record_invalid_circuit_outcome(
-                series_key, series_title, validation_action, validation_report
+                series_key,
+                series_title,
+                validation_action,
+                validation_report,
+                trial_owner=trial_owner if trial_claimed else None,
+                trial_job_id=job_id if trial_claimed else None,
+                trial_plan_id=(retry_plan["id"] if trial_claimed and retry_plan else None),
+                trial_generation=trial_generation if trial_claimed else None,
             )
             with stats_lock:
                 stats["failed"] += 1
@@ -6839,9 +7542,17 @@ def _run_end_cycle_repair_retries(stats: dict) -> None:
                 stats["degraded"] = True
 
 
-def _run_regeneration_retries(stats: dict) -> None:
+def _run_regeneration_retry_batch(
+    stats: dict,
+    submission_budget: int,
+    examined_plan_ids: set[int] | None = None,
+    series_admissions: dict[str, int] | None = None,
+) -> tuple[int, int]:
     if shutdown_requested:
-        return
+        return 0, 0
+    budget = max(1, int(submission_budget))
+    examined_plan_ids = examined_plan_ids if examined_plan_ids is not None else set()
+    series_admissions = series_admissions if series_admissions is not None else {}
     try:
         for pending in _get_validation_state().retry_plans(include_terminal=False):
             if pending.get("itemType") != "episodes":
@@ -6866,22 +7577,40 @@ def _run_regeneration_retries(stats: dict) -> None:
         due_before = _get_validation_state().due_retry_count(_completed_cycle)
         plans = _get_validation_state().claim_due_retry_plans(
             _completed_cycle,
-            limit=RETRY_BATCH_SIZE_PER_CYCLE,
+            limit=budget,
             per_series_limit=RETRY_MAX_PER_SERIES_PER_CYCLE,
+            excluded_plan_ids=examined_plan_ids,
+            series_admissions=series_admissions,
         )
     except StateStoreError as exc:
         print(f"{YELLOW}[RETRY] Could not claim regeneration retries: {exc}{RESET}")
         stats["degraded"] = True
-        return
-    stats["regeneration_queued"] = len(plans)
+        return 0, 0
+    plans = [plan for plan in plans if int(plan["id"]) not in examined_plan_ids]
+    if not plans:
+        return 0, 0
+    examined_plan_ids.update(int(plan["id"]) for plan in plans)
+    stats["regeneration_queued"] = stats.get("regeneration_queued", 0) + len(plans)
     print(
         f"[RETRY] Due={due_before} admitted={len(plans)} "
         f"remaining={max(0, due_before - len(plans))} "
         f"completed_cycle={_completed_cycle}"
     )
     retry_lock = threading.Lock()
+    submitted_plan_ids: set[int] = set()
+
+    def note_retry_submission(plan: dict) -> None:
+        with retry_lock:
+            submitted_plan_ids.add(int(plan["id"]))
+
     admitted: list[tuple[dict, dict, str, str]] = []
     for plan in plans:
+        try:
+            _get_validation_state().record_retry_admission(
+                plan["id"], _completed_cycle, "examined"
+            )
+        except StateStoreError:
+            pass
         if shutdown_requested:
             try:
                 _get_validation_state().update_retry_plan(
@@ -6926,6 +7655,7 @@ def _run_regeneration_retries(stats: dict) -> None:
                 stats,
                 retry_lock,
                 retry_plan=plan,
+                retry_submission_callback=note_retry_submission,
             )
         finally:
             _shared_capacity.release_current_translation()
@@ -6989,6 +7719,16 @@ def _run_regeneration_retries(stats: dict) -> None:
                             else "retry admission deferred before Lingarr output"
                         ),
                     )
+                    _get_validation_state().record_retry_admission(
+                        plan["id"],
+                        _completed_cycle,
+                        "no_progress",
+                        deferral_class,
+                    )
+                elif current and current.get("submissionAttemptId") is None:
+                    _get_validation_state().record_retry_admission(
+                        plan["id"], _completed_cycle, "reconciled"
+                    )
             except StateStoreError as exc:
                 print(
                     f"{YELLOW}[RETRY] Could not release deferred plan: "
@@ -6996,10 +7736,60 @@ def _run_regeneration_retries(stats: dict) -> None:
                 )
                 stats["degraded"] = True
 
+    for plan in plans:
+        if int(plan["id"]) not in submitted_plan_ids:
+            continue
+        series_bucket = str(
+            plan.get("canonicalSeriesKey")
+            or plan.get("seriesKey")
+            or f"{plan['itemType']}:{plan['itemId']}"
+        )
+        series_admissions[series_bucket] = series_admissions.get(series_bucket, 0) + 1
+    submissions_used = len(submitted_plan_ids)
+    return submissions_used, len(plans)
+
+
+def _run_regeneration_retries(
+    stats: dict,
+    submission_budget: int | None = None,
+    refill_round: int = 0,
+    examined_plan_ids: set[int] | None = None,
+    series_admissions: dict[str, int] | None = None,
+) -> None:
+    """Work-conserving retry admission without recursive refill calls."""
+    del refill_round  # retained for compatibility with existing callers/tests
+    remaining_budget = max(
+        1,
+        int(
+            RETRY_BATCH_SIZE_PER_CYCLE
+            if submission_budget is None
+            else submission_budget
+        ),
+    )
+    examined = examined_plan_ids if examined_plan_ids is not None else set()
+    admissions = series_admissions if series_admissions is not None else {}
+    while remaining_budget > 0 and not shutdown_requested:
+        examined_before = len(examined)
+        submissions_used, plans_examined = _run_regeneration_retry_batch(
+            stats,
+            remaining_budget,
+            examined,
+            admissions,
+        )
+        remaining_budget = max(0, remaining_budget - submissions_used)
+        if remaining_budget <= 0 or plans_examined == 0:
+            break
+        if len(examined) <= examined_before:
+            break
+        print(
+            f"[RETRY] Refilling {remaining_budget} translation slot(s) after "
+            "reconciliation/no-progress outcomes"
+        )
+
 
 def run_cycle(cycle_num: int) -> bool:
     print(f"\n{BOLD}{CYAN}===== Cycle #{cycle_num} ====={RESET}")
-    _status_set_phase("translating")
+    _status_set_phase("cycle_work")
 
     stats: dict = {
         "submitted": 0,
@@ -7108,10 +7898,14 @@ def run_cycle(cycle_num: int) -> bool:
     pending_count = len(_pending_repairs)
     if pending_count:
         print(f"[REPAIR] Waiting for {pending_count} queued repair job(s) before Bazarr sync")
+        _status_set_phase("repair_drain")
         repair_results = _drain_pending_repairs(stats)
+        _status_set_phase("cycle_work")
 
+    _status_set_phase("retry_recovery")
     _run_end_cycle_repair_retries(stats)
     _run_regeneration_retries(stats)
+    _status_set_phase("cycle_work")
 
     pending_prune = _take_pending_prune_videos()
     if pending_prune:
@@ -7296,6 +8090,10 @@ def _reconcile_circuit_trial_leases(state_store: StateStore) -> int:
                     threshold=CIRCUIT_FAILURE_THRESHOLD,
                     open_cycles=CIRCUIT_OPEN_CYCLES,
                     config_fingerprint=_CIRCUIT_CONFIG_FINGERPRINT,
+                    trial_owner=lease.get("trialOwner"),
+                    trial_job_id=lease.get("trialJobId"),
+                    trial_plan_id=lease.get("trialPlanId"),
+                    lease_generation=lease.get("leaseGeneration"),
                 )
                 reconciled += 1
             elif job_status == "Completed":
@@ -7324,10 +8122,198 @@ def _reconcile_circuit_trial_leases(state_store: StateStore) -> int:
     return reconciled
 
 
+def _run_legacy_quarantine_index(state_store: StateStore) -> dict:
+    """Index legacy artifacts conservatively before the first cycle."""
+    from autotranslate.maintenance.legacy_index import LegacyQuarantineIndexer
+    from clean_et_subs import (
+        cue_source_signature,
+        file_sha256,
+        parse_srt_cues,
+        read_text_best_effort,
+        source_cue_signatures,
+        target_language_for_code,
+        validate_cue_pair,
+        validate_subtitle_pair,
+    )
+
+    detector = _get_cleanup_detector()
+
+    def inspect(artifact: Path, report: dict, identity: dict) -> dict:
+        source_path = Path(report["sourcePath"])
+        target_language = str(report["targetLanguage"])
+        language = target_language_for_code(target_language)
+        if detector is None or language is None:
+            return {"accepted": False, "reasonCode": "language_mismatch"}
+        source_raw = read_text_best_effort(source_path)
+        target_raw = read_text_best_effort(artifact)
+        if source_raw is None or target_raw is None:
+            return {"accepted": False, "reasonCode": "artifact_unavailable"}
+        source_cues, source_errors = parse_srt_cues(source_raw)
+        target_cues, target_errors = parse_srt_cues(target_raw)
+        if source_errors or target_errors or len(source_cues) != len(target_cues):
+            return {"accepted": False, "reasonCode": "source_signature_mismatch"}
+        validation = validate_subtitle_pair(
+            source_path,
+            artifact,
+            detector,
+            language,
+            target_lang=target_language,
+            **_validation_kwargs(),
+        )
+        prior = state_store.quarantine_attempts(
+            identity["itemType"], identity["itemId"], target_language
+        )
+        attempt = state_store.record_quarantine_attempt(
+            item_type=identity["itemType"],
+            item_id=identity["itemId"],
+            target_language=target_language,
+            source_hash=report["sourceHash"],
+            target_hash=file_sha256(artifact),
+            attempt_number=max(
+                [int(entry.get("attemptNumber") or 0) for entry in prior] or [0]
+            ) + 1,
+            artifact_path=artifact,
+            report_path=Path(f"{artifact}.validation.json"),
+            failure_rules=(issue.rule for issue in validation.issues),
+            cue_signatures=source_cue_signatures(source_path),
+            repair_provenance=[],
+            donor_provenance=[],
+        )
+        valid_pairs = []
+        cue_kwargs = {
+            key: value
+            for key, value in _validation_kwargs().items()
+            if key in {
+                "max_cue_lines", "max_cue_chars", "max_expansion_ratio",
+                "max_expansion_chars", "max_source_similarity",
+                "max_cyrillic_ratio", "max_cjk_ratio", "max_latin_ratio",
+            }
+        }
+        for index, (source_cue, target_cue) in enumerate(zip(source_cues, target_cues)):
+            if not validate_cue_pair(
+                source_cue, target_cue, cue_index=index,
+                target_lang=target_language, **cue_kwargs,
+            ):
+                valid_pairs.append((source_cue, target_cue))
+        if not valid_pairs:
+            return {"accepted": False, "reasonCode": "current_validation_failed"}
+        partial_id = state_store.record_partial_candidate(
+            item_type=identity["itemType"],
+            item_id=identity["itemId"],
+            source_language=identity.get("sourceLanguage"),
+            target_language=target_language,
+            source_hash=report["sourceHash"],
+            target_hash=file_sha256(artifact),
+            changed_cues=[source.number for source, _target in valid_pairs],
+            unresolved_cues=[
+                source.number for source, target in zip(source_cues, target_cues)
+                if (source, target) not in valid_pairs
+            ],
+            provenance=[{"stage": "legacy_index"}],
+            artifact_path=artifact,
+            quarantine_attempt_id=attempt["id"],
+        )
+        for source_cue, target_cue in valid_pairs:
+            signature = cue_source_signature(source_cue)
+            state_store.record_cue_recovery(
+                partial_candidate_id=partial_id,
+                item_type=identity["itemType"],
+                item_id=identity["itemId"],
+                source_language=identity.get("sourceLanguage"),
+                target_language=target_language,
+                source_file_hash=report["sourceHash"],
+                source_cue_number=source_cue.number,
+                source_cue_hash=signature["sourceHash"],
+                source_signature=signature,
+                cue_start_ms=signature.get("startMs"),
+                target_text=target_cue.text,
+                target_hash=hashlib.sha256(target_cue.text.encode("utf-8")).hexdigest(),
+                recovery_stage="legacy_index",
+                source_attempt_id=attempt["id"],
+            )
+        return {
+            "accepted": True,
+            "quarantineAttemptId": attempt["id"],
+            "partialCandidateId": partial_id,
+        }
+
+    indexer = LegacyQuarantineIndexer(
+        state=state_store,
+        root=CLEANUP_QUARANTINE_DIR,
+        inspect_artifact=inspect,
+        shutdown_requested=lambda: shutdown_requested,
+    )
+    result = indexer.run()
+    print(
+        f"[QUARANTINE] Legacy index discovered={result['discovered']} "
+        f"indexed={result['indexed']} unresolved={result['unresolved']} "
+        f"skipped={result['skipped']}"
+    )
+    return result
+
+
+def _requeue_persisted_repairs(state_store: StateStore) -> int:
+    """Revalidate and requeue durable repairs without relying on a library scan."""
+    queued = 0
+    if not hasattr(state_store, "repair_jobs_for_restart"):
+        return queued
+    for job in state_store.repair_jobs_for_restart():
+        if shutdown_requested:
+            break
+        source_path = job.get("sourcePath")
+        target_path = job.get("targetPath")
+        if (
+            not source_path
+            or not target_path
+            or _file_hash_or_none(source_path) != job.get("sourceHash")
+            or _file_hash_or_none(target_path) != job.get("targetHash")
+        ):
+            state_store.transition_repair_job(
+                job["id"], "failed", error_code="repair_inputs_changed",
+                expected_states=("persisted_for_restart",),
+            )
+            continue
+        payload = job.get("payload") or {}
+        action, _report = _validate_translated_file(
+            source_path, target_path,
+            payload.get("sourceLanguage") or "en",
+            job["targetLanguage"], job.get("itemId"),
+            title=payload.get("title") or os.path.basename(target_path),
+            defer_repair=True, item_type=job.get("itemType"),
+            origin=payload.get("origin") or "recovered_repair",
+            provenance_source_hash=job.get("sourceHash"),
+            series_key=payload.get("seriesKey"),
+            series_title=payload.get("seriesTitle"),
+            trial_owner=payload.get("trialOwner"),
+            trial_job_id=payload.get("trialJobId"),
+            trial_plan_id=payload.get("trialPlanId"),
+            trial_generation=payload.get("trialGeneration"),
+        )
+        if action == "repair-queued":
+            queued += 1
+        elif action in (
+            "valid", "valid-warning", "formatted", "quarantined", "deleted",
+            "reported", "dry-run",
+        ):
+            state_store.transition_repair_job(
+                job["id"], "completed", expected_states=("persisted_for_restart",)
+            )
+        elif action != "repair-deferred":
+            state_store.transition_repair_job(
+                job["id"], "failed", error_code=str(action),
+                expected_states=("persisted_for_restart",),
+            )
+    return queued
+
+
 def main() -> int:
     global _status_tracker, _completed_cycle
     state_store = _initialize_state_store()
     _completed_cycle = state_store.completed_cycle()
+    recovered_repairs = state_store.recover_repair_jobs()
+    reactivated_manual_reviews = state_store.reactivate_changed_manual_reviews(
+        _VALIDATION_CONFIG_FINGERPRINT
+    )
     recovered_claims = state_store.recover_retry_claims()
     reconciled_retry_claims = _reconcile_retry_claims(state_store)
     recovered_trials = state_store.recover_abandoned_circuit_trials(
@@ -7344,6 +8330,8 @@ def main() -> int:
     print(
         f"[CYCLE] Restored completed-cycle sequence {_completed_cycle}; "
         f"released {recovered_claims} orphaned retry claim(s); "
+        f"persisted {recovered_repairs} repair job(s) for restart; "
+        f"reactivated {reactivated_manual_reviews} changed manual review(s); "
         f"reconciled {reconciled_retry_claims} submitted retry claim(s); "
         f"released {recovered_trials} unbound circuit trial(s); "
         f"reconciled {reconciled_trials} bound circuit trial(s); "
@@ -7446,10 +8434,8 @@ def main() -> int:
             mappings.append(f"{language.name} ({language.code} -> {targets})")
         print(f"[INFO] Lingarr supports languages: {'; '.join(mappings)}")
 
-    run_retention_housekeeping()
-    last_retention_check = time.monotonic()
-
     print("[INFO] Waiting 30s for services to start...")
+    _status_set_phase("startup_wait")
     sys.stdout.flush()
     for _ in range(30):
         if shutdown_requested:
@@ -7458,32 +8444,48 @@ def main() -> int:
 
     if not shutdown_requested:
         print("[INFO] Running initial Bazarr subtitle synchronization...")
-        _status_set_phase("synchronization")
+        _status_set_phase("startup_sync")
         trigger_bazarr_sync(True, True)
         wait_for_bazarr_sync(True, True, SYNC_TIMEOUT)
+
+    _status_set_phase("startup_cleanup")
+    legacy_run_id = state_store.start_maintenance_run(
+        "legacy_quarantine_index",
+        due_reason="startup reconciliation",
+        completed_cycle=_completed_cycle,
+    )
+    try:
+        legacy_metrics = _run_legacy_quarantine_index(state_store)
+        state_store.finish_maintenance_run(
+            legacy_run_id, success=True, metrics=legacy_metrics
+        )
+    except Exception as exc:
+        state_store.finish_maintenance_run(
+            legacy_run_id,
+            success=False,
+            failure_code=type(exc).__name__,
+        )
+        print(f"{YELLOW}[QUARANTINE] Legacy index failed: {exc}{RESET}")
+    run_retention_housekeeping()
+    last_retention_check = time.monotonic()
+
+    if not shutdown_requested:
+        startup_repairs = _requeue_persisted_repairs(state_store)
+        if startup_repairs:
+            print(f"[REPAIR] Requeued {startup_repairs} durable startup repair(s)")
 
     cycle = _completed_cycle + 1
     _cycle_suppressions.begin_cycle(str(cycle))
     last_cleanup_scan = 0.0
     if not shutdown_requested and CLEANUP_SCAN_EXISTING:
-        _status_set_phase("cleanup")
-        _run_existing_cleanup_scan_safely()
-        last_cleanup_scan = time.monotonic()
+        _status_set_phase("startup_cleanup")
+        startup_cleanup = _run_existing_cleanup_scan_safely()
+        if startup_cleanup is not None:
+            last_cleanup_scan = time.monotonic()
 
     while not shutdown_requested:
         if cycle > 1:
             _cycle_suppressions.begin_cycle(str(cycle))
-        if time.monotonic() - last_retention_check >= RETENTION_CHECK_INTERVAL:
-            run_retention_housekeeping()
-            last_retention_check = time.monotonic()
-        if (
-            CLEANUP_SCAN_EXISTING
-            and last_cleanup_scan > 0
-            and time.monotonic() - last_cleanup_scan >= CLEANUP_SCAN_INTERVAL
-        ):
-            _status_set_phase("cleanup")
-            _run_existing_cleanup_scan_safely()
-            last_cleanup_scan = time.monotonic()
         healthy = run_cycle(cycle)
         if healthy:
             try:
@@ -7498,11 +8500,66 @@ def main() -> int:
                 f"{RESET}"
             )
         _refresh_status_diagnostics()
+        if shutdown_requested:
+            break
+
+        _status_set_phase("post_cycle_maintenance")
+        maintenance_failed = False
+        monotonic_now = time.monotonic()
+        if monotonic_now - last_retention_check >= RETENTION_CHECK_INTERVAL:
+            run_id = state_store.start_maintenance_run(
+                "retention",
+                due_reason="retention interval elapsed",
+                completed_cycle=_completed_cycle,
+            )
+            try:
+                retention_metrics = run_retention_housekeeping()
+                state_store.finish_maintenance_run(
+                    run_id, success=True, metrics=retention_metrics
+                )
+                last_retention_check = time.monotonic()
+            except Exception as exc:
+                maintenance_failed = True
+                state_store.finish_maintenance_run(
+                    run_id,
+                    success=False,
+                    failure_code=type(exc).__name__,
+                )
+                print(f"{YELLOW}[MAINTENANCE] Retention failed: {exc}{RESET}")
+        if (
+            CLEANUP_SCAN_EXISTING
+            and last_cleanup_scan > 0
+            and monotonic_now - last_cleanup_scan >= CLEANUP_SCAN_INTERVAL
+        ):
+            run_id = state_store.start_maintenance_run(
+                "existing_library_scan",
+                due_reason="cleanup scan interval elapsed",
+                completed_cycle=_completed_cycle,
+            )
+            cleanup_metrics = _run_existing_cleanup_scan_safely()
+            cleanup_success = cleanup_metrics is not None
+            state_store.finish_maintenance_run(
+                run_id,
+                success=cleanup_success,
+                metrics=cleanup_metrics or {},
+                failure_code=None if cleanup_success else "existing_library_scan_failed",
+            )
+            if cleanup_success:
+                last_cleanup_scan = time.monotonic()
+            else:
+                maintenance_failed = True
+        if maintenance_failed:
+            print(
+                f"{YELLOW}[MAINTENANCE] Post-cycle maintenance failed; "
+                "translation cycle completion remains unchanged and maintenance "
+                f"will be retried{RESET}"
+            )
+        _refresh_status_diagnostics()
         cycle += 1
         if shutdown_requested:
             break
         print(f"[INFO] Next cycle in {CHECK_INTERVAL}s...")
-        _status_set_phase("sleeping", next_cycle_at=time.time() + CHECK_INTERVAL)
+        _status_set_phase("cooldown", next_cycle_at=time.time() + CHECK_INTERVAL)
         for _ in range(CHECK_INTERVAL):
             if shutdown_requested:
                 break

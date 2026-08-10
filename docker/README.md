@@ -62,6 +62,7 @@ docker compose up -d
 | `PARALLEL_TRANSLATES` | `1` | Shared maximum for active full-file translations and cue repairs |
 | `CHECK_INTERVAL` | `1200` | Seconds between wanted-subtitle cycles |
 | `POLL_TIMEOUT` | `900` | Minimum per-file translation timeout |
+| `REPAIR_SHUTDOWN_GRACE_SECONDS` | `30` | Maximum graceful drain for active repair workers during shutdown |
 | `RESUBMIT_COOLDOWN` | `3600` | Minimum delay before resubmitting an item/language pair |
 | `CIRCUIT_FAILURE_THRESHOLD` | `3` | Consecutive failures before series protection opens |
 | `CIRCUIT_OPEN_CYCLES` | `3` | Healthy completed cycles before one half-open trial |

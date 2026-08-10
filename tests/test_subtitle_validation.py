@@ -342,6 +342,42 @@ class SubtitleValidationTests(unittest.TestCase):
             self.assertFalse(result.success)
             self.assertEqual(target.read_text(encoding="utf-8"), original)
 
+    def test_shutdown_interruption_does_not_render_partial_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "episode.eng.srt"
+            target = root / "episode.et.srt"
+            source.write_text(
+                make_srt("First source line", "Second source line"),
+                encoding="utf-8",
+            )
+            original = make_srt(
+                "[TARGET] first leak [/TARGET]",
+                "[TARGET] second leak [/TARGET]",
+            )
+            target.write_text(original, encoding="utf-8")
+            cancellation_checks = 0
+
+            def cancellation_requested():
+                nonlocal cancellation_checks
+                cancellation_checks += 1
+                return cancellation_checks >= 4
+
+            result = repair_subtitle_file(
+                source,
+                target,
+                self.detector,
+                self.estonian,
+                lambda *_args: "Parandatud esimene subtiitririda",
+                target_lang="et",
+                max_attempts=1,
+                cancellation_requested=cancellation_requested,
+            )
+
+            self.assertTrue(result.interrupted)
+            self.assertIsNone(result.partial_raw)
+            self.assertEqual(target.read_text(encoding="utf-8"), original)
+
     def test_repair_progress_does_not_complete_http_200_rejection(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import statistics
 import threading
+import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -12,7 +14,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 13
 
 ACTIVE_RETRY_STATES = {
     "repair_retry_queued",
@@ -156,8 +158,13 @@ class StateStore:
                 raise
 
     def _migrate_schema(self) -> None:
-        with self._lock:
-            self._connection.executescript(
+        # ``Connection.executescript`` commits implicitly, which used to leave
+        # partially upgraded databases when a later ALTER or ledger write
+        # failed. Execute complete statements individually inside the same
+        # immediate transaction so schema and migration ledger advance together.
+        with self._transaction() as db:
+            self._execute_migration_script(
+                db,
                 """
                 CREATE TABLE IF NOT EXISTS state_metadata (
                     key TEXT PRIMARY KEY,
@@ -371,8 +378,233 @@ class StateStore:
                     ON quarantine_attempts(
                         item_type, item_id, target_language, created_at DESC
                     );
+
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS maintenance_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    operation TEXT NOT NULL,
+                    due_reason TEXT,
+                    completed_cycle INTEGER,
+                    state TEXT NOT NULL,
+                    metrics_json TEXT NOT NULL DEFAULT '{}',
+                    failure_code TEXT,
+                    started_at REAL NOT NULL,
+                    completed_at REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_maintenance_runs_recent
+                    ON maintenance_runs(operation, started_at DESC);
+
+                CREATE TABLE IF NOT EXISTS repair_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dedupe_key TEXT NOT NULL,
+                    item_type TEXT,
+                    item_id INTEGER,
+                    target_language TEXT NOT NULL,
+                    source_path TEXT,
+                    target_path TEXT,
+                    source_hash TEXT,
+                    target_hash TEXT,
+                    cue_indexes_json TEXT NOT NULL DEFAULT '[]',
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    state TEXT NOT NULL,
+                    lease_owner TEXT,
+                    lease_expires_at REAL,
+                    shutdown_classification TEXT,
+                    last_error_code TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_repair_jobs_active_dedupe
+                    ON repair_jobs(dedupe_key)
+                    WHERE state IN ('queued', 'active', 'persisted_for_restart');
+
+                CREATE TABLE IF NOT EXISTS partial_candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    retry_plan_id INTEGER REFERENCES retry_plans(id),
+                    quarantine_attempt_id INTEGER REFERENCES quarantine_attempts(id),
+                    item_type TEXT NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    source_language TEXT,
+                    target_language TEXT NOT NULL,
+                    source_hash TEXT NOT NULL,
+                    target_hash TEXT NOT NULL,
+                    artifact_path TEXT,
+                    validation_level TEXT NOT NULL,
+                    validator_fingerprint TEXT NOT NULL,
+                    config_fingerprint TEXT NOT NULL,
+                    changed_cues_json TEXT NOT NULL,
+                    unresolved_cues_json TEXT NOT NULL,
+                    provenance_json TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS cue_recoveries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    partial_candidate_id INTEGER REFERENCES partial_candidates(id),
+                    item_type TEXT NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    source_language TEXT,
+                    target_language TEXT NOT NULL,
+                    source_file_hash TEXT NOT NULL,
+                    source_cue_number INTEGER NOT NULL,
+                    source_cue_hash TEXT NOT NULL,
+                    source_signature_json TEXT NOT NULL,
+                    cue_start_ms INTEGER,
+                    cue_end_ms INTEGER,
+                    target_text TEXT NOT NULL,
+                    target_hash TEXT NOT NULL,
+                    validator_fingerprint TEXT NOT NULL,
+                    config_fingerprint TEXT NOT NULL,
+                    recovery_stage TEXT NOT NULL,
+                    source_attempt_id INTEGER REFERENCES quarantine_attempts(id),
+                    validation_result TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    UNIQUE(item_type, item_id, target_language, source_file_hash,
+                           source_cue_hash, target_hash, validator_fingerprint,
+                           config_fingerprint)
+                );
+                CREATE INDEX IF NOT EXISTS idx_cue_recoveries_lookup
+                    ON cue_recoveries(item_type, item_id, target_language,
+                                     source_file_hash, source_cue_number, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS recovery_stage_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    retry_plan_id INTEGER REFERENCES retry_plans(id),
+                    repair_job_id INTEGER REFERENCES repair_jobs(id),
+                    cue_recovery_id INTEGER REFERENCES cue_recoveries(id),
+                    cue_number INTEGER,
+                    stage TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    reason_code TEXT,
+                    strategy_key TEXT,
+                    output_fingerprint TEXT,
+                    provider TEXT,
+                    model TEXT,
+                    created_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS legacy_quarantine_index (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    artifact_path TEXT NOT NULL,
+                    artifact_hash TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    reason_code TEXT,
+                    quarantine_attempt_id INTEGER REFERENCES quarantine_attempts(id),
+                    partial_candidate_id INTEGER REFERENCES partial_candidates(id),
+                    scanned_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(artifact_path, artifact_hash)
+                );
+
+                CREATE TABLE IF NOT EXISTS donor_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    retry_plan_id INTEGER REFERENCES retry_plans(id),
+                    item_type TEXT NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    target_language TEXT NOT NULL,
+                    cue_number INTEGER,
+                    donor_attempt_id INTEGER REFERENCES quarantine_attempts(id),
+                    reason_code TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_donor_events_recent
+                    ON donor_events(reason_code, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS failure_fingerprints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_type TEXT NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    target_language TEXT NOT NULL,
+                    source_file_hash TEXT NOT NULL,
+                    source_cue_hash TEXT NOT NULL,
+                    strategy_key TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT,
+                    config_fingerprint TEXT NOT NULL,
+                    output_fingerprint TEXT NOT NULL,
+                    failure_class TEXT NOT NULL,
+                    occurrences INTEGER NOT NULL DEFAULT 1,
+                    first_seen_at REAL NOT NULL,
+                    last_seen_at REAL NOT NULL,
+                    UNIQUE(item_type, item_id, target_language, source_file_hash,
+                           source_cue_hash, strategy_key, provider,
+                           config_fingerprint, output_fingerprint)
+                );
+
+                CREATE TABLE IF NOT EXISTS retry_admission_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    retry_plan_id INTEGER NOT NULL REFERENCES retry_plans(id),
+                    completed_cycle INTEGER NOT NULL,
+                    classification TEXT NOT NULL,
+                    reason_code TEXT,
+                    created_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS provider_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    classification TEXT NOT NULL,
+                    http_status INTEGER,
+                    retryable INTEGER NOT NULL DEFAULT 0,
+                    response_shape_json TEXT NOT NULL DEFAULT '{}',
+                    model TEXT,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_provider_events_recent
+                    ON provider_events(provider, classification, created_at DESC);
                 """
             )
+            self._migration_checkpoint("schema_objects")
+            legacy_table = db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' "
+                "AND name='legacy_quarantine_index'"
+            ).fetchone()
+            legacy_sql = str(legacy_table["sql"] or "") if legacy_table else ""
+            if (
+                "artifact_hash TEXT NOT NULL UNIQUE" in legacy_sql
+                or "UNIQUE(artifact_path, artifact_hash)" not in legacy_sql
+            ):
+                db.execute(
+                    "ALTER TABLE legacy_quarantine_index "
+                    "RENAME TO legacy_quarantine_index_hash_only"
+                )
+                db.execute(
+                    """
+                    CREATE TABLE legacy_quarantine_index (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        artifact_path TEXT NOT NULL,
+                        artifact_hash TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        reason_code TEXT,
+                        quarantine_attempt_id INTEGER REFERENCES quarantine_attempts(id),
+                        partial_candidate_id INTEGER REFERENCES partial_candidates(id),
+                        scanned_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        UNIQUE(artifact_path, artifact_hash)
+                    )
+                    """
+                )
+                db.execute(
+                    """
+                    INSERT INTO legacy_quarantine_index(
+                        id, artifact_path, artifact_hash, state, reason_code,
+                        quarantine_attempt_id, partial_candidate_id,
+                        scanned_at, updated_at
+                    )
+                    SELECT id, artifact_path, artifact_hash, state, reason_code,
+                           quarantine_attempt_id, partial_candidate_id,
+                           scanned_at, updated_at
+                    FROM legacy_quarantine_index_hash_only
+                    """
+                )
+                db.execute("DROP TABLE legacy_quarantine_index_hash_only")
+            self._migration_checkpoint("legacy_index")
             quarantine_columns = {
                 row["name"]
                 for row in self._connection.execute(
@@ -383,6 +615,7 @@ class StateStore:
                 self._connection.execute(
                     "ALTER TABLE quarantine_holds ADD COLUMN resolved_at TEXT"
                 )
+            self._migration_checkpoint("quarantine_columns")
             retry_columns = {
                 row["name"]
                 for row in self._connection.execute(
@@ -412,6 +645,7 @@ class StateStore:
                     self._connection.execute(
                         f"ALTER TABLE retry_plans ADD COLUMN {name} {definition}"
                     )
+            self._migration_checkpoint("retry_columns")
             circuit_columns = {
                 row["name"]
                 for row in self._connection.execute(
@@ -429,12 +663,16 @@ class StateStore:
                 "trial_claimed_at": "REAL",
                 "trial_job_id": "INTEGER",
                 "trial_lease_state": "TEXT",
+                "trial_plan_id": "INTEGER",
+                "lease_expires_at": "REAL",
+                "lease_generation": "INTEGER NOT NULL DEFAULT 0",
             }
             for name, definition in circuit_additions.items():
                 if name not in circuit_columns:
                     self._connection.execute(
                         f"ALTER TABLE circuit_breakers ADD COLUMN {name} {definition}"
                     )
+            self._migration_checkpoint("circuit_columns")
             attempt_columns = {
                 row["name"]
                 for row in self._connection.execute(
@@ -449,7 +687,51 @@ class StateStore:
                 self._connection.execute(
                     "ALTER TABLE translation_attempts ADD COLUMN failure_details_json TEXT"
                 )
-            self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            self._migration_checkpoint("attempt_columns")
+            migration_names = {
+                9: "maintenance history and migration ledger",
+                10: "durable repairs and cue recovery",
+                11: "legacy quarantine index and donor diagnostics",
+                12: "failure, admission, and provider diagnostics",
+                13: "circuit trial lease ownership",
+            }
+            timestamp = time.time()
+            for version, name in migration_names.items():
+                self._connection.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) "
+                    "VALUES(?, ?, ?)",
+                    (version, name, timestamp),
+                )
+            self._migration_checkpoint("migration_ledger")
+            self._connection.execute(
+                "INSERT OR REPLACE INTO state_metadata(key, value) "
+                "VALUES('app_schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
+            # Keep the legacy marker stable for rollback images. The additive
+            # ledger and metadata are authoritative from schema 9 onward.
+            self._connection.execute("PRAGMA user_version = 8")
+            self._migration_checkpoint("schema_markers")
+
+    def _migration_checkpoint(self, _name: str) -> None:
+        """Test seam for proving transaction rollback at migration boundaries."""
+        return None
+
+    @staticmethod
+    def _execute_migration_script(
+        connection: sqlite3.Connection, script: str
+    ) -> None:
+        statement = ""
+        for line in script.splitlines():
+            statement += line + "\n"
+            if not sqlite3.complete_statement(statement):
+                continue
+            sql = statement.strip()
+            statement = ""
+            if sql:
+                connection.execute(sql)
+        if statement.strip():
+            raise StateStoreError("incomplete SQL statement in schema migration")
 
     @staticmethod
     def _quarantine_attempt_dict(row: sqlite3.Row | None) -> dict | None:
@@ -504,27 +786,220 @@ class StateStore:
             json.dumps(cue_signatures, sort_keys=True), timestamp,
         )
         with self._transaction() as db:
-            db.execute(
+            row = self._record_quarantine_attempt_in(db, values)
+        return self._quarantine_attempt_dict(row)
+
+    @staticmethod
+    def _record_quarantine_attempt_in(
+        db: sqlite3.Connection, values: tuple
+    ) -> sqlite3.Row:
+        db.execute(
+            """
+            INSERT OR IGNORE INTO quarantine_attempts(
+                item_type, item_id, target_language, source_hash, target_hash,
+                attempt_number, validator_fingerprint, config_fingerprint,
+                artifact_path, report_path, failure_rules_json,
+                repair_provenance_json, donor_provenance_json,
+                cue_signatures_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            values,
+        )
+        return db.execute(
+            """
+            SELECT * FROM quarantine_attempts
+            WHERE item_type=? AND item_id=? AND target_language=?
+              AND source_hash=? AND target_hash=? AND attempt_number=?
+            """,
+            values[:6],
+        ).fetchone()
+
+    def finalize_quarantine_operation(
+        self,
+        artifact_id: int,
+        *,
+        attempt: dict | None = None,
+        partial_candidate_id: int | None = None,
+    ) -> dict | None:
+        """Atomically finalize donor metadata and the artifact disposition."""
+        attempt_row = None
+        with self._transaction() as db:
+            if attempt is not None:
+                values = self._quarantine_attempt_values(attempt)
+                attempt_row = self._record_quarantine_attempt_in(db, values)
+                if partial_candidate_id is not None:
+                    partial_cursor = db.execute(
+                        """
+                        UPDATE partial_candidates
+                        SET artifact_path=?, quarantine_attempt_id=?
+                        WHERE id=?
+                        """,
+                        (
+                            values[8], int(attempt_row["id"]),
+                            int(partial_candidate_id),
+                        ),
+                    )
+                    if partial_cursor.rowcount != 1:
+                        raise StateStoreError(
+                            f"partial candidate {partial_candidate_id} no longer exists"
+                        )
+            cursor = db.execute(
                 """
-                INSERT OR IGNORE INTO quarantine_attempts(
-                    item_type, item_id, target_language, source_hash, target_hash,
-                    attempt_number, validator_fingerprint, config_fingerprint,
-                    artifact_path, report_path, failure_rules_json,
-                    repair_provenance_json, donor_provenance_json,
-                    cue_signatures_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                UPDATE subtitle_artifacts
+                SET disposition='quarantined', pending_destination=NULL,
+                    pending_metadata_json=NULL, updated_at=?
+                WHERE id=? AND disposition='quarantine_pending'
                 """,
-                values,
+                (_utc_iso(), int(artifact_id)),
             )
+            if cursor.rowcount != 1:
+                raise StateStoreError(
+                    f"artifact {artifact_id} is not pending quarantine"
+                )
+        return self._quarantine_attempt_dict(attempt_row)
+
+    def record_pending_quarantine_hold(
+        self,
+        artifact_id: int,
+        *,
+        identity: str,
+        target_path: str | Path,
+        target_hash: str,
+        target_language: str,
+        rules: Iterable[str],
+        origin: str | None,
+        now: datetime | None = None,
+    ) -> tuple[dict, bool, dict]:
+        """Record one hold occurrence per pending artifact, idempotently."""
+        timestamp = now or datetime.now(timezone.utc)
+        with self._transaction() as db:
             row = db.execute(
                 """
-                SELECT * FROM quarantine_attempts
-                WHERE item_type=? AND item_id=? AND target_language=?
-                  AND source_hash=? AND target_hash=? AND attempt_number=?
+                SELECT disposition, pending_metadata_json
+                FROM subtitle_artifacts WHERE id=?
                 """,
-                values[:6],
+                (int(artifact_id),),
             ).fetchone()
-        return self._quarantine_attempt_dict(row)
+            if row is None or row["disposition"] != "quarantine_pending":
+                raise StateStoreError(
+                    f"artifact {artifact_id} is not pending quarantine"
+                )
+            try:
+                metadata = json.loads(row["pending_metadata_json"] or "{}")
+            except (TypeError, ValueError):
+                metadata = {}
+            event, repeated, metadata = self._record_pending_quarantine_hold_in(
+                db,
+                int(artifact_id),
+                metadata,
+                identity=str(identity),
+                target_path=target_path,
+                target_hash=str(target_hash),
+                target_language=str(target_language),
+                rules=rules,
+                origin=origin,
+                timestamp=timestamp,
+            )
+        return event, repeated, metadata
+
+    def _record_pending_quarantine_hold_in(
+        self,
+        db: sqlite3.Connection,
+        artifact_id: int,
+        metadata: dict,
+        *,
+        identity: str,
+        target_path: str | Path,
+        target_hash: str,
+        target_language: str,
+        rules: Iterable[str],
+        origin: str | None,
+        timestamp: datetime,
+    ) -> tuple[dict, bool, dict]:
+        if metadata.get("holdRecorded") and isinstance(
+            metadata.get("quarantineEvent"), dict
+        ):
+            return (
+                dict(metadata["quarantineEvent"]),
+                bool(metadata.get("holdRepeated")),
+                metadata,
+            )
+        previous = db.execute(
+            "SELECT * FROM quarantine_holds WHERE identity=? AND target_hash=?",
+            (identity, target_hash),
+        ).fetchone()
+        repeated = previous is not None
+        first_seen = previous["first_seen"] if previous else timestamp.isoformat()
+        occurrences = int(previous["occurrences"]) + 1 if previous else 1
+        rule_values = sorted({str(rule) for rule in rules if rule})
+        db.execute(
+            """
+            INSERT INTO quarantine_holds(
+                identity, target_hash, target_path, target_language,
+                rules_json, origin, first_seen, last_seen, hold_until,
+                occurrences
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(identity, target_hash) DO UPDATE SET
+                target_path=excluded.target_path,
+                target_language=excluded.target_language,
+                rules_json=excluded.rules_json,
+                origin=excluded.origin,
+                last_seen=excluded.last_seen,
+                hold_until=excluded.hold_until,
+                resolved_at=NULL,
+                occurrences=excluded.occurrences
+            """,
+            (
+                identity, target_hash, _path_key(target_path), target_language,
+                json.dumps(rule_values), origin or "unknown", first_seen,
+                timestamp.isoformat(), timestamp.isoformat(), occurrences,
+            ),
+        )
+        event = {
+            "identity": identity,
+            "targetPath": str(target_path),
+            "targetHash": target_hash,
+            "targetLanguage": target_language,
+            "rules": rule_values,
+            "origin": origin or "unknown",
+            "firstSeen": first_seen,
+            "lastSeen": timestamp.isoformat(),
+            "occurrences": occurrences,
+            "resolvedAt": None,
+        }
+        metadata = dict(metadata)
+        metadata.update({
+            "holdRecorded": True,
+            "holdRepeated": repeated,
+            "quarantineEvent": event,
+        })
+        db.execute(
+            """
+            UPDATE subtitle_artifacts
+            SET pending_metadata_json=?, updated_at=?
+            WHERE id=? AND disposition='quarantine_pending'
+            """,
+            (json.dumps(metadata, ensure_ascii=False), _utc_iso(), artifact_id),
+        )
+        return event, repeated, metadata
+
+    def _quarantine_attempt_values(self, attempt: dict) -> tuple:
+        return (
+            str(attempt["item_type"]), int(attempt["item_id"]),
+            str(attempt["target_language"]).lower(),
+            str(attempt["source_hash"]), str(attempt["target_hash"]),
+            max(1, int(attempt["attempt_number"])),
+            self.validator_version, self.config_fingerprint,
+            _path_key(attempt.get("artifact_path")),
+            _path_key(attempt.get("report_path")),
+            json.dumps(sorted({
+                str(rule) for rule in attempt.get("failure_rules", []) if rule
+            })),
+            json.dumps(attempt.get("repair_provenance") or [], sort_keys=True),
+            json.dumps(attempt.get("donor_provenance") or [], sort_keys=True),
+            json.dumps(attempt.get("cue_signatures") or [], sort_keys=True),
+            float(attempt.get("created_at") or time.time()),
+        )
 
     def quarantine_attempts(
         self, item_type: str, item_id: int, target_language: str
@@ -846,7 +1321,7 @@ class StateStore:
                     ]
                     db.execute(
                         """
-                        UPDATE circuit_breakers SET
+                    UPDATE circuit_breakers SET
                             series_title=COALESCE(?, series_title),
                             consecutive_failures=?,
                             state=?, eligible_after_cycle=?,
@@ -896,7 +1371,8 @@ class StateStore:
                         UPDATE circuit_breakers SET state='closed',
                             half_open_claimed=0, trial_owner=NULL,
                             trial_claimed_cycle=NULL, trial_claimed_at=NULL,
-                            trial_job_id=NULL, trial_lease_state=NULL,
+                        trial_job_id=NULL, trial_lease_state=NULL,
+                        trial_plan_id=NULL, lease_expires_at=NULL,
                             last_reason=?, updated_at=?
                         WHERE series_key=?
                         """,
@@ -928,15 +1404,22 @@ class StateStore:
         *,
         limit: int,
         per_series_limit: int = 1,
+        excluded_plan_ids: Iterable[int] = (),
+        series_admissions: dict[str, int] | None = None,
     ) -> list[dict]:
         selected: list[tuple[sqlite3.Row, str]] = []
-        series_counts: dict[str, int] = {}
+        excluded_ids = {int(plan_id) for plan_id in excluded_plan_ids}
+        series_counts = {
+            str(key): max(0, int(value))
+            for key, value in (series_admissions or {}).items()
+        }
         with self._transaction() as db:
             rows = db.execute(
                 """
                 SELECT * FROM retry_plans
                 WHERE state = 'regeneration_waiting'
                   AND eligible_completed_cycle <= ?
+                  AND COALESCE(last_deferral_class, '') <> 'manual_review'
                 ORDER BY CASE WHEN last_admitted_cycle IS NULL THEN 0 ELSE 1 END,
                          last_admitted_cycle,
                          eligible_completed_cycle,
@@ -948,6 +1431,8 @@ class StateStore:
                 (max(0, int(completed_cycle)),),
             ).fetchall()
             for row in rows:
+                if int(row["id"]) in excluded_ids:
+                    continue
                 series_bucket = self._canonical_series_key_in(
                     db,
                     row["canonical_series_key"] or row["series_key"],
@@ -998,6 +1483,7 @@ class StateStore:
             FROM retry_plans
             WHERE state = 'regeneration_waiting'
               AND eligible_completed_cycle <= ?
+              AND COALESCE(last_deferral_class, '') <> 'manual_review'
             """,
             (max(0, int(completed_cycle)),),
         )
@@ -1027,6 +1513,29 @@ class StateStore:
                   )
                 """,
                 (completed + 1, time.time()),
+            )
+            return max(0, int(cursor.rowcount))
+
+    def reactivate_changed_manual_reviews(self, config_fingerprint: str) -> int:
+        """Reopen manual reviews when the active recovery configuration changed."""
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                UPDATE retry_plans
+                SET last_deferral_class=NULL,
+                    last_reason='recovery configuration changed', updated_at=?
+                WHERE state='regeneration_waiting'
+                  AND last_deferral_class='manual_review'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM failure_fingerprints failure
+                    WHERE failure.item_type=retry_plans.item_type
+                      AND failure.item_id=retry_plans.item_id
+                      AND failure.target_language=retry_plans.target_language
+                      AND failure.source_file_hash=retry_plans.source_hash
+                      AND failure.config_fingerprint=?
+                  )
+                """,
+                (time.time(), str(config_fingerprint)),
             )
             return max(0, int(cursor.rowcount))
 
@@ -1401,7 +1910,8 @@ class StateStore:
                         retry_at=NULL, eligible_after_cycle=NULL, half_open_claimed=0,
                         trial_owner=NULL, trial_claimed_cycle=NULL,
                         trial_claimed_at=NULL, trial_job_id=NULL,
-                        trial_lease_state=NULL,
+                        trial_lease_state=NULL, trial_plan_id=NULL,
+                        lease_expires_at=NULL,
                         config_fingerprint=excluded.config_fingerprint,
                         last_reason=NULL, updated_at=excluded.updated_at
                     """,
@@ -1437,13 +1947,16 @@ class StateStore:
                     SET state='half_open', half_open_claimed=1,
                         trial_owner=?, trial_claimed_cycle=?,
                         trial_claimed_at=?, trial_job_id=NULL,
-                        trial_lease_state='claimed', updated_at=?
+                        trial_lease_state='claimed', trial_plan_id=NULL,
+                        lease_expires_at=?,
+                        lease_generation=lease_generation+1, updated_at=?
                     WHERE series_key=? AND state='open' AND half_open_claimed=0
                     """,
                     (
                         owner,
                         current_cycle,
                         now,
+                        now + 10800,
                         now,
                         series_key,
                     ),
@@ -1455,6 +1968,9 @@ class StateStore:
                     "eligibleAfterCycle": int(eligible),
                     "completedCyclesRemaining": 0,
                     "trialOwner": owner if claimed else None,
+                    "leaseGeneration": (
+                        int(row["lease_generation"] or 0) + 1 if claimed else None
+                    ),
                 }
             allowed = state == "closed"
             return {
@@ -1476,6 +1992,7 @@ class StateStore:
                     half_open_claimed=0, trial_owner=NULL,
                     trial_claimed_cycle=NULL, trial_claimed_at=NULL,
                     trial_job_id=NULL, trial_lease_state=NULL,
+                    trial_plan_id=NULL, lease_expires_at=NULL,
                     last_reason=?, updated_at=?
                 WHERE series_key=?
                 """,
@@ -1484,16 +2001,27 @@ class StateStore:
             return cursor.rowcount == 1
 
     def bind_circuit_trial_job(
-        self, series_key: str, trial_owner: str, job_id: int
+        self,
+        series_key: str,
+        trial_owner: str,
+        job_id: int,
+        trial_plan_id: int | None = None,
+        lease_generation: int | None = None,
     ) -> bool:
         with self._transaction() as db:
             cursor = db.execute(
                 """
                 UPDATE circuit_breakers
-                SET trial_job_id=?, trial_lease_state='bound', updated_at=?
-                WHERE series_key=? AND state='half_open' AND trial_owner=?
+                SET trial_job_id=?, trial_plan_id=?, trial_lease_state='bound',
+                    updated_at=?
+                 WHERE series_key=? AND state='half_open' AND trial_owner=?
+                   AND trial_job_id IS NULL
+                   AND (? IS NULL OR lease_generation=?)
                 """,
-                (int(job_id), time.time(), series_key, str(trial_owner)),
+                (
+                    int(job_id), trial_plan_id, time.time(), series_key,
+                    str(trial_owner), lease_generation, lease_generation,
+                ),
             )
             return cursor.rowcount == 1
 
@@ -1522,6 +2050,7 @@ class StateStore:
                 SET state='open', half_open_claimed=0, trial_owner=NULL,
                     trial_claimed_cycle=NULL, trial_claimed_at=NULL,
                     trial_job_id=NULL, trial_lease_state=NULL,
+                    trial_plan_id=NULL, lease_expires_at=NULL,
                     last_reason=?, updated_at=?
                 WHERE series_key=? AND state='half_open'
                   AND (? IS NULL OR trial_owner=?)
@@ -1548,13 +2077,18 @@ class StateStore:
                 SET state='open', half_open_claimed=0, trial_owner=NULL,
                     trial_claimed_cycle=NULL, trial_claimed_at=NULL,
                     trial_job_id=NULL, trial_lease_state=NULL,
+                    trial_plan_id=NULL, lease_expires_at=NULL,
                     last_reason='recovered abandoned half-open trial',
                     updated_at=?
                 WHERE state='half_open'
                   AND trial_job_id IS NULL
-                  AND (trial_claimed_at IS NULL OR trial_claimed_at <= ?)
+                  AND (
+                      (lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+                      OR (lease_expires_at IS NULL AND
+                          (trial_claimed_at IS NULL OR trial_claimed_at <= ?))
+                  )
                 """,
-                (timestamp, cutoff),
+                (timestamp, timestamp, cutoff),
             )
             return max(0, int(cursor.rowcount))
 
@@ -1563,7 +2097,8 @@ class StateStore:
             rows = self._connection.execute(
                 """
                 SELECT series_key, series_title, trial_owner, trial_job_id,
-                       trial_claimed_at, trial_lease_state
+                       trial_claimed_at, trial_lease_state, trial_plan_id,
+                       lease_expires_at, lease_generation
                 FROM circuit_breakers
                 WHERE state='half_open'
                 """
@@ -1576,6 +2111,9 @@ class StateStore:
                 "trialJobId": row["trial_job_id"],
                 "trialClaimedAt": row["trial_claimed_at"],
                 "trialLeaseState": row["trial_lease_state"],
+                "trialPlanId": row["trial_plan_id"],
+                "leaseExpiresAt": row["lease_expires_at"],
+                "leaseGeneration": int(row["lease_generation"] or 0),
             }
             for row in rows
         ]
@@ -1590,6 +2128,10 @@ class StateStore:
         threshold: int,
         open_cycles: int,
         config_fingerprint: str,
+        trial_owner: str | None = None,
+        trial_job_id: int | None = None,
+        trial_plan_id: int | None = None,
+        lease_generation: int | None = None,
         now: float | None = None,
     ) -> dict:
         now = time.time() if now is None else now
@@ -1598,6 +2140,26 @@ class StateStore:
                 "SELECT * FROM circuit_breakers WHERE series_key=?",
                 (series_key,),
             ).fetchone()
+            if row is not None and row["state"] == "half_open":
+                bound = (
+                    trial_owner is not None
+                    and row["trial_owner"] == str(trial_owner)
+                    and trial_job_id is not None
+                    and row["trial_job_id"] == int(trial_job_id)
+                    and trial_plan_id is not None
+                    and row["trial_plan_id"] == int(trial_plan_id)
+                    and lease_generation is not None
+                    and int(row["lease_generation"] or 0) == int(lease_generation)
+                )
+                if not bound:
+                    return {
+                        "state": "half_open",
+                        "failures": int(row["consecutive_failures"] or 0),
+                        "eligibleAfterCycle": row["eligible_after_cycle"],
+                        "completedCyclesRemaining": 0,
+                        "reason": "ignored outcome from unbound circuit trial",
+                        "ignored": True,
+                    }
             failures = 0 if success else int(row["consecutive_failures"] if row else 0) + 1
             state = "closed"
             opened_at = None
@@ -1622,7 +2184,8 @@ class StateStore:
                     half_open_claimed=0,
                     trial_owner=NULL, trial_claimed_cycle=NULL,
                     trial_claimed_at=NULL, trial_job_id=NULL,
-                    trial_lease_state=NULL,
+                    trial_lease_state=NULL, trial_plan_id=NULL,
+                    lease_expires_at=NULL,
                     config_fingerprint=excluded.config_fingerprint,
                     last_reason=excluded.last_reason, updated_at=excluded.updated_at
                 """,
@@ -1654,7 +2217,8 @@ class StateStore:
             rows = self._connection.execute(
                 """
                 SELECT series_key, series_title, consecutive_failures, state,
-                       eligible_after_cycle, last_reason, trial_job_id
+                       eligible_after_cycle, last_reason, trial_job_id,
+                       trial_claimed_at, lease_expires_at
                 FROM circuit_breakers
                 WHERE state IN ('open', 'half_open')
                   AND trim(series_title) != ''
@@ -1667,7 +2231,15 @@ class StateStore:
                 "seriesKey": row["series_key"],
                 "seriesTitle": row["series_title"],
                 "failures": row["consecutive_failures"],
-                "state": row["state"],
+                "state": (
+                    "eligible"
+                    if row["state"] == "open"
+                    and max(
+                        0,
+                        int(row["eligible_after_cycle"] or 0) - completed_cycle,
+                    ) == 0
+                    else row["state"]
+                ),
                 "eligibleAfterCycle": row["eligible_after_cycle"],
                 "completedCyclesRemaining": max(
                     0,
@@ -1676,15 +2248,690 @@ class StateStore:
                 ),
                 "reason": row["last_reason"],
                 "trialJobId": row["trial_job_id"],
+                "trialReady": bool(
+                    row["state"] == "open"
+                    and max(
+                        0,
+                        int(row["eligible_after_cycle"] or 0) - completed_cycle,
+                    ) == 0
+                ),
+                "leaseAgeSeconds": (
+                    max(0, time.time() - float(row["trial_claimed_at"]))
+                    if row["trial_claimed_at"] is not None else None
+                ),
+                "leaseExpiresAt": row["lease_expires_at"],
             }
             for row in rows
         ]
+
+    # ------------------------------------------------------------------
+    # Architecture-v2 durable work and diagnostics
+    # ------------------------------------------------------------------
+
+    def start_maintenance_run(
+        self,
+        operation: str,
+        *,
+        due_reason: str | None = None,
+        completed_cycle: int | None = None,
+        now: float | None = None,
+    ) -> int:
+        timestamp = time.time() if now is None else float(now)
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                INSERT INTO maintenance_runs(
+                    operation, due_reason, completed_cycle, state,
+                    metrics_json, started_at
+                ) VALUES(?, ?, ?, 'active', '{}', ?)
+                """,
+                (str(operation), due_reason, completed_cycle, timestamp),
+            )
+            return int(cursor.lastrowid)
+
+    def finish_maintenance_run(
+        self,
+        run_id: int,
+        *,
+        success: bool,
+        metrics: dict | None = None,
+        failure_code: str | None = None,
+        now: float | None = None,
+    ) -> bool:
+        timestamp = time.time() if now is None else float(now)
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                UPDATE maintenance_runs SET state=?, metrics_json=?,
+                    failure_code=?, completed_at=?
+                WHERE id=? AND state='active'
+                """,
+                (
+                    "completed" if success else "failed",
+                    json.dumps(metrics or {}, sort_keys=True),
+                    failure_code,
+                    timestamp,
+                    int(run_id),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def enqueue_repair_job(
+        self,
+        *,
+        dedupe_key: str,
+        target_language: str,
+        item_type: str | None = None,
+        item_id: int | None = None,
+        source_path: str | Path | None = None,
+        target_path: str | Path | None = None,
+        source_hash: str | None = None,
+        target_hash: str | None = None,
+        cue_indexes: Iterable[int] = (),
+        payload: dict | None = None,
+        now: float | None = None,
+    ) -> int:
+        timestamp = time.time() if now is None else float(now)
+        with self._transaction() as db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO repair_jobs(
+                    dedupe_key, item_type, item_id, target_language,
+                    source_path, target_path, source_hash, target_hash,
+                    cue_indexes_json, payload_json, state, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+                """,
+                (
+                    str(dedupe_key), item_type, item_id, str(target_language),
+                    _path_key(source_path), _path_key(target_path), source_hash,
+                    target_hash, json.dumps(list(cue_indexes)),
+                    json.dumps(payload or {}, sort_keys=True), timestamp, timestamp,
+                ),
+            )
+            row = db.execute(
+                """
+                SELECT id FROM repair_jobs
+                WHERE dedupe_key=?
+                  AND state IN ('queued', 'active', 'persisted_for_restart')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (str(dedupe_key),),
+            ).fetchone()
+            if row is None:
+                raise StateStoreError("could not persist repair job")
+            return int(row["id"])
+
+    def transition_repair_job(
+        self,
+        job_id: int,
+        state: str,
+        *,
+        lease_owner: str | None = None,
+        lease_expires_at: float | None = None,
+        shutdown_classification: str | None = None,
+        error_code: str | None = None,
+        expected_states: Iterable[str] | None = None,
+    ) -> bool:
+        with self._transaction() as db:
+            expected = tuple(str(value) for value in (expected_states or ()))
+            state_filter = ""
+            parameters: list[object] = [
+                str(state), lease_owner, lease_expires_at,
+                shutdown_classification, error_code, time.time(), int(job_id),
+            ]
+            if expected:
+                state_filter = " AND state IN ({})".format(
+                    ",".join("?" for _value in expected)
+                )
+                parameters.extend(expected)
+            cursor = db.execute(
+                f"""
+                UPDATE repair_jobs SET state=?, lease_owner=?, lease_expires_at=?,
+                    shutdown_classification=COALESCE(?, shutdown_classification),
+                    last_error_code=COALESCE(?, last_error_code), updated_at=?
+                WHERE id=?{state_filter}
+                """,
+                parameters,
+            )
+            return cursor.rowcount == 1
+
+    def repair_jobs_for_restart(self) -> list[dict]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM repair_jobs
+                WHERE state='persisted_for_restart'
+                ORDER BY created_at, id
+                """
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "dedupeKey": row["dedupe_key"],
+                "itemType": row["item_type"],
+                "itemId": row["item_id"],
+                "targetLanguage": row["target_language"],
+                "sourcePath": row["source_path"],
+                "targetPath": row["target_path"],
+                "sourceHash": row["source_hash"],
+                "targetHash": row["target_hash"],
+                "cueIndexes": json.loads(row["cue_indexes_json"] or "[]"),
+                "payload": json.loads(row["payload_json"] or "{}"),
+            }
+            for row in rows
+        ]
+
+    def recover_repair_jobs(self) -> int:
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                UPDATE repair_jobs SET state='persisted_for_restart',
+                    lease_owner=NULL, lease_expires_at=NULL,
+                    shutdown_classification='persisted_for_restart', updated_at=?
+                WHERE state IN ('queued', 'active')
+                """,
+                (time.time(),),
+            )
+            return max(0, int(cursor.rowcount))
+
+    def record_partial_candidate(
+        self,
+        *,
+        item_type: str,
+        item_id: int,
+        target_language: str,
+        source_hash: str,
+        target_hash: str,
+        changed_cues: Iterable[int],
+        unresolved_cues: Iterable[int],
+        provenance: list[dict],
+        artifact_path: str | Path | None,
+        source_language: str | None = None,
+        retry_plan_id: int | None = None,
+        quarantine_attempt_id: int | None = None,
+        validation_level: str = "partial_file_improved",
+    ) -> int:
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                INSERT INTO partial_candidates(
+                    retry_plan_id, quarantine_attempt_id, item_type, item_id,
+                    source_language, target_language, source_hash, target_hash,
+                    artifact_path, validation_level, validator_fingerprint,
+                    config_fingerprint, changed_cues_json, unresolved_cues_json,
+                    provenance_json, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    retry_plan_id, quarantine_attempt_id, str(item_type), int(item_id),
+                    source_language, str(target_language), str(source_hash),
+                    str(target_hash), _path_key(artifact_path), validation_level,
+                    self.validator_version, self.config_fingerprint,
+                    json.dumps(sorted(set(int(value) for value in changed_cues))),
+                    json.dumps(sorted(set(int(value) for value in unresolved_cues))),
+                    json.dumps(provenance, sort_keys=True), time.time(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def finalize_partial_candidate(
+        self,
+        candidate_id: int,
+        *,
+        artifact_path: str | Path,
+        quarantine_attempt_id: int | None = None,
+    ) -> bool:
+        with self._transaction() as db:
+            cursor = db.execute(
+                """
+                UPDATE partial_candidates
+                SET artifact_path=?, quarantine_attempt_id=COALESCE(?, quarantine_attempt_id)
+                WHERE id=?
+                """,
+                (_path_key(artifact_path), quarantine_attempt_id, int(candidate_id)),
+            )
+            return cursor.rowcount == 1
+
+    def record_cue_recovery(
+        self,
+        *,
+        item_type: str,
+        item_id: int,
+        target_language: str,
+        source_file_hash: str,
+        source_cue_number: int,
+        source_cue_hash: str,
+        source_signature: dict,
+        target_text: str,
+        target_hash: str,
+        recovery_stage: str,
+        partial_candidate_id: int | None = None,
+        source_language: str | None = None,
+        source_attempt_id: int | None = None,
+        cue_start_ms: int | None = None,
+        cue_end_ms: int | None = None,
+    ) -> int:
+        with self._transaction() as db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO cue_recoveries(
+                    partial_candidate_id, item_type, item_id, source_language,
+                    target_language, source_file_hash, source_cue_number,
+                    source_cue_hash, source_signature_json, cue_start_ms,
+                    cue_end_ms, target_text, target_hash, validator_fingerprint,
+                    config_fingerprint, recovery_stage, source_attempt_id,
+                    validation_result, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                         'cue_candidate_valid', ?)
+                """,
+                (
+                    partial_candidate_id, str(item_type), int(item_id), source_language,
+                    str(target_language), str(source_file_hash), int(source_cue_number),
+                    str(source_cue_hash), json.dumps(source_signature, sort_keys=True),
+                    cue_start_ms, cue_end_ms, str(target_text), str(target_hash),
+                    self.validator_version, self.config_fingerprint,
+                    str(recovery_stage), source_attempt_id, time.time(),
+                ),
+            )
+            row = db.execute(
+                """
+                SELECT id FROM cue_recoveries
+                WHERE item_type=? AND item_id=? AND target_language=?
+                  AND source_file_hash=? AND source_cue_hash=? AND target_hash=?
+                  AND validator_fingerprint=? AND config_fingerprint=?
+                """,
+                (
+                    str(item_type), int(item_id), str(target_language),
+                    str(source_file_hash), str(source_cue_hash), str(target_hash),
+                    self.validator_version, self.config_fingerprint,
+                ),
+            ).fetchone()
+            return int(row["id"])
+
+    def cue_recoveries(
+        self,
+        item_type: str,
+        item_id: int,
+        target_language: str,
+        *,
+        source_file_hash: str | None = None,
+    ) -> list[dict]:
+        query = """
+            SELECT * FROM cue_recoveries
+            WHERE item_type=? AND item_id=? AND target_language=?
+        """
+        params: list[object] = [str(item_type), int(item_id), str(target_language)]
+        if source_file_hash is not None:
+            query += " AND source_file_hash=?"
+            params.append(str(source_file_hash))
+        query += " ORDER BY created_at DESC, id DESC"
+        with self._lock:
+            rows = self._connection.execute(query, params).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "partialCandidateId": row["partial_candidate_id"],
+                "sourceCueNumber": int(row["source_cue_number"]),
+                "sourceCueHash": row["source_cue_hash"],
+                "sourceSignature": json.loads(row["source_signature_json"]),
+                "cueStartMs": row["cue_start_ms"],
+                "targetText": row["target_text"],
+                "targetHash": row["target_hash"],
+                "validatorFingerprint": row["validator_fingerprint"],
+                "configFingerprint": row["config_fingerprint"],
+                "recoveryStage": row["recovery_stage"],
+                "sourceAttemptId": row["source_attempt_id"],
+                "createdAt": float(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def record_donor_event(
+        self,
+        *,
+        item_type: str,
+        item_id: int,
+        target_language: str,
+        reason_code: str,
+        cue_number: int | None = None,
+        retry_plan_id: int | None = None,
+        donor_attempt_id: int | None = None,
+    ) -> None:
+        with self._transaction() as db:
+            db.execute(
+                """
+                INSERT INTO donor_events(
+                    retry_plan_id, item_type, item_id, target_language,
+                    cue_number, donor_attempt_id, reason_code, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    retry_plan_id, str(item_type), int(item_id),
+                    str(target_language), cue_number, donor_attempt_id,
+                    str(reason_code), time.time(),
+                ),
+            )
+
+    def record_retry_admission(
+        self,
+        plan_id: int,
+        completed_cycle: int,
+        classification: str,
+        reason_code: str | None = None,
+    ) -> None:
+        with self._transaction() as db:
+            db.execute(
+                """
+                INSERT INTO retry_admission_events(
+                    retry_plan_id, completed_cycle, classification,
+                    reason_code, created_at
+                ) VALUES(?, ?, ?, ?, ?)
+                """,
+                (
+                    int(plan_id), max(0, int(completed_cycle)),
+                    str(classification), reason_code, time.time(),
+                ),
+            )
+
+    def record_provider_event(
+        self,
+        *,
+        provider: str,
+        operation: str,
+        classification: str,
+        retryable: bool,
+        http_status: int | None = None,
+        response_shape: dict | None = None,
+        model: str | None = None,
+    ) -> None:
+        with self._transaction() as db:
+            db.execute(
+                """
+                INSERT INTO provider_events(
+                    provider, operation, classification, http_status,
+                    retryable, response_shape_json, model, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(provider), str(operation), str(classification), http_status,
+                    int(bool(retryable)), json.dumps(response_shape or {}, sort_keys=True),
+                    model, time.time(),
+                ),
+            )
+
+    def record_failure_fingerprint(
+        self,
+        *,
+        item_type: str,
+        item_id: int,
+        target_language: str,
+        source_file_hash: str,
+        source_cue_hash: str,
+        strategy_key: str,
+        provider: str,
+        config_fingerprint: str,
+        output_fingerprint: str,
+        failure_class: str,
+        model: str | None = None,
+    ) -> int:
+        timestamp = time.time()
+        with self._transaction() as db:
+            db.execute(
+                """
+                INSERT INTO failure_fingerprints(
+                    item_type, item_id, target_language, source_file_hash,
+                    source_cue_hash, strategy_key, provider, model,
+                    config_fingerprint, output_fingerprint, failure_class,
+                    first_seen_at, last_seen_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(item_type, item_id, target_language,
+                            source_file_hash, source_cue_hash, strategy_key,
+                            provider, config_fingerprint, output_fingerprint)
+                DO UPDATE SET occurrences=occurrences+1,
+                              last_seen_at=excluded.last_seen_at,
+                              failure_class=excluded.failure_class,
+                              model=COALESCE(excluded.model, model)
+                """,
+                (
+                    str(item_type), int(item_id), str(target_language),
+                    str(source_file_hash), str(source_cue_hash), str(strategy_key),
+                    str(provider), model, str(config_fingerprint),
+                    str(output_fingerprint), str(failure_class), timestamp, timestamp,
+                ),
+            )
+            row = db.execute(
+                """
+                SELECT occurrences FROM failure_fingerprints
+                WHERE item_type=? AND item_id=? AND target_language=?
+                  AND source_file_hash=? AND source_cue_hash=?
+                  AND strategy_key=? AND provider=? AND config_fingerprint=?
+                  AND output_fingerprint=?
+                """,
+                (
+                    str(item_type), int(item_id), str(target_language),
+                    str(source_file_hash), str(source_cue_hash), str(strategy_key),
+                    str(provider), str(config_fingerprint), str(output_fingerprint),
+                ),
+            ).fetchone()
+            return int(row["occurrences"])
+
+    def exhausted_recovery_strategies(
+        self,
+        *,
+        item_type: str,
+        item_id: int,
+        target_language: str,
+        source_file_hash: str,
+        provider: str,
+        config_fingerprint: str,
+        minimum_occurrences: int = 2,
+    ) -> dict[str, set[str]]:
+        """Return strategies with durable equivalent failures, keyed by cue hash."""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT source_cue_hash, strategy_key
+                FROM failure_fingerprints
+                WHERE item_type=? AND item_id=? AND target_language=?
+                  AND source_file_hash=? AND provider=? AND config_fingerprint=?
+                GROUP BY source_cue_hash, strategy_key
+                HAVING MAX(occurrences) >= ?
+                """,
+                (
+                    str(item_type), int(item_id), str(target_language),
+                    str(source_file_hash), str(provider), str(config_fingerprint),
+                    max(1, int(minimum_occurrences)),
+                ),
+            ).fetchall()
+        exhausted: dict[str, set[str]] = {}
+        for row in rows:
+            exhausted.setdefault(str(row["source_cue_hash"]), set()).add(
+                str(row["strategy_key"])
+            )
+        return exhausted
+
+    def legacy_quarantine_entry(
+        self,
+        artifact_path: str | Path,
+        artifact_hash: str | None = None,
+    ) -> dict | None:
+        if artifact_hash is None:
+            # Temporary compatibility for callers written against the initial
+            # additive schema. New indexing always uses path plus content hash.
+            row = self._fetchone(
+                "SELECT * FROM legacy_quarantine_index WHERE artifact_hash=? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (str(artifact_path),),
+            )
+        else:
+            row = self._fetchone(
+                "SELECT * FROM legacy_quarantine_index "
+                "WHERE artifact_path=? AND artifact_hash=?",
+                (_path_key(artifact_path), str(artifact_hash)),
+            )
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "state": row["state"],
+            "reasonCode": row["reason_code"],
+            "quarantineAttemptId": row["quarantine_attempt_id"],
+        }
+
+    def record_legacy_quarantine_entry(
+        self,
+        *,
+        artifact_path: str | Path,
+        artifact_hash: str,
+        state: str,
+        reason_code: str | None = None,
+        quarantine_attempt_id: int | None = None,
+        partial_candidate_id: int | None = None,
+    ) -> None:
+        timestamp = time.time()
+        with self._transaction() as db:
+            db.execute(
+                """
+                INSERT INTO legacy_quarantine_index(
+                    artifact_path, artifact_hash, state, reason_code,
+                    quarantine_attempt_id, partial_candidate_id,
+                    scanned_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(artifact_path, artifact_hash) DO UPDATE SET
+                    state=excluded.state, reason_code=excluded.reason_code,
+                    quarantine_attempt_id=COALESCE(
+                        excluded.quarantine_attempt_id, quarantine_attempt_id),
+                    partial_candidate_id=COALESCE(
+                        excluded.partial_candidate_id, partial_candidate_id),
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    _path_key(artifact_path), str(artifact_hash), str(state),
+                    reason_code, quarantine_attempt_id, partial_candidate_id,
+                    timestamp, timestamp,
+                ),
+            )
+
+    def resolve_legacy_media(
+        self,
+        *,
+        source_path: str | Path,
+        target_path: str | Path,
+        target_language: str,
+        source_hash: str,
+    ) -> dict | None:
+        normalized_source = _path_key(source_path)
+        normalized_target = _path_key(target_path)
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT item_type, item_id, source_language
+                FROM translation_attempts
+                WHERE target_language=? AND source_hash=?
+                  AND source_path=?
+                  AND (target_path=? OR expected_target_path=? OR actual_target_path=?)
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (
+                    str(target_language), str(source_hash), normalized_source,
+                    normalized_target, normalized_target, normalized_target,
+                ),
+            ).fetchone()
+        if row is None or row["item_type"] not in ("episodes", "movies"):
+            return None
+        return {
+            "itemType": row["item_type"],
+            "itemId": int(row["item_id"]),
+            "sourceLanguage": row["source_language"],
+        }
+
+    def recovery_summary(
+        self, item_type: str, item_id: int, target_language: str
+    ) -> dict:
+        with self._lock:
+            recovered = self._connection.execute(
+                """
+                SELECT COUNT(DISTINCT source_cue_number) AS count
+                FROM cue_recoveries
+                WHERE item_type=? AND item_id=? AND target_language=?
+                """,
+                (str(item_type), int(item_id), str(target_language)),
+            ).fetchone()
+            partial = self._connection.execute(
+                """
+                SELECT unresolved_cues_json, validation_level
+                FROM partial_candidates
+                WHERE item_type=? AND item_id=? AND target_language=?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (str(item_type), int(item_id), str(target_language)),
+            ).fetchone()
+        unresolved = [] if partial is None else json.loads(partial["unresolved_cues_json"])
+        return {
+            "validRecoveredCueCount": int(recovered["count"] or 0),
+            "unresolvedCueCount": len(unresolved),
+            "latestRecoveryStage": (
+                partial["validation_level"] if partial is not None else None
+            ),
+        }
+
+    def diagnostic_aggregates(self) -> dict:
+        with self._lock:
+            donor_rows = self._connection.execute(
+                "SELECT reason_code, COUNT(*) AS count FROM donor_events GROUP BY reason_code"
+            ).fetchall()
+            repair_rows = self._connection.execute(
+                "SELECT state, COUNT(*) AS count FROM repair_jobs GROUP BY state"
+            ).fetchall()
+            provider_rows = self._connection.execute(
+                "SELECT classification, COUNT(*) AS count FROM provider_events "
+                "GROUP BY classification"
+            ).fetchall()
+            admission_rows = self._connection.execute(
+                "SELECT classification, COUNT(*) AS count FROM retry_admission_events "
+                "WHERE completed_cycle=? GROUP BY classification",
+                (self._completed_cycle_in(self._connection),),
+            ).fetchall()
+            maintenance = self._connection.execute(
+                "SELECT operation, state, failure_code, started_at, completed_at "
+                "FROM maintenance_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return {
+            "donors": {row["reason_code"]: int(row["count"]) for row in donor_rows},
+            "repairs": {row["state"]: int(row["count"]) for row in repair_rows},
+            "providerHealth": {
+                row["classification"]: int(row["count"]) for row in provider_rows
+            },
+            "retryAdmissions": {
+                row["classification"]: int(row["count"]) for row in admission_rows
+            },
+            "maintenance": (
+                None
+                if maintenance is None
+                else {
+                    "operation": maintenance["operation"],
+                    "state": maintenance["state"],
+                    "failureCode": maintenance["failure_code"],
+                    "startedAt": maintenance["started_at"],
+                    "completedAt": maintenance["completed_at"],
+                    "retryNeeded": maintenance["state"] == "failed",
+                }
+            ),
+        }
 
     def _verify(self) -> None:
         result = self._connection.execute("PRAGMA quick_check").fetchone()[0]
         if result != "ok":
             raise StateStoreError(
                 f"SQLite quick_check failed for {self.path}: {result}"
+            )
+        foreign_key_errors = self._connection.execute(
+            "PRAGMA foreign_key_check"
+        ).fetchall()
+        if foreign_key_errors:
+            raise StateStoreError(
+                f"SQLite foreign_key_check failed for {self.path}: "
+                f"{len(foreign_key_errors)} violation(s)"
             )
 
     def close(self) -> None:
@@ -2264,6 +3511,10 @@ class StateStore:
                     Path(row["pending_destination"])
                     if row["pending_destination"] else None
                 )
+                try:
+                    metadata = json.loads(row["pending_metadata_json"] or "{}")
+                except (TypeError, ValueError):
+                    metadata = {}
                 if row["disposition"] == "replacement_pending":
                     matches = (
                         target_path.exists()
@@ -2271,21 +3522,90 @@ class StateStore:
                     )
                     disposition = "active" if matches else "abandoned"
                 elif row["disposition"] == "quarantine_pending":
+                    candidate_path = (
+                        Path(metadata["candidatePath"])
+                        if metadata.get("candidatePath") else None
+                    )
+                    input_destination = (
+                        Path(metadata["inputDestination"])
+                        if metadata.get("inputDestination") else None
+                    )
+                    if candidate_path is not None and destination is not None:
+                        try:
+                            if (
+                                target_path.exists()
+                                and input_destination is not None
+                                and not input_destination.exists()
+                            ):
+                                input_destination.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.move(str(target_path), str(input_destination))
+                            if candidate_path.exists() and not destination.exists():
+                                destination.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.move(str(candidate_path), str(destination))
+                        except OSError:
+                            stats["abandoned"] += 1
+                            continue
+                    elif destination is not None:
+                        try:
+                            if target_path.exists() and not destination.exists():
+                                destination.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.move(str(target_path), str(destination))
+                        except OSError:
+                            stats["abandoned"] += 1
+                            continue
                     moved = bool(
                         destination is not None
                         and destination.exists()
                         and not target_path.exists()
                     )
-                    disposition = "quarantined" if moved else "active"
+                    destination_matches = bool(
+                        moved
+                        and self._hash_file(destination) == row["target_hash"]
+                    )
+                    if destination_matches:
+                        db.execute("SAVEPOINT quarantine_resume")
+                        try:
+                            identity = (
+                                metadata.get("holdIdentity")
+                                or row["target_identity"]
+                            )
+                            language = row["target_language"]
+                            if identity and language and row["target_hash"]:
+                                event, repeated, metadata = (
+                                    self._record_pending_quarantine_hold_in(
+                                        db,
+                                        int(row["id"]),
+                                        metadata,
+                                        identity=str(identity),
+                                        target_path=row["target_path"],
+                                        target_hash=str(row["target_hash"]),
+                                        target_language=str(language),
+                                        rules=metadata.get("rules", []),
+                                        origin=row["origin"],
+                                        timestamp=datetime.now(timezone.utc),
+                                    )
+                                )
+                                audit = metadata.get("audit")
+                                if isinstance(audit, dict):
+                                    audit = dict(audit)
+                                    audit["quarantineEvent"] = event
+                                    audit["repeatOffender"] = repeated
+                                    metadata["audit"] = audit
+                            self._resume_quarantine_metadata_in(
+                                db, metadata, destination
+                            )
+                            db.execute("RELEASE SAVEPOINT quarantine_resume")
+                            disposition = "quarantined"
+                        except (OSError, KeyError, TypeError, ValueError, sqlite3.Error):
+                            db.execute("ROLLBACK TO SAVEPOINT quarantine_resume")
+                            db.execute("RELEASE SAVEPOINT quarantine_resume")
+                            stats["abandoned"] += 1
+                            continue
+                    else:
+                        disposition = "quarantine_pending"
                 else:
                     disposition = "deleted" if not target_path.exists() else "active"
-                if disposition in ("quarantined", "deleted"):
-                    try:
-                        metadata = json.loads(
-                            row["pending_metadata_json"] or "{}"
-                        )
-                    except (TypeError, ValueError):
-                        metadata = {}
+                if disposition == "deleted":
                     rules = sorted({
                         str(rule) for rule in metadata.get("rules", []) if rule
                     })
@@ -2323,6 +3643,9 @@ class StateStore:
                                 hold_until,
                             ),
                         )
+                if disposition == "quarantine_pending":
+                    stats["abandoned"] += 1
+                    continue
                 db.execute(
                     """
                     UPDATE subtitle_artifacts
@@ -2339,6 +3662,70 @@ class StateStore:
                     else "abandoned"
                 ] += 1
         return stats
+
+    def _resume_quarantine_metadata_in(
+        self,
+        db: sqlite3.Connection,
+        metadata: dict,
+        destination: Path,
+    ) -> None:
+        attempt = metadata.get("quarantineAttempt")
+        report_path = (
+            Path(attempt["report_path"])
+            if isinstance(attempt, dict) and attempt.get("report_path")
+            else Path(f"{destination}.validation.json")
+        )
+        audit = metadata.get("audit")
+        if isinstance(audit, dict):
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_name = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", newline="",
+                    prefix=f".{report_path.name}.", suffix=".tmp",
+                    dir=report_path.parent, delete=False,
+                ) as report_file:
+                    json.dump(audit, report_file, ensure_ascii=False, indent=2)
+                    temp_name = report_file.name
+                os.replace(temp_name, report_path)
+                temp_name = None
+            finally:
+                if temp_name is not None:
+                    try:
+                        Path(temp_name).unlink()
+                    except OSError:
+                        pass
+            written_audit = json.loads(report_path.read_text(encoding="utf-8"))
+            expected_hash = (
+                attempt.get("target_hash")
+                if isinstance(attempt, dict)
+                else audit.get("targetHash")
+            )
+            if expected_hash and written_audit.get("targetHash") != expected_hash:
+                raise ValueError("quarantine report target hash mismatch")
+        if not isinstance(attempt, dict):
+            return
+        attempt = dict(attempt)
+        attempt["artifact_path"] = str(destination)
+        attempt["report_path"] = str(report_path)
+        attempt_row = self._record_quarantine_attempt_in(
+            db, self._quarantine_attempt_values(attempt)
+        )
+        partial_id = metadata.get("partialCandidateId")
+        if partial_id is None:
+            return
+        cursor = db.execute(
+            """
+            UPDATE partial_candidates
+            SET artifact_path=?, quarantine_attempt_id=?
+            WHERE id=?
+            """,
+            (
+                _path_key(destination), int(attempt_row["id"]), int(partial_id),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"partial candidate {partial_id} no longer exists")
 
     @staticmethod
     def _hash_file(path: Path) -> str | None:
@@ -2561,6 +3948,114 @@ class StateStore:
         ).isoformat()
         cutoff_timestamp = timestamp.timestamp() - retention_days * 86400
         with self._transaction() as db:
+            recovery_events = db.execute(
+                "DELETE FROM recovery_stage_events WHERE created_at < ?",
+                (cutoff_timestamp,),
+            ).rowcount
+            donor_events = db.execute(
+                "DELETE FROM donor_events WHERE created_at < ?",
+                (cutoff_timestamp,),
+            ).rowcount
+            provider_events = db.execute(
+                "DELETE FROM provider_events WHERE created_at < ?",
+                (cutoff_timestamp,),
+            ).rowcount
+            admission_events = db.execute(
+                "DELETE FROM retry_admission_events WHERE created_at < ?",
+                (cutoff_timestamp,),
+            ).rowcount
+            maintenance_runs = db.execute(
+                """
+                DELETE FROM maintenance_runs
+                WHERE completed_at IS NOT NULL AND completed_at < ?
+                """,
+                (cutoff_timestamp,),
+            ).rowcount
+            repair_jobs = db.execute(
+                """
+                DELETE FROM repair_jobs
+                WHERE updated_at < ? AND state IN ('completed', 'failed')
+                """,
+                (cutoff_timestamp,),
+            ).rowcount
+            failure_fingerprints = db.execute(
+                """
+                DELETE FROM failure_fingerprints AS fingerprint
+                WHERE last_seen_at < ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM retry_plans AS plan
+                    WHERE plan.item_type=fingerprint.item_type
+                      AND plan.item_id=fingerprint.item_id
+                      AND plan.target_language=fingerprint.target_language
+                      AND plan.source_hash=fingerprint.source_file_hash
+                      AND plan.state IN (
+                        'repair_retry_queued', 'regeneration_waiting',
+                        'regeneration_queued', 'retry_in_progress'
+                      )
+                  )
+                """,
+                (cutoff_timestamp,),
+            ).rowcount
+            cue_recoveries = db.execute(
+                """
+                DELETE FROM cue_recoveries AS recovery
+                WHERE recovery.created_at < ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM partial_candidates AS candidate
+                    JOIN retry_plans AS plan ON plan.id=candidate.retry_plan_id
+                    WHERE candidate.id=recovery.partial_candidate_id
+                      AND plan.state IN (
+                        'repair_retry_queued', 'regeneration_waiting',
+                        'regeneration_queued', 'retry_in_progress'
+                      )
+                  )
+                """,
+                (cutoff_timestamp,),
+            ).rowcount
+            legacy_rows = db.execute(
+                """
+                SELECT id, artifact_path FROM legacy_quarantine_index
+                WHERE updated_at < ?
+                """,
+                (cutoff_timestamp,),
+            ).fetchall()
+            missing_legacy_ids = [
+                int(row["id"]) for row in legacy_rows
+                if not Path(row["artifact_path"]).exists()
+            ]
+            legacy_entries = 0
+            if missing_legacy_ids:
+                placeholders = ",".join("?" for _ in missing_legacy_ids)
+                legacy_entries = db.execute(
+                    f"DELETE FROM legacy_quarantine_index "
+                    f"WHERE id IN ({placeholders})",
+                    missing_legacy_ids,
+                ).rowcount
+            partial_candidates = db.execute(
+                """
+                DELETE FROM partial_candidates AS candidate
+                WHERE candidate.created_at < ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM cue_recoveries
+                    WHERE partial_candidate_id=candidate.id
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM legacy_quarantine_index
+                    WHERE partial_candidate_id=candidate.id
+                  )
+                  AND (
+                    candidate.retry_plan_id IS NULL OR NOT EXISTS (
+                      SELECT 1 FROM retry_plans AS plan
+                      WHERE plan.id=candidate.retry_plan_id
+                        AND plan.state IN (
+                          'repair_retry_queued', 'regeneration_waiting',
+                          'regeneration_queued', 'retry_in_progress'
+                        )
+                    )
+                  )
+                """,
+                (cutoff_timestamp,),
+            ).rowcount
             validations = db.execute(
                 "DELETE FROM validation_results WHERE validated_at < ?", (cutoff,)
             ).rowcount
@@ -2584,7 +4079,12 @@ class StateStore:
                 "DELETE FROM timing_samples WHERE created_at < ?",
                 (cutoff_timestamp,),
             ).rowcount
-        return int(validations + holds + attempts + timings)
+        return int(
+            recovery_events + donor_events + provider_events
+            + admission_events + maintenance_runs + repair_jobs
+            + failure_fingerprints + cue_recoveries + legacy_entries
+            + partial_candidates + validations + holds + attempts + timings
+        )
 
     # ------------------------------------------------------------------
     # One-time JSON migration
