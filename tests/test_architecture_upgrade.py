@@ -1,4 +1,5 @@
 import json
+import ast
 import sqlite3
 import sys
 import tempfile
@@ -34,6 +35,30 @@ def make_srt(*texts: str) -> str:
 
 
 class ArchitectureUpgradeTests(unittest.TestCase):
+    def test_legacy_modules_are_thin_wrappers_and_package_does_not_import_them(self):
+        docker_root = REPO_ROOT / "docker"
+        legacy_names = {
+            "Bazarr_AutoTranslate", "clean_et_subs", "state_store", "status_dashboard"
+        }
+        for name in legacy_names:
+            wrapper = docker_root / f"{name}.py"
+            self.assertLessEqual(
+                len(wrapper.read_text(encoding="utf-8").splitlines()), 20, wrapper
+            )
+        for module in (docker_root / "autotranslate").rglob("*.py"):
+            tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported = {alias.name.split(".", 1)[0] for alias in node.names}
+                elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                    imported = {(node.module or "").split(".", 1)[0]}
+                else:
+                    continue
+                self.assertTrue(
+                    imported.isdisjoint(legacy_names),
+                    f"{module} imports outward compatibility module(s): {imported}",
+                )
+
     def test_typed_config_preserves_required_inputs_and_shutdown_default(self):
         config = Config.from_env({
             "BAZARR_URL": "bazarr:6767/",
