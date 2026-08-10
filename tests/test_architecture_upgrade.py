@@ -12,6 +12,9 @@ sys.path.insert(0, str(REPO_ROOT / "docker"))
 
 from autotranslate.config import Config, ConfigError  # noqa: E402
 from autotranslate.lifecycle import LifecycleController  # noqa: E402
+from autotranslate.scheduling.capacity import CapacityCoordinator  # noqa: E402
+from autotranslate.scheduling.locks import KeyedLockRegistry  # noqa: E402
+from autotranslate.scheduling.repairs import RepairCoordinator  # noqa: E402
 from autotranslate.models import MaintenanceResult  # noqa: E402
 from autotranslate.services.lingarr import (  # noqa: E402
     ProviderResponseError,
@@ -35,6 +38,51 @@ def make_srt(*texts: str) -> str:
 
 
 class ArchitectureUpgradeTests(unittest.TestCase):
+    def test_keyed_lock_registry_evicts_unique_paths(self):
+        registry = KeyedLockRegistry()
+        for index in range(1000):
+            with registry.hold(f"/media/episode-{index}.et.srt"):
+                self.assertGreaterEqual(registry.size, 1)
+        self.assertEqual(registry.size, 0)
+
+    def test_repair_coordinator_drains_only_its_scope(self):
+        class State:
+            def __init__(self):
+                self.next_id = 0
+                self.states = {}
+
+            def enqueue_repair_job(self, **_values):
+                self.next_id += 1
+                self.states[self.next_id] = "queued"
+                return self.next_id
+
+            def transition_repair_job(self, job_id, state, expected_states=(), **_values):
+                if expected_states and self.states[job_id] not in expected_states:
+                    return False
+                self.states[job_id] = state
+                return True
+
+            def repair_jobs_for_restart(self):
+                return [
+                    {"id": job_id} for job_id, state in self.states.items()
+                    if state == "persisted_for_restart"
+                ]
+
+        state = State()
+        repairs = RepairCoordinator(
+            state, CapacityCoordinator(2), workers=2,
+            shutdown_grace_seconds=1,
+        )
+        repairs.submit("cycle-1", "one", {"target_language": "et"}, lambda: "one")
+        repairs.submit("scan-1", "two", {"target_language": "sv"}, lambda: "two")
+        cycle = repairs.drain("cycle-1")
+        self.assertEqual(cycle.completed, 1)
+        self.assertEqual(cycle.results, ("one",))
+        scan = repairs.drain("scan-1")
+        self.assertEqual(scan.completed, 1)
+        self.assertEqual(scan.results, ("two",))
+        self.assertEqual(repairs.shutdown(), 0)
+
     def test_legacy_modules_are_thin_wrappers_and_package_does_not_import_them(self):
         docker_root = REPO_ROOT / "docker"
         legacy_names = {

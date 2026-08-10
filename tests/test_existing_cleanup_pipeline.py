@@ -449,6 +449,63 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(stats["prune_candidates"], 0)
             self.assertTrue(extra.exists())
 
+    def test_successfully_used_eng_hash_is_prune_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "episode.mkv"
+            source = root / "episode.eng.srt"
+            target = root / "episode.et.srt"
+            video.write_bytes(b"video")
+            source.write_text(make_srt("English dialogue"), encoding="utf-8")
+            target.write_text(make_srt("Eestikeelne dialoog"), encoding="utf-8")
+            source_hash = app._file_hash_or_none(source)
+            app._validation_state.record_source_readiness(
+                media_identity=app._media_identity_for_video(video),
+                video_path=video,
+                source_path=source,
+                source_language="en",
+                source_hash=source_hash,
+                media_duration_seconds=600,
+                target_language="et",
+            )
+            classification = app._classify_sidecar(video, source)
+            with patch.object(app, "CLEANUP_UNDERSIZED_ENABLED", True):
+                ready, evidence = app._managed_sidecar_is_valid(
+                    classification, 600, detector=object()
+                )
+            self.assertTrue(ready)
+            self.assertEqual(evidence["reason"], "successful_source_hash")
+
+    def test_cached_scan_publishes_visited_file_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "episode.et.srt"
+            target.write_text(make_srt("Tere"), encoding="utf-8")
+            tracker = app.StatusTracker(
+                root / "status.json", root / "history.jsonl"
+            )
+            candidate = SimpleNamespace(
+                path=target, target_lang="et", variant=""
+            )
+            with (
+                patch.object(app, "_status_tracker", tracker),
+                patch.object(app, "CLEANUP_SCAN_EXISTING", True),
+                patch.object(app, "CLEANUP_ROOTS", [root]),
+                patch.object(app, "CLEANUP_LANGUAGES", {"et"}),
+                patch.object(app, "_scan_undersized_sidecars", return_value=False),
+                patch.object(app, "_get_cleanup_detector", return_value=object()),
+                patch.object(cleanup, "discover_target_subtitles", return_value=[candidate]),
+                patch.object(cleanup, "find_preferred_source", return_value=(None, None)),
+                patch.object(app._validation_state, "is_unchanged_valid", return_value=True),
+                patch.object(app, "run_extra_sidecar_prune", return_value=(app._prune_stats(), False, False)),
+            ):
+                result = app._run_existing_cleanup_scan_safely()
+            self.assertIsNotNone(result)
+            outcome = tracker.snapshot()["maintenance"]["recentOutcomes"][0]
+            self.assertEqual(outcome["filesDiscovered"], 1)
+            self.assertEqual(outcome["filesChecked"], 1)
+            self.assertEqual(outcome["progress"], 100)
+
     def test_managed_variants_are_preserved_and_forced_only_does_not_satisfy_readiness(self):
         with tempfile.TemporaryDirectory() as directory:
             root, video = self._prune_fixture(directory, managed=("en", "et"))

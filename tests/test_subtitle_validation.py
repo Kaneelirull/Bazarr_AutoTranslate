@@ -4,6 +4,7 @@ import unittest
 import json
 import os
 import time
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -35,6 +36,7 @@ from clean_et_subs import (  # noqa: E402
     classify_validation_failure,
 )
 from state_store import StateStore  # noqa: E402
+from autotranslate.scheduling.locks import ArtifactAccessCoordinator  # noqa: E402
 
 
 def make_srt(*texts: str) -> str:
@@ -858,6 +860,34 @@ class SubtitleValidationTests(unittest.TestCase):
             self.assertTrue(recent_file.exists())
             self.assertTrue(excluded_file.exists())
             self.assertFalse((root / "old").exists())
+
+    def test_retention_waits_for_active_artifact_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "donor.et.srt"
+            artifact.write_text("donor", encoding="utf-8")
+            now = time.time()
+            old_time = now - 31 * 86400
+            os.utime(artifact, (old_time, old_time))
+            access = ArtifactAccessCoordinator()
+            completed = threading.Event()
+
+            def retain():
+                purge_old_files(
+                    root, 30, now_timestamp=now,
+                    access_coordinator=access,
+                )
+                completed.set()
+
+            with access.hold(artifact):
+                worker = threading.Thread(target=retain)
+                worker.start()
+                self.assertFalse(completed.wait(0.05))
+                self.assertTrue(artifact.exists())
+            self.assertTrue(completed.wait(1))
+            worker.join(1)
+            self.assertFalse(artifact.exists())
+            self.assertEqual(access.registry_size, 0)
 
     def test_validation_state_history_uses_same_retention(self):
         with tempfile.TemporaryDirectory() as directory:

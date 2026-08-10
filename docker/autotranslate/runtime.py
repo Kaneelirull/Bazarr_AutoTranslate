@@ -32,6 +32,10 @@ from .status.dashboard import (
 )
 from media_identity import resolve_media_identity, retry_media_identity
 from .persistence.state_store import StateStore, StateStoreError
+from .scheduling.locks import ArtifactAccessCoordinator
+from .cycle import CycleRunner
+from .lifecycle import LifecycleController
+from .maintenance.coordinator import MaintenanceCoordinator, MaintenanceOperation
 
 # Unbuffered output
 sys.stdout = os.fdopen(sys.stdout.fileno(), "w", buffering=1)
@@ -391,6 +395,12 @@ _VALIDATION_CONFIG_FINGERPRINT = hashlib.sha256(
             "maxCyrillicRatio": CLEANUP_MAX_CYRILLIC_RATIO,
             "maxCjkRatio": CLEANUP_MAX_CJK_RATIO,
             "maxLatinRatio": CLEANUP_MAX_LATIN_RATIO,
+            "minMediaDuration": CLEANUP_MIN_MEDIA_DURATION,
+            "minCuesPerMinute": CLEANUP_MIN_CUES_PER_MINUTE,
+            "minTextCharsPerMinute": CLEANUP_MIN_TEXT_CHARS_PER_MINUTE,
+            "minBytesPerMinute": CLEANUP_MIN_BYTES_PER_MINUTE,
+            "minTimelineCoverage": CLEANUP_MIN_TIMELINE_COVERAGE,
+            "undersizedRequiredSignals": CLEANUP_UNDERSIZED_REQUIRED_SIGNALS,
             "donorEnabled": DONOR_RECOVERY_ENABLED,
             "donorSimilarity": 0.95,
             "donorTimestampToleranceMs": 500,
@@ -459,8 +469,7 @@ _repair_capacity = threading.BoundedSemaphore(PARALLEL_TRANSLATES + CLEANUP_REPA
 _pending_repairs: dict[Future, dict] = {}
 _pending_repairs_lock = threading.Lock()
 _repair_keys: set[tuple] = set()
-_target_repair_locks: dict[str, threading.Lock] = {}
-_target_repair_locks_lock = threading.Lock()
+_artifact_access = ArtifactAccessCoordinator()
 _duration_cache: dict[tuple[str, int, int], float | None] = {}
 _duration_cache_lock = threading.Lock()
 _pending_prune_videos: dict[str, str | None] = {}
@@ -1246,6 +1255,28 @@ def _scan_progress_details(context: dict) -> dict:
     return details
 
 
+def _publish_scan_progress(scan_job_id: str | None, *, force: bool = False) -> None:
+    if not scan_job_id:
+        return
+    details = None
+    with _maintenance_scan_contexts_lock:
+        context = _maintenance_scan_contexts.get(scan_job_id)
+        if context is None:
+            return
+        now = time.monotonic()
+        should_publish = bool(
+            force
+            or context["files_checked"] == 1
+            or now - context.get("last_publish", 0) >= 0.5
+            or context["files_checked"] >= context["files_discovered"]
+        )
+        if should_publish:
+            context["last_publish"] = now
+            details = _scan_progress_details(context)
+    if details is not None:
+        _status_update_maintenance(scan_job_id, "scanning", details=details)
+
+
 def _scan_child_queued(scan_job_id: str | None) -> None:
     if not scan_job_id:
         return
@@ -1273,7 +1304,7 @@ def _scan_child_finished(scan_job_id: str | None, outcome: str) -> None:
             context["stats"]["async_repairs_completed"] = (
                 context["stats"].get("async_repairs_completed", 0) + 1
             )
-        else:
+        elif outcome not in ("completed", "quarantined", "deleted"):
             context["stats"]["async_repair_failures"] = (
                 context["stats"].get("async_repair_failures", 0) + 1
             )
@@ -1281,8 +1312,14 @@ def _scan_child_finished(scan_job_id: str | None, outcome: str) -> None:
         finalize = context.get("enumeration_done", False) and context["pending"] == 0
         if finalize:
             _maintenance_scan_contexts.pop(scan_job_id, None)
+    failed = bool(context["stats"].get("async_repair_failures", 0))
     if finalize:
-        _status_complete_maintenance(scan_job_id, "accepted", details=details)
+        _status_complete_maintenance(
+            scan_job_id,
+            "failed" if failed else "accepted",
+            reason="repair worker failed" if failed else None,
+            details=details,
+        )
         _status_record_maintenance(_maintenance_metrics(context["stats"]))
     else:
         _status_update_maintenance(
@@ -1304,8 +1341,17 @@ def _scan_enumeration_finished(scan_job_id: str | None, stats: dict) -> None:
         finalize = context["pending"] == 0
         if finalize:
             _maintenance_scan_contexts.pop(scan_job_id, None)
+    failed = bool(
+        context["stats"].get("async_repair_failures", 0)
+        or context["stats"].get("cleanup_repair_failures", 0)
+    )
     if finalize:
-        _status_complete_maintenance(scan_job_id, "accepted", details=details)
+        _status_complete_maintenance(
+            scan_job_id,
+            "failed" if failed else "accepted",
+            reason="repair worker failed" if failed else None,
+            details=details,
+        )
         _status_record_maintenance(_maintenance_metrics(context["stats"]))
     else:
         _status_update_maintenance(
@@ -2942,6 +2988,46 @@ def _file_hash_or_none(path: str | Path | None) -> str | None:
         return None
 
 
+def _media_identity_for_video(video_path: str | Path) -> str:
+    video = Path(video_path)
+    return os.path.normcase(os.path.abspath(str(video.with_suffix(""))))
+
+
+def _record_successful_source_readiness(
+    source_path: str | Path,
+    source_language: str,
+    target_path: str | Path,
+    target_language: str,
+    media_duration: float | None = None,
+) -> bool:
+    video = _find_sidecar_video(source_path)
+    source_hash = _file_hash_or_none(source_path)
+    if video is None or source_hash is None:
+        return False
+    if media_duration is None:
+        media_duration = _probe_media_duration(video)
+    target_hash = _file_hash_or_none(target_path)
+    artifact = (
+        _get_validation_state().latest_artifact(target_path, target_hash)
+        if target_hash is not None else None
+    )
+    try:
+        _get_validation_state().record_source_readiness(
+            media_identity=_media_identity_for_video(video),
+            video_path=video,
+            source_path=source_path,
+            source_language=source_language,
+            source_hash=source_hash,
+            media_duration_seconds=media_duration,
+            target_artifact_id=(int(artifact["id"]) if artifact else None),
+            target_language=target_language,
+        )
+        return True
+    except (OSError, StateStoreError) as exc:
+        print(f"{YELLOW}[SOURCE] Could not persist successful-use evidence: {exc}{RESET}")
+        return False
+
+
 def _record_validation_result(
     target_path: str | Path,
     source_hash: str | None,
@@ -3337,6 +3423,7 @@ def _apply_cleanup_action(
                     CLEANUP_ROOTS,
                     CLEANUP_QUARANTINE_DIR,
                     destination=input_destination,
+                    access_coordinator=_artifact_access,
                 )
                 pending_metadata["phase"] = "input_archived"
                 _get_validation_state().set_artifact_disposition(
@@ -3347,6 +3434,7 @@ def _apply_cleanup_action(
                 destination = quarantine_subtitle(
                     candidate_to_move, CLEANUP_ROOTS, CLEANUP_QUARANTINE_DIR,
                     destination=destination,
+                    access_coordinator=_artifact_access,
                 )
                 audit["supersededInputArtifact"] = input_destination.name
                 audit["partialCandidate"] = True
@@ -3354,6 +3442,7 @@ def _apply_cleanup_action(
                 destination = quarantine_subtitle(
                     target, CLEANUP_ROOTS, CLEANUP_QUARANTINE_DIR,
                     destination=destination,
+                    access_coordinator=_artifact_access,
                 )
             if _file_hash_or_none(destination) != target_hash:
                 raise StateStoreError(
@@ -3507,10 +3596,8 @@ def _apply_cleanup_action(
         return "action-failed"
 
 
-def _target_repair_lock(target_path: str | Path) -> threading.Lock:
-    key = os.path.normcase(os.path.abspath(str(target_path)))
-    with _target_repair_locks_lock:
-        return _target_repair_locks.setdefault(key, threading.Lock())
+def _target_repair_lock(target_path: str | Path):
+    return _artifact_access.hold(target_path)
 
 
 def _write_recovery_candidate(
@@ -3866,6 +3953,7 @@ def _perform_repair(
                 donor_attempts=donor_attempts,
                 cue_recoveries=cue_recoveries,
                 donor_event_logger=donor_event_logger,
+                artifact_access=_artifact_access,
                 exhausted_strategies=exhausted_strategies,
                 cancellation_requested=lambda: (
                     cancellation_requested is not None and cancellation_requested()
@@ -4282,6 +4370,15 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
                 print(f"{YELLOW}[CIRCUIT] Could not record repair outcome: {exc}{RESET}")
 
     if result.action == "repaired":
+        source_path = metadata.get("source_path")
+        source_language = metadata.get("source_lang")
+        if source_path and source_language:
+            _record_successful_source_readiness(
+                source_path,
+                source_language,
+                result.target_path,
+                result.target_lang,
+            )
         _resolve_retry_success(
             result.item_type,
             result.item_id,
@@ -4347,7 +4444,15 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
         )
     _scan_child_finished(
         metadata.get("maintenance_scan_job_id"),
-        "repaired" if result.action == "repaired" else "failed",
+        (
+            "repaired"
+            if result.action == "repaired"
+            else (
+                result.action
+                if result.action in ("quarantined", "deleted")
+                else "failed"
+            )
+        ),
     )
 
 
@@ -4491,6 +4596,11 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
 
 
 def _drain_pending_repairs(stats: dict) -> list[RepairJobResult]:
+    stats.setdefault("completed", 0)
+    stats.setdefault("failed", 0)
+    stats.setdefault("translations", [])
+    stats.setdefault("episode_activity", False)
+    stats.setdefault("movie_activity", False)
     with _pending_repairs_lock:
         futures = list(_pending_repairs)
     results: list[RepairJobResult] = []
@@ -6509,6 +6619,13 @@ def process_item(
             trial_generation=trial_generation if trial_claimed else None,
         )
         if validation_action in ("valid", "valid-warning", "formatted", "repaired"):
+            _record_successful_source_readiness(
+                source_path,
+                source_lang,
+                actual_target_path,
+                target_lang,
+                media_duration,
+            )
             try:
                 _get_validation_state().record_timing_sample(
                     kind="file",
@@ -6771,7 +6888,12 @@ def _managed_sidecar_is_valid(
     duration: float,
     detector,
 ) -> tuple[bool, dict]:
-    from .subtitles.core import file_sha256, target_language_for_code, validate_subtitle_without_source
+    from .subtitles.core import (
+        file_sha256,
+        target_language_for_code,
+        validate_srt_structure,
+        validate_subtitle_without_source,
+    )
 
     language = classification.language
     evidence = {"path": str(classification.path), "language": language, "valid": False}
@@ -6781,7 +6903,7 @@ def _managed_sidecar_is_valid(
         evidence["reason"] = "special-purpose track"
         return False, evidence
     target_language = target_language_for_code(language)
-    if target_language is None or detector is None:
+    if target_language is None:
         evidence["reason"] = "unsupported validation language"
         return False, evidence
     try:
@@ -6790,6 +6912,41 @@ def _managed_sidecar_is_valid(
         evidence["reason"] = f"hash unavailable: {exc}"
         return False, evidence
     evidence["hash"] = target_hash
+    completeness = _evaluate_completeness(classification.path, duration)
+    structure = validate_srt_structure(classification.path)
+    _add_completeness_issue(structure, completeness)
+    evidence["completeness"] = (
+        completeness.to_dict() if completeness is not None else None
+    )
+    if not structure.valid:
+        evidence["reason"] = (
+            "undersized"
+            if any(issue.rule == "undersized_subtitle" for issue in structure.issues)
+            else "structure_invalid"
+        )
+        evidence["validation"] = structure.to_dict()
+        return False, evidence
+    video = _find_sidecar_video(classification.path)
+    trusted = (
+        _get_validation_state().source_readiness(
+            media_identity=_media_identity_for_video(video),
+            source_language=language,
+            source_hash=target_hash,
+            media_duration_seconds=duration,
+        )
+        if video is not None else None
+    )
+    if trusted is not None:
+        evidence.update({
+            "valid": True,
+            "cached": True,
+            "reason": "successful_source_hash",
+            "readinessId": trusted["id"],
+        })
+        return True, evidence
+    if detector is None:
+        evidence["reason"] = "language_detector_unavailable"
+        return False, evidence
     cached = _get_validation_state().current_valid_details(classification.path, target_hash)
     cached_completeness = cached.get("completeness") if cached is not None else None
     cached_duration = (
@@ -6811,10 +6968,8 @@ def _managed_sidecar_is_valid(
         target_lang=language,
         **_validation_kwargs(),
     )
-    completeness = _evaluate_completeness(classification.path, duration)
     _add_completeness_issue(report, completeness)
     evidence["validation"] = report.to_dict()
-    evidence["completeness"] = completeness.to_dict() if completeness is not None else None
     if completeness is None:
         evidence["reason"] = "completeness validation unavailable"
         return False, evidence
@@ -6876,7 +7031,12 @@ def _apply_prune_action(
         return "dry-run" if dry_run else "reported"
     if CLEANUP_PRUNE_ACTION == "quarantine":
         try:
-            destination = quarantine_subtitle(subtitle, CLEANUP_ROOTS, CLEANUP_QUARANTINE_DIR)
+            destination = quarantine_subtitle(
+                subtitle,
+                CLEANUP_ROOTS,
+                CLEANUP_QUARANTINE_DIR,
+                access_coordinator=_artifact_access,
+            )
             audit["quarantinePath"] = str(destination)
             try:
                 write_validation_report(destination, audit)
@@ -6900,6 +7060,7 @@ def run_extra_sidecar_prune(
     videos: list[tuple[Path, str | None]] | None = None,
     *,
     already_locked: bool = False,
+    status_job_id: str | None = None,
 ) -> tuple[dict, bool, bool]:
     """Prune recognized unmanaged sidecars after all managed languages are ready."""
     stats = _prune_stats()
@@ -6944,7 +7105,19 @@ def run_extra_sidecar_prune(
                     valid, candidate_evidence = _managed_sidecar_is_valid(entry, duration, detector)
                     evidence.append(candidate_evidence)
                     language_ready = language_ready or valid
-                readiness[language] = {"ready": language_ready, "candidates": evidence}
+                reasons = sorted({
+                    str(candidate.get("reason") or "language_validation_failed")
+                    for candidate in evidence if not candidate.get("valid")
+                })
+                readiness[language] = {
+                    "ready": language_ready,
+                    "reason": (
+                        "successful_source_hash"
+                        if any(candidate.get("reason") == "successful_source_hash" for candidate in evidence)
+                        else (",".join(reasons) or "validated")
+                    ),
+                    "candidates": evidence,
+                }
                 if not language_ready:
                     stats["prune_invalid_languages"] += 1
                     ready = False
@@ -6953,7 +7126,14 @@ def run_extra_sidecar_prune(
                 if videos is None and _video_has_pending_repair(video):
                     _queue_video_for_pruning(video, item_type)
                 missing = ",".join(code for code, value in readiness.items() if not value["ready"])
-                print(f"{YELLOW}[PRUNE] Deferred {video.name}: managed language(s) not ready: {missing}{RESET}")
+                reason_codes = "; ".join(
+                    f"{code}={value.get('reason') or 'language_validation_failed'}"
+                    for code, value in readiness.items() if not value["ready"]
+                )
+                print(
+                    f"{YELLOW}[PRUNE] Deferred {video.name}: managed language(s) "
+                    f"not ready: {missing} ({reason_codes}){RESET}"
+                )
                 continue
             stats["prune_ready"] += 1
             for entry in classified:
@@ -7002,11 +7182,16 @@ def run_extra_sidecar_prune(
         )
         return stats, changed_episodes, changed_movies
 
-    prune_job_id = _status_create_maintenance(
-        "sidecar_pruning",
-        {"title": "Subtitle sidecar pruning"},
-        state="pruning",
-    )
+    owns_status_job = status_job_id is None
+    prune_job_id = status_job_id
+    if owns_status_job:
+        prune_job_id = _status_create_maintenance(
+            "sidecar_pruning",
+            {"title": "Subtitle sidecar pruning"},
+            state="pruning",
+        )
+    else:
+        _status_update_maintenance(prune_job_id, "pruning")
     try:
         if already_locked:
             result = run()
@@ -7014,11 +7199,12 @@ def run_extra_sidecar_prune(
             with _cleanup_scan_lock:
                 result = run()
     except Exception:
-        _status_complete_maintenance(
-            prune_job_id,
-            "failed",
-            reason="validation action failed",
-        )
+        if owns_status_job:
+            _status_complete_maintenance(
+                prune_job_id,
+                "failed",
+                reason="validation action failed",
+            )
         raise
     prune_details = {
         "filesDiscovered": result[0]["prune_candidates"],
@@ -7026,7 +7212,8 @@ def run_extra_sidecar_prune(
         "failures": result[0]["prune_failures"],
         "quarantines": result[0]["prune_quarantined"],
     }
-    _status_complete_maintenance(prune_job_id, "accepted", details=prune_details)
+    if owns_status_job:
+        _status_complete_maintenance(prune_job_id, "accepted", details=prune_details)
     return result
 
 def run_existing_cleanup_scan(
@@ -7080,7 +7267,9 @@ def run_existing_cleanup_scan(
         state = _get_validation_state()
         changed = _scan_undersized_sidecars(stats)
         if detector is None or not CLEANUP_LANGUAGES:
-            prune_stats, prune_episodes, prune_movies = run_extra_sidecar_prune(already_locked=True)
+            prune_stats, prune_episodes, prune_movies = run_extra_sidecar_prune(
+                already_locked=True, status_job_id=maintenance_scan_job_id
+            )
             prune_stats["prune_bazarr_rescan_batches"] = int(prune_episodes or prune_movies)
             stats.update(prune_stats)
             changed = changed or prune_episodes or prune_movies
@@ -7117,6 +7306,7 @@ def run_existing_cleanup_scan(
             target_language = target_language_for_code(candidate.target_lang)
             if target_language is None:
                 print(f"{YELLOW}[SCAN] Unsupported target language for {candidate.path}{RESET}")
+                _publish_scan_progress(maintenance_scan_job_id)
                 continue
 
             source_path, source_lang = find_preferred_source(candidate)
@@ -7129,6 +7319,7 @@ def run_existing_cleanup_scan(
                 target_hash = file_sha256(candidate.path)
             except OSError as e:
                 print(f"{YELLOW}[SCAN] Could not hash {candidate.path}: {e}{RESET}")
+                _publish_scan_progress(maintenance_scan_job_id)
                 continue
             validation_origin = None
             validation_source_hash = None
@@ -7185,6 +7376,7 @@ def run_existing_cleanup_scan(
 
             if state.is_unchanged_valid(candidate.path, source_hash, target_hash):
                 stats["skipped_unchanged"] += 1
+                _publish_scan_progress(maintenance_scan_job_id)
                 continue
 
             stats["files_checked"] += 1
@@ -7313,29 +7505,12 @@ def run_existing_cleanup_scan(
                     reason="validation action failed" if outcome == "failed" else None,
                 )
 
-            if maintenance_scan_job_id:
-                with _maintenance_scan_contexts_lock:
-                    context = _maintenance_scan_contexts.get(
-                        maintenance_scan_job_id
-                    )
-                    now = time.monotonic()
-                    should_publish = bool(
-                        context is not None
-                        and (
-                            now - context.get("last_publish", 0) >= 0.5
-                            or context["files_checked"]
-                            >= context["files_discovered"]
-                        )
-                    )
-                    if should_publish:
-                        context["last_publish"] = now
-                    details = _scan_progress_details(context) if should_publish else None
-                if details is not None:
-                    _status_update_maintenance(
-                        maintenance_scan_job_id, "scanning", details=details
-                    )
+            _publish_scan_progress(maintenance_scan_job_id)
 
-        prune_stats, prune_episodes, prune_movies = run_extra_sidecar_prune(already_locked=True)
+        _publish_scan_progress(maintenance_scan_job_id, force=True)
+        prune_stats, prune_episodes, prune_movies = run_extra_sidecar_prune(
+            already_locked=True, status_job_id=maintenance_scan_job_id
+        )
         prune_stats["prune_bazarr_rescan_batches"] = int(prune_episodes or prune_movies)
         stats.update(prune_stats)
         changed = changed or prune_episodes or prune_movies
@@ -7400,8 +7575,16 @@ def _run_existing_cleanup_scan_safely() -> dict | None:
             }
     try:
         stats = run_existing_cleanup_scan(scan_job_id)
+        if _pending_repairs:
+            _status_update_maintenance(scan_job_id, "waiting_repair_completion")
+            _drain_pending_repairs(stats)
         _scan_enumeration_finished(scan_job_id, stats)
-        return stats
+        return (
+            None
+            if stats.get("async_repair_failures")
+            or stats.get("cleanup_repair_failures")
+            else stats
+        )
     except Exception as e:
         print(f"{RED}[ERROR] Existing subtitle cleanup scan failed: {e}{RESET}")
         if scan_job_id:
@@ -7420,8 +7603,12 @@ def run_retention_housekeeping() -> dict:
     from .subtitles.core import purge_old_files
 
     current_log = [_app_log_sink.current_path] if _app_log_sink.current_path is not None else []
+    protected = _get_validation_state().protected_artifact_paths()
     quarantine_removed = purge_old_files(
-        CLEANUP_QUARANTINE_DIR, QUARANTINE_ARTIFACT_RETENTION_DAYS
+        CLEANUP_QUARANTINE_DIR,
+        QUARANTINE_ARTIFACT_RETENTION_DAYS,
+        exclude=protected,
+        access_coordinator=_artifact_access,
     )
     logs_removed = purge_old_files(LOG_DIR, RETENTION_DAYS, exclude=current_log)
     try:
@@ -7905,6 +8092,10 @@ def run_cycle(cycle_num: int) -> bool:
     _status_set_phase("retry_recovery")
     _run_end_cycle_repair_retries(stats)
     _run_regeneration_retries(stats)
+    if _pending_repairs:
+        print("[REPAIR] Draining repairs queued by retry recovery")
+        _status_set_phase("repair_drain")
+        repair_results.extend(_drain_pending_repairs(stats))
     _status_set_phase("cycle_work")
 
     pending_prune = _take_pending_prune_videos()
@@ -8309,6 +8500,7 @@ def _requeue_persisted_repairs(state_store: StateStore) -> int:
 def main() -> int:
     global _status_tracker, _completed_cycle
     state_store = _initialize_state_store()
+    backfilled_source_readiness = state_store.backfill_source_readiness()
     _completed_cycle = state_store.completed_cycle()
     recovered_repairs = state_store.recover_repair_jobs()
     reactivated_manual_reviews = state_store.reactivate_changed_manual_reviews(
@@ -8335,7 +8527,8 @@ def main() -> int:
         f"reconciled {reconciled_retry_claims} submitted retry claim(s); "
         f"released {recovered_trials} unbound circuit trial(s); "
         f"reconciled {reconciled_trials} bound circuit trial(s); "
-        f"backfilled {backfilled_retry_sizes} retry size(s)"
+        f"backfilled {backfilled_retry_sizes} retry size(s); "
+        f"trusted {backfilled_source_readiness} proven source hash(es)"
     )
     status_server = None
     if STATUS_ENABLED:
@@ -8448,6 +8641,13 @@ def main() -> int:
         trigger_bazarr_sync(True, True)
         wait_for_bazarr_sync(True, True, SYNC_TIMEOUT)
 
+    if not shutdown_requested:
+        startup_repairs = _requeue_persisted_repairs(state_store)
+        if startup_repairs:
+            print(f"[REPAIR] Requeued {startup_repairs} durable startup repair(s)")
+            _status_set_phase("repair_drain")
+            _drain_pending_repairs({})
+
     _status_set_phase("startup_cleanup")
     legacy_run_id = state_store.start_maintenance_run(
         "legacy_quarantine_index",
@@ -8469,11 +8669,6 @@ def main() -> int:
     run_retention_housekeeping()
     last_retention_check = time.monotonic()
 
-    if not shutdown_requested:
-        startup_repairs = _requeue_persisted_repairs(state_store)
-        if startup_repairs:
-            print(f"[REPAIR] Requeued {startup_repairs} durable startup repair(s)")
-
     cycle = _completed_cycle + 1
     _cycle_suppressions.begin_cycle(str(cycle))
     last_cleanup_scan = 0.0
@@ -8483,90 +8678,112 @@ def main() -> int:
         if startup_cleanup is not None:
             last_cleanup_scan = time.monotonic()
 
-    while not shutdown_requested:
-        if cycle > 1:
-            _cycle_suppressions.begin_cycle(str(cycle))
-        healthy = run_cycle(cycle)
-        if healthy:
-            try:
-                _completed_cycle = state_store.advance_completed_cycle()
-                print(f"[CYCLE] Persisted completed cycle {_completed_cycle}")
-            except StateStoreError as exc:
-                print(f"{YELLOW}[CYCLE] Could not persist completion: {exc}{RESET}")
-        else:
-            print(
-                f"{YELLOW}[CYCLE] Cycle #{cycle} was degraded or interrupted; "
-                "completed-cycle counter was not advanced"
-                f"{RESET}"
-            )
-        _refresh_status_diagnostics()
-        if shutdown_requested:
-            break
+    def run_cycle_owned(cycle_number: int) -> bool:
+        _cycle_suppressions.begin_cycle(str(cycle_number))
+        return run_cycle(cycle_number)
 
-        _status_set_phase("post_cycle_maintenance")
-        maintenance_failed = False
-        monotonic_now = time.monotonic()
-        if monotonic_now - last_retention_check >= RETENTION_CHECK_INTERVAL:
-            run_id = state_store.start_maintenance_run(
-                "retention",
-                due_reason="retention interval elapsed",
-                completed_cycle=_completed_cycle,
-            )
-            try:
-                retention_metrics = run_retention_housekeeping()
-                state_store.finish_maintenance_run(
-                    run_id, success=True, metrics=retention_metrics
-                )
-                last_retention_check = time.monotonic()
-            except Exception as exc:
-                maintenance_failed = True
-                state_store.finish_maintenance_run(
-                    run_id,
-                    success=False,
-                    failure_code=type(exc).__name__,
-                )
-                print(f"{YELLOW}[MAINTENANCE] Retention failed: {exc}{RESET}")
-        if (
-            CLEANUP_SCAN_EXISTING
-            and last_cleanup_scan > 0
-            and monotonic_now - last_cleanup_scan >= CLEANUP_SCAN_INTERVAL
-        ):
-            run_id = state_store.start_maintenance_run(
-                "existing_library_scan",
-                due_reason="cleanup scan interval elapsed",
-                completed_cycle=_completed_cycle,
-            )
-            cleanup_metrics = _run_existing_cleanup_scan_safely()
-            cleanup_success = cleanup_metrics is not None
+    cycle_runner = CycleRunner(run_cycle_owned)
+
+    def advance_completed_cycle() -> int:
+        global _completed_cycle
+        _completed_cycle = state_store.advance_completed_cycle()
+        print(f"[CYCLE] Persisted completed cycle {_completed_cycle}")
+        return _completed_cycle
+
+    def tracked_maintenance(name: str, reason: str, operation):
+        run_id = state_store.start_maintenance_run(
+            name, due_reason=reason, completed_cycle=_completed_cycle
+        )
+        try:
+            metrics = operation()
+            if metrics is None:
+                raise RuntimeError(f"{name} failed")
+        except Exception as exc:
             state_store.finish_maintenance_run(
-                run_id,
-                success=cleanup_success,
-                metrics=cleanup_metrics or {},
-                failure_code=None if cleanup_success else "existing_library_scan_failed",
+                run_id, success=False, failure_code=type(exc).__name__
             )
-            if cleanup_success:
-                last_cleanup_scan = time.monotonic()
-            else:
-                maintenance_failed = True
-        if maintenance_failed:
-            print(
-                f"{YELLOW}[MAINTENANCE] Post-cycle maintenance failed; "
-                "translation cycle completion remains unchanged and maintenance "
-                f"will be retried{RESET}"
-            )
-        _refresh_status_diagnostics()
-        cycle += 1
-        if shutdown_requested:
-            break
-        print(f"[INFO] Next cycle in {CHECK_INTERVAL}s...")
-        _status_set_phase("cooldown", next_cycle_at=time.time() + CHECK_INTERVAL)
-        for _ in range(CHECK_INTERVAL):
+            raise
+        state_store.finish_maintenance_run(
+            run_id, success=True, metrics=metrics
+        )
+        return metrics
+
+    def mark_retention_completed() -> None:
+        nonlocal last_retention_check
+        last_retention_check = time.monotonic()
+
+    def mark_scan_completed() -> None:
+        nonlocal last_cleanup_scan
+        last_cleanup_scan = time.monotonic()
+
+    maintenance = MaintenanceCoordinator((
+        MaintenanceOperation(
+            "retention",
+            due=lambda: (
+                time.monotonic() - last_retention_check
+                >= RETENTION_CHECK_INTERVAL
+            ),
+            run=lambda: tracked_maintenance(
+                "retention", "retention interval elapsed",
+                run_retention_housekeeping,
+            ),
+            mark_completed=mark_retention_completed,
+        ),
+        MaintenanceOperation(
+            "existing_library_scan",
+            due=lambda: bool(
+                CLEANUP_SCAN_EXISTING
+                and last_cleanup_scan > 0
+                and time.monotonic() - last_cleanup_scan
+                >= CLEANUP_SCAN_INTERVAL
+            ),
+            run=lambda: tracked_maintenance(
+                "existing_library_scan", "cleanup scan interval elapsed",
+                _run_existing_cleanup_scan_safely,
+            ),
+            mark_completed=mark_scan_completed,
+        ),
+    ))
+
+    def lifecycle_phase(phase: str, **values) -> None:
+        if phase == "cooldown":
+            values.setdefault("next_cycle_at", time.time() + CHECK_INTERVAL)
+        _status_set_phase(phase, **values)
+
+    def sleep_interruptibly(seconds: int) -> bool:
+        print(f"[INFO] Next cycle in {seconds}s...")
+        for _ in range(max(0, int(seconds))):
             if shutdown_requested:
-                break
+                return True
             time.sleep(1)
+        return shutdown_requested
+
+    controller = LifecycleController(
+        run_cycle=lambda number: cycle_runner.run(number).healthy,
+        advance_completed_cycle=advance_completed_cycle,
+        run_maintenance=maintenance.run_due,
+        set_phase=lifecycle_phase,
+        refresh_diagnostics=_refresh_status_diagnostics,
+        sleep_interruptibly=sleep_interruptibly,
+        check_interval=CHECK_INTERVAL,
+        shutdown_requested=lambda: shutdown_requested,
+    )
+
+    def report_iteration(number, healthy, maintenance_result) -> None:
+        if not healthy:
+            print(
+                f"{YELLOW}[CYCLE] Cycle #{number} was degraded or interrupted; "
+                f"completed-cycle counter was not advanced{RESET}"
+            )
+        if not maintenance_result.healthy:
+            print(
+                f"{YELLOW}[MAINTENANCE] Post-cycle maintenance failed "
+                f"({', '.join(maintenance_result.failed)}); it remains due{RESET}"
+            )
+
+    controller.run(cycle, on_iteration=report_iteration)
 
     _shutdown_repair_executor()
-    _status_set_phase("shutdown")
     if status_server is not None:
         status_server.shutdown()
         status_server.server_close()
