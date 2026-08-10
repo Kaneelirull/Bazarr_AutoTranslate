@@ -1,6 +1,6 @@
 """Validation compatibility exports."""
 
-from clean_et_subs import (
+from .core import (
     ValidationIssue,
     ValidationReport,
     evaluate_subtitle_completeness,
