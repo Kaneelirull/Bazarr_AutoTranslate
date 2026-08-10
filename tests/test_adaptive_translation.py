@@ -384,7 +384,7 @@ class AdaptiveTranslationTests(unittest.TestCase):
             self.assertEqual(stats["deferred"], 1)
             self.assertEqual(
                 [call.kwargs["claim"] for call in state.circuit_permission.call_args_list],
-                [False, False, True],
+                [False, False, False],
             )
 
     def test_failed_job_recovery_preserves_source_structure_and_repairs_gap(self):

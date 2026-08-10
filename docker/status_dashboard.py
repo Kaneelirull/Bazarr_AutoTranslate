@@ -972,6 +972,7 @@ class StatusTracker:
         retries: list[dict] | None = None,
         completed_cycle: int | None = None,
         retry_max_attempts: int | None = None,
+        recovery: dict | None = None,
     ) -> None:
         with self._lock:
             self._service["timing"] = timing
@@ -991,6 +992,8 @@ class StatusTracker:
                             "canonicalSeriesKey", "lastAdmittedCycle",
                             "admissionCount", "noProgressCount",
                             "lastDeferralClass",
+                            "validRecoveredCueCount", "unresolvedCueCount",
+                            "latestRecoveryStage", "manualReview",
                         )
                     }
                     public_plan.update(retry_media_identity(plan))
@@ -1002,6 +1005,8 @@ class StatusTracker:
                 )
             if retry_max_attempts is not None:
                 self._service["retryMaxAttempts"] = max(0, int(retry_max_attempts))
+            if recovery is not None:
+                self._service["recoveryDiagnostics"] = recovery
             self._write_snapshot_locked()
 
     def _write_snapshot_locked(self) -> None:

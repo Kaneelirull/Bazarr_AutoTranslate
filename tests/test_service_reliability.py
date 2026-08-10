@@ -533,6 +533,89 @@ class ServiceReliabilityTests(unittest.TestCase):
         self.assertEqual(release_capacity.call_count, 3)
         self.assertEqual(stats["regeneration_queued"], 3)
 
+    def test_no_progress_retry_does_not_consume_same_series_submission_slot(self):
+        plans = [
+            {
+                "id": index,
+                "itemType": "episodes",
+                "itemId": 100 + index,
+                "targetLanguage": "et",
+                "attemptCount": 0,
+                "seriesKey": "sonarr:1",
+                "canonicalSeriesKey": "sonarr:1",
+                "seriesTitle": "Show",
+                "mediaTitle": f"Show episode {index}",
+                "sourcePath": f"/media/show-{index}.en.srt",
+            }
+            for index in (1, 2)
+        ]
+        state = Mock()
+        state.due_retry_count.return_value = 2
+        state.retry_plans.return_value = [
+            {**plan, "state": "accepted_after_regeneration"}
+            for plan in plans
+        ]
+        admission_snapshots = []
+
+        def claim(*_args, series_admissions=None, **_kwargs):
+            admission_snapshots.append(dict(series_admissions or {}))
+            index = len(admission_snapshots) - 1
+            return [plans[index]] if index < len(plans) else []
+
+        state.claim_due_retry_plans.side_effect = claim
+
+        def process(*_args, retry_plan=None, retry_submission_callback=None, **_kwargs):
+            if retry_plan["id"] == 2:
+                retry_submission_callback(retry_plan)
+
+        with (
+            patch.object(app, "_get_validation_state", return_value=state),
+            patch.object(app, "process_item", side_effect=process),
+            patch.object(app, "_status_admit_retry"),
+            patch.object(app._shared_capacity, "release_current_translation"),
+        ):
+            app._run_regeneration_retries({}, submission_budget=2)
+
+        self.assertEqual(admission_snapshots[0], {})
+        self.assertEqual(admission_snapshots[1], {})
+        self.assertEqual(admission_snapshots[2], {"sonarr:1": 1})
+
+    def test_repair_publication_guard_prevents_target_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "movie.en.srt"
+            target = root / "movie.et.srt"
+            source.write_text("source", encoding="utf-8")
+            target.write_text("original", encoding="utf-8")
+            report = SimpleNamespace(repairable_cue_indexes=[0], issues=[])
+            repair = SimpleNamespace(
+                success=True,
+                interrupted=False,
+                attempts=1,
+                attempt_history=[],
+                donor_history=[],
+                repaired_cues=[1],
+                report=report,
+            )
+            guard = Mock(return_value=False)
+            with (
+                patch.object(app, "_get_cleanup_detector", return_value=object()),
+                patch.object(cleanup, "target_language_for_code", return_value=object()),
+                patch.object(cleanup, "repair_subtitle_file", return_value=repair),
+                patch.object(app, "_replace_managed_file") as replace,
+            ):
+                result = app._perform_repair(
+                    str(source), str(target), "en", "et", None, "Movie",
+                    "movies", report, app._file_hash_or_none(target),
+                    expected_source_hash=app._file_hash_or_none(source),
+                    publication_guard=guard,
+                )
+
+            self.assertEqual(result.action, "repair-deferred")
+            self.assertEqual(target.read_text(encoding="utf-8"), "original")
+            guard.assert_called_once_with()
+            replace.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
