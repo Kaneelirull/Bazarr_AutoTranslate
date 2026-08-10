@@ -6900,16 +6900,16 @@ def _managed_sidecar_is_valid(
     if language is None or any(
         token in _NON_FULL_SUBTITLE_TOKENS for token in classification.tokens
     ):
-        evidence["reason"] = "special-purpose track"
+        evidence["reason"] = "special_track"
         return False, evidence
     target_language = target_language_for_code(language)
     if target_language is None:
-        evidence["reason"] = "unsupported validation language"
+        evidence["reason"] = "unsupported_language"
         return False, evidence
     try:
         target_hash = file_sha256(classification.path)
     except OSError as exc:
-        evidence["reason"] = f"hash unavailable: {exc}"
+        evidence["reason"] = "hash_unavailable"
         return False, evidence
     evidence["hash"] = target_hash
     completeness = _evaluate_completeness(classification.path, duration)
@@ -6936,17 +6936,6 @@ def _managed_sidecar_is_valid(
         )
         if video is not None else None
     )
-    if trusted is not None:
-        evidence.update({
-            "valid": True,
-            "cached": True,
-            "reason": "successful_source_hash",
-            "readinessId": trusted["id"],
-        })
-        return True, evidence
-    if detector is None:
-        evidence["reason"] = "language_detector_unavailable"
-        return False, evidence
     cached = _get_validation_state().current_valid_details(classification.path, target_hash)
     cached_completeness = cached.get("completeness") if cached is not None else None
     cached_duration = (
@@ -6958,8 +6947,16 @@ def _managed_sidecar_is_valid(
         and abs(float(cached_duration) - duration) <= 0.5
         and not cached_completeness.get("undersized", False)
     ):
-        evidence.update({"valid": True, "cached": True})
+        evidence.update({
+            "valid": True,
+            "cached": True,
+            "reason": "independent_language_validation",
+        })
         return True, evidence
+
+    if detector is None:
+        evidence["reason"] = "language_detector_unavailable"
+        return False, evidence
 
     report = validate_subtitle_without_source(
         classification.path,
@@ -6971,10 +6968,13 @@ def _managed_sidecar_is_valid(
     _add_completeness_issue(report, completeness)
     evidence["validation"] = report.to_dict()
     if completeness is None:
-        evidence["reason"] = "completeness validation unavailable"
+        evidence["reason"] = "completeness_unavailable"
         return False, evidence
     if report.valid:
-        evidence["valid"] = True
+        evidence.update({
+            "valid": True,
+            "reason": "independent_language_validation",
+        })
         _record_validation_result(
             classification.path,
             None,
@@ -6984,8 +6984,25 @@ def _managed_sidecar_is_valid(
             completeness=evidence["completeness"],
             validationScope="prune-target-only",
         )
+    elif trusted is not None and report.issues and all(
+        issue.rule == "target_file_invalid"
+        and issue.detail.startswith("detected ")
+        for issue in report.issues
+    ):
+        evidence.update({
+            "valid": True,
+            "cached": True,
+            "reason": "successful_source_hash",
+            "readinessId": trusted["id"],
+            "languageOverride": True,
+        })
+        return True, evidence
     else:
-        evidence["reason"] = report.summary()
+        evidence["reason"] = (
+            "language_validation_failed"
+            if any(issue.rule == "target_file_invalid" for issue in report.issues)
+            else "validation_failed"
+        )
     return report.valid, evidence
 
 
@@ -7095,7 +7112,10 @@ def run_extra_sidecar_prune(
                     if _explicit_non_full_sidecar(video, entry.path) is None
                 ]
                 if not full_candidates:
-                    readiness[language] = {"ready": False, "reason": "missing full subtitle"}
+                    readiness[language] = {
+                        "ready": False,
+                        "reason": "missing_full_sidecar",
+                    }
                     stats["prune_missing_languages"] += 1
                     ready = False
                     continue

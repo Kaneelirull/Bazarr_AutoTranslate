@@ -28,6 +28,7 @@ import Bazarr_AutoTranslate as app  # noqa: E402
 import clean_et_subs as cleanup  # noqa: E402
 from clean_et_subs import ValidationStateStore  # noqa: E402
 from state_store import StateStore  # noqa: E402
+from autotranslate.subtitles.core import ValidationIssue, ValidationReport  # noqa: E402
 
 
 def make_srt(text: str) -> str:
@@ -469,12 +470,38 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 target_language="et",
             )
             classification = app._classify_sidecar(video, source)
-            with patch.object(app, "CLEANUP_UNDERSIZED_ENABLED", True):
+            language_disagreement = ValidationReport([
+                ValidationIssue(
+                    "target_file_invalid",
+                    "detected ESTONIAN with confidence 0.99",
+                )
+            ])
+            with (
+                patch.object(app, "CLEANUP_UNDERSIZED_ENABLED", True),
+                patch(
+                    "autotranslate.subtitles.core.validate_subtitle_without_source",
+                    return_value=language_disagreement,
+                ),
+            ):
                 ready, evidence = app._managed_sidecar_is_valid(
                     classification, 600, detector=object()
                 )
             self.assertTrue(ready)
             self.assertEqual(evidence["reason"], "successful_source_hash")
+            self.assertTrue(evidence["languageOverride"])
+
+            non_language_failure = ValidationReport([
+                ValidationIssue("target_repetition", "repetitive subtitle content")
+            ])
+            with patch(
+                "autotranslate.subtitles.core.validate_subtitle_without_source",
+                return_value=non_language_failure,
+            ):
+                ready, evidence = app._managed_sidecar_is_valid(
+                    classification, 600, detector=object()
+                )
+            self.assertFalse(ready)
+            self.assertNotEqual(evidence.get("reason"), "successful_source_hash")
 
     def test_cached_scan_publishes_visited_file_progress(self):
         with tempfile.TemporaryDirectory() as directory:
