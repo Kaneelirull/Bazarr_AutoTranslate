@@ -1,5 +1,5 @@
 from __future__ import annotations
-from . import runtime_context as _runtime
+from .composition import runtime as _runtime
 
 def _item_title(item: dict, item_type: str) -> str:
     if item_type == 'episodes':
@@ -597,7 +597,7 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
             except _runtime.StateStoreError as exc:
                 print(f'{_runtime.YELLOW}[RETRY] Could not record retry attempt: {exc}{_runtime.RESET}')
         _runtime._status_transition(item_type, item_id, target_lang, 'validating')
-        validation_action, validation_report = _runtime._validate_translated_file(source_path, actual_target_path, source_lang, target_lang, item_id, title=title, defer_repair=True, item_type=item_type, media_duration=media_duration, origin='lingarr', provenance_source_hash=source_hash, series_key=series_key, series_title=series_title, trial_owner=trial_owner if trial_claimed else None, trial_job_id=job_id if trial_claimed else None, trial_plan_id=retry_plan['id'] if trial_claimed and retry_plan else None, trial_generation=trial_generation if trial_claimed else None)
+        validation_action, validation_report = _runtime._validate_translated_file(source_path, actual_target_path, source_lang, target_lang, item_id, title=title, defer_repair=True, item_type=item_type, media_duration=media_duration, origin='lingarr', provenance_source_hash=source_hash, series_key=series_key, series_title=series_title, retry_plan_id=retry_plan['id'] if retry_plan else None, trial_owner=trial_owner if trial_claimed else None, trial_job_id=job_id if trial_claimed else None, trial_plan_id=retry_plan['id'] if trial_claimed and retry_plan else None, trial_generation=trial_generation if trial_claimed else None)
         if validation_action in ('valid', 'valid-warning', 'formatted', 'repaired'):
             _runtime._record_successful_source_readiness(source_path, source_lang, actual_target_path, target_lang, media_duration)
             try:
@@ -624,14 +624,13 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
                 stats['cleaned'] += 1
                 _runtime._record_cleanup_stats(stats, validation_action, validation_report)
         if retry_plan is not None and validation_action in ('valid', 'valid-warning', 'formatted', 'repaired'):
-            _runtime._resolve_retry_success(item_type, item_id, target_lang, outcome='accepted_after_regeneration')
+            _runtime._resolve_retry_success(retry_plan['id'], retry_plan.get('sourceHash'), outcome='accepted_after_regeneration')
         _runtime._status_finish_validation(item_type, item_id, target_lang, validation_action)
         _runtime._shared_capacity.release(shared_token)
-_runtime._item_title = _item_title
-_runtime._mark_activity = _mark_activity
-_runtime._record_invalid_circuit_outcome = _record_invalid_circuit_outcome
-_runtime._record_valid_circuit_outcome = _record_valid_circuit_outcome
-_runtime._bazarr_has_repaired_path = _bazarr_has_repaired_path
-_runtime._record_cleanup_stats = _record_cleanup_stats
-_runtime._source_is_usable = _source_is_usable
-_runtime.process_item = process_item
+EXPORTS = {
+    name: globals()[name] for name in (
+        '_item_title', '_mark_activity', '_record_invalid_circuit_outcome',
+        '_record_valid_circuit_outcome', '_bazarr_has_repaired_path',
+        '_record_cleanup_stats', '_source_is_usable', 'process_item',
+    )
+}

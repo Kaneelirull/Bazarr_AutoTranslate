@@ -18,6 +18,13 @@ from typing import Callable, Iterable, Optional, Tuple
 
 from lingua import Language, LanguageDetectorBuilder
 
+from .copied_source import (
+    AMBIGUOUS,
+    COPIED_PROSE,
+    LIKELY_INVARIANT,
+    assess_copied_source,
+)
+
 MANAGED_FILE_UID = 568
 MANAGED_FILE_GID = 568
 MANAGED_FILE_MODE = 0o664
@@ -129,7 +136,6 @@ GARBAGE_PATTERNS: list[tuple[str, str]] = [
     (r"429\s+Too\s+Many\s+Requests", "HTTP 429"),
     (r"as an ai\b", "AI refusal"),
     (r"i cannot translate", "AI refusal"),
-    (r"i'm sorry", "AI refusal"),
     (r"i am unable to", "AI refusal"),
     (r'\{"error"', "JSON error"),
     (r'"errorMessage"', "JSON error"),
@@ -198,9 +204,19 @@ class ValidationIssue:
     cue_number: Optional[int] = None
 
 
+@dataclass(frozen=True)
+class ValidationObservation:
+    classification: str
+    reason: str
+    evidence: dict
+    cue_index: Optional[int] = None
+    cue_number: Optional[int] = None
+
+
 @dataclass
 class ValidationReport:
     issues: list[ValidationIssue] = field(default_factory=list)
+    observations: list[ValidationObservation] = field(default_factory=list)
 
     @property
     def valid(self) -> bool:
@@ -236,6 +252,16 @@ class ValidationReport:
                     "cueNumber": issue.cue_number,
                 }
                 for issue in self.issues
+            ],
+            "observations": [
+                {
+                    "classification": observation.classification,
+                    "reason": observation.reason,
+                    "evidence": observation.evidence,
+                    "cueIndex": observation.cue_index,
+                    "cueNumber": observation.cue_number,
+                }
+                for observation in self.observations
             ],
         }
 
@@ -372,6 +398,24 @@ def detect_language(detector, text: str) -> Tuple[Optional[Language], float]:
         return lang, float(conf)
     except Exception:
         return None, 0.0
+
+
+def _language_code(language: Language | None) -> str | None:
+    if language is None:
+        return None
+    return next(
+        (code for code, candidate in TARGET_LANGUAGE_MAP.items() if candidate == language),
+        language.name.casefold(),
+    )
+
+
+def _language_confidence(detector, text: str, language: Language) -> float | None:
+    if not text.strip():
+        return None
+    try:
+        return float(detector.compute_language_confidence(text, language))
+    except Exception:
+        return None
 
 
 def find_garbage_match(text: str) -> Optional[str]:
@@ -808,47 +852,6 @@ def _normalise_for_similarity(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _is_invariant_dominated(source: str, target: str) -> bool:
-    """Allow copied names/models without exempting ordinary title-cased prose."""
-    clean_source = TAG_RE.sub(" ", source).strip()
-    words = re.findall(r"[A-Za-z\u00C0-\u024F0-9-]+", clean_source)
-    if len(words) < 2:
-        return False
-    connectors = {"and", "or", "vs", "versus"}
-    content = [word for word in words if word.casefold() not in connectors]
-    if not content or not all(
-        word.isupper()
-        or any(char.isdigit() for char in word)
-        or (word[0].isupper() and not word[1:].isupper())
-        for word in content
-    ):
-        return False
-    has_model = any(any(char.isdigit() for char in word) or word.isupper() for word in content)
-    has_connector = bool(
-        re.search(r"[&/|]", clean_source)
-        or any(word.casefold() in connectors for word in words)
-    )
-    punctuation_groups = [
-        re.findall(r"[A-Za-z\u00C0-\u024F0-9-]+", group)
-        for group in re.split(r"[,;:!]+", clean_source)
-        if group.strip()
-    ]
-    has_short_name_groups = (
-        len(punctuation_groups) >= 2
-        and all(1 <= len(group) <= 2 for group in punctuation_groups)
-    )
-    if not (has_model or has_connector or has_short_name_groups):
-        return False
-    source_content = {
-        word.casefold() for word in content if len(word) > 1
-    }
-    target_words = {
-        word.casefold()
-        for word in re.findall(r"[A-Za-z\u00C0-\u024F0-9-]+", TAG_RE.sub(" ", target))
-    }
-    return bool(source_content) and len(source_content & target_words) / len(source_content) >= 0.8
-
-
 def _timestamp_start_ms(timestamp: str) -> int | None:
     match = re.match(r"\s*(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})", timestamp)
     if not match:
@@ -883,7 +886,7 @@ def source_cue_signatures(source_path: Path | str) -> list[dict]:
     return [cue_source_signature(cue) for cue in cues]
 
 
-def validate_cue_pair(
+def _validate_cue_pair_assessed(
     source: SubtitleCue,
     target: SubtitleCue,
     *,
@@ -897,8 +900,13 @@ def validate_cue_pair(
     max_cyrillic_ratio: float = 0.05,
     max_cjk_ratio: float = 0.05,
     max_latin_ratio: float = 0.80,
-) -> list[ValidationIssue]:
+    cue_language: str | None = None,
+    cue_language_confidence: float | None = None,
+    whole_target_confidence: float | None = None,
+    context_confidence: float | None = None,
+) -> tuple[list[ValidationIssue], ValidationObservation | None]:
     issues: list[ValidationIssue] = []
+    observation: ValidationObservation | None = None
     source_text = source.text
     target_text = target.text
 
@@ -907,7 +915,7 @@ def validate_cue_pair(
 
     if not target_text:
         add("empty_target", "translation is empty")
-        return issues
+        return issues, observation
 
     source_line_count = len([line for line in source.lines if line.strip()])
     target_line_count = len([line for line in target.lines if line.strip()])
@@ -933,14 +941,35 @@ def validate_cue_pair(
 
     source_normalised = _normalise_for_similarity(source_text)
     target_normalised = _normalise_for_similarity(target_text)
-    if (
-        len(source_normalised) >= 20
-        and len(target_normalised) >= 20
-        and not _is_invariant_dominated(source_text, target_text)
-    ):
+    if source_normalised and target_normalised:
         similarity = SequenceMatcher(None, source_normalised, target_normalised).ratio()
-        if similarity >= max_source_similarity:
+        repair_eligible = (
+            len(source_normalised) >= 20
+            and len(target_normalised) >= 20
+            and similarity >= max_source_similarity
+        )
+        assessment = assess_copied_source(
+            source_text,
+            target_text,
+            source_normalized=source_normalised,
+            target_normalized=target_normalised,
+            similarity=similarity,
+            repair_eligible=repair_eligible,
+            cue_language=cue_language,
+            cue_language_confidence=cue_language_confidence,
+            whole_target_confidence=whole_target_confidence,
+            context_confidence=context_confidence,
+        )
+        if assessment is not None and assessment.outcome == COPIED_PROSE and repair_eligible:
             add("copied_source", f"translation matches source ({similarity:.0%} similar)")
+        elif assessment is not None and assessment.outcome in (LIKELY_INVARIANT, AMBIGUOUS):
+            observation = ValidationObservation(
+                assessment.outcome,
+                assessment.reason,
+                assessment.evidence,
+                cue_index,
+                target.number,
+            )
 
     script_ok, script_reason = check_script_profile(
         [target_text],
@@ -953,6 +982,39 @@ def validate_cue_pair(
     if not script_ok:
         add("unexpected_script", script_reason)
 
+    return issues, observation
+
+
+def validate_cue_pair(
+    source: SubtitleCue,
+    target: SubtitleCue,
+    *,
+    cue_index: int,
+    target_lang: str,
+    max_cue_lines: int = 4,
+    max_cue_chars: int = 500,
+    max_expansion_ratio: float = 4.0,
+    max_expansion_chars: int = 300,
+    max_source_similarity: float = 0.92,
+    max_cyrillic_ratio: float = 0.05,
+    max_cjk_ratio: float = 0.05,
+    max_latin_ratio: float = 0.80,
+) -> list[ValidationIssue]:
+    """Validate one cue while preserving the historical issues-only interface."""
+    issues, _observation = _validate_cue_pair_assessed(
+        source,
+        target,
+        cue_index=cue_index,
+        target_lang=target_lang,
+        max_cue_lines=max_cue_lines,
+        max_cue_chars=max_cue_chars,
+        max_expansion_ratio=max_expansion_ratio,
+        max_expansion_chars=max_expansion_chars,
+        max_source_similarity=max_source_similarity,
+        max_cyrillic_ratio=max_cyrillic_ratio,
+        max_cjk_ratio=max_cjk_ratio,
+        max_latin_ratio=max_latin_ratio,
+    )
     return issues
 
 
@@ -1076,6 +1138,10 @@ def validate_subtitle_pair(
         ))
         return report
 
+    whole_target_text = " ".join(cue.text for cue in target_cues if cue.text)
+    whole_target_confidence = _language_confidence(
+        detector, whole_target_text, target_language
+    )
     for cue_index, (source, target) in enumerate(zip(source_cues, target_cues)):
         if source.number != target.number:
             report.issues.append(ValidationIssue(
@@ -1093,7 +1159,16 @@ def validate_subtitle_pair(
                 target.number,
             ))
             continue
-        report.issues.extend(validate_cue_pair(
+        context_text = " ".join(
+            target_cues[index].text
+            for index in range(max(0, cue_index - 2), min(len(target_cues), cue_index + 3))
+            if index != cue_index and target_cues[index].text
+        )
+        context_confidence = _language_confidence(
+            detector, context_text, target_language
+        )
+        cue_language, cue_language_confidence = detect_language(detector, target.text)
+        cue_issues, observation = _validate_cue_pair_assessed(
             source,
             target,
             cue_index=cue_index,
@@ -1106,7 +1181,14 @@ def validate_subtitle_pair(
             max_cyrillic_ratio=max_cyrillic_ratio,
             max_cjk_ratio=max_cjk_ratio,
             max_latin_ratio=max_latin_ratio,
-        ))
+            cue_language=_language_code(cue_language),
+            cue_language_confidence=cue_language_confidence,
+            whole_target_confidence=whole_target_confidence,
+            context_confidence=context_confidence,
+        )
+        report.issues.extend(cue_issues)
+        if observation is not None:
+            report.observations.append(observation)
 
     target_valid, target_reason = validate_subtitle_file(
         target_path,

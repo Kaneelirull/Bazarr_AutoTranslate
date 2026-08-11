@@ -114,6 +114,8 @@ class RepairJobResult:
     second_attempts: int = 0
     target_path: str = ""
     donor_source_attempt: int | None = None
+    retry_plan_id: int | None = None
+    expected_source_hash: str | None = None
 
 
 @dataclass(frozen=True)

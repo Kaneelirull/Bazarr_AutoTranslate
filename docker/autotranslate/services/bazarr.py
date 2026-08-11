@@ -18,6 +18,7 @@ class BazarrClient:
     request_json: Callable[..., Any]
     get: Callable[..., Any] | None = None
     post: Callable[..., Any] | None = None
+    patch: Callable[..., Any] | None = None
     connect_timeout: int = 10
     sync_start_timeout: int = 30
     sync_poll_interval: int = 5
@@ -93,6 +94,59 @@ class BazarrClient:
                     )
             except Exception as exc:
                 self.emit(f"[ERROR] Failed to trigger Bazarr task {task_id}: {exc}")
+
+    def episode_series_id(self, episode_id: int) -> int | None:
+        payload = self.request_json(
+            "get",
+            self._url("episodes"),
+            service="Bazarr",
+            operation=f"resolve series for episode {int(episode_id)}",
+            headers=self.headers,
+            params={"episodeid[]": int(episode_id)},
+            timeout=self.connect_timeout,
+        )
+        rows = payload.get("data", []) if isinstance(payload, dict) else []
+        if not rows or not isinstance(rows[0], dict):
+            return None
+        for key in ("sonarrSeriesId", "seriesId", "series_id"):
+            try:
+                value = int(rows[0].get(key))
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return None
+
+    def trigger_item_scan(
+        self,
+        item_type: str,
+        item_id: int,
+        *,
+        series_id: int | None = None,
+    ) -> bool:
+        if self.patch is None:
+            raise RuntimeError("Bazarr PATCH transport is not configured")
+        if item_type == "movies":
+            endpoint, parameter, identifier = "movies", "radarrid", int(item_id)
+        elif item_type == "episodes":
+            resolved = series_id or self.episode_series_id(int(item_id))
+            if resolved is None:
+                return False
+            endpoint, parameter, identifier = "series", "seriesid", int(resolved)
+        else:
+            return False
+        response = self.patch(
+            self._url(endpoint),
+            headers=self.headers,
+            params={parameter: identifier, "action": "scan-disk"},
+            timeout=self.connect_timeout,
+        )
+        accepted = int(getattr(response, "status_code", 0)) == 204
+        self.emit(
+            f"[{'INFO' if accepted else 'WARNING'}] Bazarr item scan "
+            f"{'accepted' if accepted else 'rejected'} for {endpoint}:{identifier}"
+        )
+        return accepted
 
     @staticmethod
     def _job_matches(job: dict, episodes: bool, movies: bool) -> bool:

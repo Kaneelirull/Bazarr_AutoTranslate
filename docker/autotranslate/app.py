@@ -31,7 +31,7 @@ class PackagedRuntimeHost:
     """Production host assembled from feature-owned runtime modules."""
 
     def __init__(self, config: Config) -> None:
-        from .runtime_host import ProductionRuntimeHost
+        from .production import ProductionRuntimeHost
 
         self.config = config
         self._host = ProductionRuntimeHost(config)

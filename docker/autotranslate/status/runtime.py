@@ -1,5 +1,5 @@
 from __future__ import annotations
-from . import runtime_context as _runtime
+from ..composition import runtime as _runtime
 
 def _register_runtime_resources(*, state_store: _runtime.StateStore | None=None, status_server=None) -> None:
     with _runtime._runtime_resources_lock:
@@ -309,7 +309,6 @@ def _status_compact_history() -> int:
 
 def _status_finish_validation(item_type: str, item_id: int, target_lang: str, action: str) -> None:
     if action in ('valid', 'valid-warning', 'formatted', 'repaired'):
-        _runtime._resolve_retry_success(item_type, item_id, target_lang)
         _runtime._status_transition(item_type, item_id, target_lang, 'accepted', repaired=action in ('formatted', 'repaired'))
     elif action in ('repair-queued', 'repair-duplicate'):
         return
@@ -326,14 +325,14 @@ def _get_cleanup_detector():
     with _runtime._cleanup_detector_lock:
         if _runtime._cleanup_detector is None:
             print('[INFO] Loading language detector for per-file cleanup...')
-            from .subtitles.foundation import build_detector
+            from ..subtitles.foundation import build_detector
             _runtime._cleanup_detector = build_detector()
         return _runtime._cleanup_detector
 
 def _get_validation_state():
     with _runtime._validation_state_lock:
         if _runtime._validation_state is None:
-            from .subtitles.foundation import VALIDATOR_VERSION
+            from ..subtitles.foundation import VALIDATOR_VERSION
             _runtime._validation_state = _runtime.StateStore(_runtime.STATE_DB_FILE, validator_version=VALIDATOR_VERSION, config_fingerprint=_runtime._VALIDATION_CONFIG_FINGERPRINT)
         return _runtime._validation_state
 
@@ -341,70 +340,34 @@ def _initialize_state_store() -> _runtime.StateStore:
     with _runtime._validation_state_lock:
         if _runtime._validation_state is not None:
             return _runtime._validation_state
-        from .subtitles.foundation import VALIDATOR_VERSION
+        from ..subtitles.foundation import VALIDATOR_VERSION
         store = _runtime.StateStore(_runtime.STATE_DB_FILE, acquire_process_lock=True, validator_version=VALIDATOR_VERSION, config_fingerprint=_runtime._VALIDATION_CONFIG_FINGERPRINT)
-        migration = store.migrate_legacy(_runtime.SUBMIT_CACHE_FILE, _runtime.VALIDATION_STATE_FILE, cooldown_seconds=_runtime.RESUBMIT_COOLDOWN)
         reconciliation = store.reconcile_pending_operations()
         circuit_migration = store.initialize_cycle_circuits(_runtime.CIRCUIT_OPEN_CYCLES)
         print(f"[STATE] Circuit migration: completed_cycle={circuit_migration['completedCycle']}, migrated={circuit_migration['migrated']}, retired_generic={circuit_migration['retiredGeneric']}")
         _runtime._validation_state = store
-        retry_migration = {'migrated': 0, 'unresolved': 0, 'ignored': 0}
-        candidates = store.legacy_retry_candidates()
-        for candidate in candidates:
-            source_path = candidate.get('sourcePath')
-            if not source_path or not _runtime.os.path.exists(source_path) or _runtime._file_hash_or_none(source_path) != candidate.get('sourceHash'):
-                retry_migration['unresolved'] += 1
-                continue
-            rules = set(candidate.get('rules') or [])
-            if rules & {'source_unreadable', 'source_structure', 'undersized_source'}:
-                retry_migration['ignored'] += 1
-                continue
-            identity = _runtime.retry_media_identity(candidate)
-            circuit_identity = _runtime.resolve_media_identity({'seriesTitle': candidate.get('seriesTitle'), 'title': identity['displayTitle']}, candidate['itemType'], candidate['itemId'], source_path)
-            store.schedule_retry_plan(item_type=candidate['itemType'], item_id=candidate['itemId'], target_language=candidate['targetLanguage'], source_hash=candidate['sourceHash'], source_path=source_path, source_language=candidate.get('sourceLanguage'), target_path=candidate.get('targetPath'), series_key=circuit_identity['key'], series_title=circuit_identity['title'], media_title=_runtime.os.path.basename(source_path), source_cue_count=_runtime._count_srt_cues(source_path), failure_class='whole_file', rules=rules, state='regeneration_waiting', failed_output_hash=candidate.get('targetHash'), eligible_completed_cycle=store.completed_cycle() + _runtime.REGENERATION_INITIAL_DELAY_CYCLES, reason='migrated legacy quarantine tombstone')
-            retry_migration['migrated'] += 1
-        store.mark_legacy_retry_migration_complete()
-    imported = sum((migration[key] for key in ('submissions', 'artifacts', 'holds')))
-    if imported or migration['skipped']:
-        print(f"[STATE] Migrated {migration['submissions']} cooldown(s), {migration['artifacts']} artifact(s), {migration['holds']} hold(s); skipped {migration['skipped']} malformed record(s)")
     print(f'[STATE] SQLite state ready at {_runtime.STATE_DB_FILE}')
     if reconciliation['completed'] or reconciliation['abandoned']:
         print(f"[STATE] Reconciled {reconciliation['completed']} pending operation(s); abandoned {reconciliation['abandoned']}")
-    if any(retry_migration.values()):
-        print(f"[STATE] Quarantine retry migration: {retry_migration['migrated']} scheduled, {retry_migration['unresolved']} unresolved, {retry_migration['ignored']} ignored; admissions remain limited to {_runtime.RETRY_BATCH_SIZE_PER_CYCLE}/cycle and {_runtime.RETRY_MAX_PER_SERIES_PER_CYCLE}/series")
     return store
-_runtime._register_runtime_resources = _register_runtime_resources
-_runtime.close_runtime_resources = close_runtime_resources
-_runtime.TranslationCapacityGate = TranslationCapacityGate
-_runtime.SharedCapacityCoordinator = SharedCapacityCoordinator
-_runtime.FileLaneGate = FileLaneGate
-_runtime.dbg = dbg
-_runtime._status_transition = _status_transition
-_runtime._status_identity = _status_identity
-_runtime._status_create_repair_ref = _status_create_repair_ref
-_runtime._status_ref_transition = _status_ref_transition
-_runtime._status_ref_complete = _status_ref_complete
-_runtime._complete_repair_status = _complete_repair_status
-_runtime._status_set_episode_identity = _status_set_episode_identity
-_runtime._status_admit_retry = _status_admit_retry
-_runtime._refresh_status_diagnostics = _refresh_status_diagnostics
-_runtime._status_set_phase = _status_set_phase
-_runtime._status_start_cycle = _status_start_cycle
-_runtime._status_finish_cycle = _status_finish_cycle
-_runtime._status_record_maintenance = _status_record_maintenance
-_runtime._status_create_maintenance = _status_create_maintenance
-_runtime._status_update_maintenance = _status_update_maintenance
-_runtime._status_complete_maintenance = _status_complete_maintenance
-_runtime._status_record_maintenance_outcome = _status_record_maintenance_outcome
-_runtime._maintenance_file_identity = _maintenance_file_identity
-_runtime._maintenance_metrics = _maintenance_metrics
-_runtime._scan_progress_details = _scan_progress_details
-_runtime._publish_scan_progress = _publish_scan_progress
-_runtime._scan_child_queued = _scan_child_queued
-_runtime._scan_child_finished = _scan_child_finished
-_runtime._scan_enumeration_finished = _scan_enumeration_finished
-_runtime._status_compact_history = _status_compact_history
-_runtime._status_finish_validation = _status_finish_validation
-_runtime._get_cleanup_detector = _get_cleanup_detector
-_runtime._get_validation_state = _get_validation_state
-_runtime._initialize_state_store = _initialize_state_store
+EXPORTS = {
+    name: globals()[name] for name in (
+        '_register_runtime_resources', 'close_runtime_resources',
+        'TranslationCapacityGate', 'SharedCapacityCoordinator', 'FileLaneGate',
+        'dbg', '_status_transition', '_status_identity',
+        '_status_create_repair_ref', '_status_ref_transition',
+        '_status_ref_complete', '_complete_repair_status',
+        '_status_set_episode_identity', '_status_admit_retry',
+        '_refresh_status_diagnostics', '_status_set_phase',
+        '_status_start_cycle', '_status_finish_cycle',
+        '_status_record_maintenance', '_status_create_maintenance',
+        '_status_update_maintenance', '_status_complete_maintenance',
+        '_status_record_maintenance_outcome', '_maintenance_file_identity',
+        '_maintenance_metrics', '_scan_progress_details',
+        '_publish_scan_progress', '_scan_child_queued', '_scan_child_finished',
+        '_scan_enumeration_finished', '_status_compact_history',
+        '_status_finish_validation', '_get_cleanup_detector',
+        '_get_validation_state', '_initialize_state_store',
+    )
+}
+

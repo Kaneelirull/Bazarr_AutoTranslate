@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 import json
-import os
+import math
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,16 +10,24 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .tracker import StatusTracker
+from .manual_review_http import parse_review_query, render_review_page
+from ..manual_review import (
+    ManualReviewConflict,
+    ManualReviewDisabled,
+    ManualReviewNotFound,
+    ManualReviewUnavailable,
+)
 
 STATIC_DIR = Path(__file__).parents[2] / "static"
 STATIC_ASSETS = {
     "/assets/dashboard.css": ("text/css; charset=utf-8", STATIC_DIR / "dashboard.css"),
     "/assets/dashboard.js": ("text/javascript; charset=utf-8", STATIC_DIR / "dashboard.js"),
     "/assets/logs.js": ("text/javascript; charset=utf-8", STATIC_DIR / "logs.js"),
+    "/assets/review.js": ("text/javascript; charset=utf-8", STATIC_DIR / "review.js"),
     "/assets/plus-jakarta-sans.ttf": ("font/ttf", STATIC_DIR / "plus-jakarta-sans.ttf"),
 }
 
-def render_dashboard(snapshot: dict) -> str:
+def render_dashboard(snapshot: dict, display_timezone: str = "UTC") -> str:
     """Render the CSP-safe shell; the same-origin script owns live updates."""
     bootstrap_snapshot = {**snapshot}
     cycle = snapshot.get("currentCycle")
@@ -31,7 +39,7 @@ def render_dashboard(snapshot: dict) -> str:
         json.dumps(bootstrap_snapshot, ensure_ascii=False, separators=(",", ":")),
         quote=True,
     )
-    display_timezone = html.escape(os.getenv("TZ", "UTC").strip() or "UTC", quote=True)
+    display_timezone = html.escape(display_timezone.strip() or "UTC", quote=True)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -71,6 +79,8 @@ def render_logs_page() -> str:
   <h1>Service logs</h1><p class="header-meta">Sanitized, read-only operational output · New records use UTC timestamps</p></div>
   <div class="header-actions">
     <a class="btn btn-secondary" href="/">Status</a>
+    <a class="btn btn-secondary" href="/review">Manual review</a>
+    <a class="btn btn-secondary" href="/logs" aria-current="page">Logs</a>
     <button class="btn btn-secondary" id="theme-toggle" type="button" aria-label="Switch color theme">Theme</button>
     <button class="btn btn-primary" id="refresh-button" type="button">Refresh now</button>
   </div></header>
@@ -149,6 +159,8 @@ def start_status_server(
     log_dir: Path | str | None = None,
     *,
     server_class=None,
+    manual_review_service=None,
+    display_timezone: str = "UTC",
 ) -> tuple[_DashboardServer, threading.Thread]:
     server_type = server_class or _DashboardServer
     managed_log_dir = Path(log_dir) if log_dir is not None else None
@@ -156,7 +168,9 @@ def start_status_server(
         def do_GET(self) -> None:
             parsed = urlsplit(self.path)
             if parsed.path == "/":
-                body = render_dashboard(tracker.snapshot()).encode("utf-8")
+                body = render_dashboard(
+                    tracker.snapshot(), display_timezone
+                ).encode("utf-8")
                 self._send(200, "text/html; charset=utf-8", body)
             elif parsed.path == "/logs":
                 self._send(
@@ -164,6 +178,26 @@ def start_status_server(
                     "text/html; charset=utf-8",
                     render_logs_page().encode("utf-8"),
                 )
+            elif parsed.path == "/review":
+                self._send(
+                    200, "text/html; charset=utf-8",
+                    render_review_page(display_timezone).encode("utf-8"),
+                )
+            elif parsed.path == "/api/manual-reviews":
+                if manual_review_service is None:
+                    self._json_error(503, "service_unavailable", "Manual review service is unavailable.")
+                    return
+                try:
+                    payload = manual_review_service.list_reviews(
+                        parse_review_query(parsed.query)
+                    )
+                except (TypeError, ValueError):
+                    self._json_error(400, "invalid_query", "Manual review query is invalid.")
+                    return
+                except (OSError, RuntimeError):
+                    self._json_error(503, "service_unavailable", "Manual reviews are temporarily unavailable.")
+                    return
+                self._send_json(200, payload)
             elif parsed.path == "/api/logs":
                 if managed_log_dir is None:
                     self._send(404, "application/json; charset=utf-8", b'{"error":"logs unavailable"}')
@@ -206,9 +240,74 @@ def start_status_server(
             else:
                 self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
 
+        def do_POST(self) -> None:
+            parsed = urlsplit(self.path)
+            match = re.fullmatch(r"/api/manual-reviews/(\d+)/actions", parsed.path)
+            if match is None:
+                self._json_error(404, "not_found", "Route not found.")
+                return
+            if manual_review_service is None:
+                self._json_error(503, "service_unavailable", "Manual review service is unavailable.")
+                return
+            if self.headers.get("X-Bazarr-Autotranslate-Action") != "manual-review":
+                self._json_error(403, "action_header_required", "Manual review action header is required.")
+                return
+            fetch_site = self.headers.get("Sec-Fetch-Site", "").lower()
+            if fetch_site not in {"", "none", "same-origin"}:
+                self._json_error(403, "cross_origin_rejected", "Cross-origin actions are not allowed.")
+                return
+            content_type = self.headers.get_content_type()
+            if content_type != "application/json":
+                self._json_error(415, "json_required", "Content-Type must be application/json.")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                length = -1
+            if length < 0 or length > 4096:
+                self._json_error(400, "invalid_body_size", "Request body must be 4 KiB or smaller.")
+                return
+            try:
+                payload = json.loads(self.rfile.read(length))
+            except (UnicodeDecodeError, ValueError):
+                self._json_error(400, "invalid_json", "Request body must be valid JSON.")
+                return
+            if not isinstance(payload, dict) or set(payload) != {"action", "expectedUpdatedAt"}:
+                self._json_error(400, "invalid_body", "Action and expectedUpdatedAt are required.")
+                return
+            try:
+                action = str(payload["action"])
+                expected = float(payload["expectedUpdatedAt"])
+                if not math.isfinite(expected):
+                    raise ValueError("expectedUpdatedAt must be finite")
+                if action not in {"recheck", "queue_retry", "dismiss"}:
+                    raise ValueError("unsupported action")
+                status, response = manual_review_service.perform_action(
+                    int(match.group(1)), action, expected
+                )
+            except (TypeError, ValueError):
+                self._json_error(400, "invalid_action", "Manual review action is invalid.")
+                return
+            except ManualReviewDisabled:
+                self._json_error(403, "actions_disabled", "Manual review actions are disabled.")
+                return
+            except ManualReviewNotFound:
+                self._json_error(404, "not_found", "Manual review was not found.")
+                return
+            except ManualReviewConflict:
+                self._json_error(409, "stale_review", "Manual review changed; refresh and try again.")
+                return
+            except ManualReviewUnavailable:
+                self._json_error(503, "service_unavailable", "Manual review action could not be completed.")
+                return
+            except (OSError, RuntimeError):
+                self._json_error(503, "service_unavailable", "Manual review action could not be completed.")
+                return
+            self._send_json(status, response)
+
         def do_HEAD(self) -> None:
             path = urlsplit(self.path).path
-            if path in ("/", "/logs", "/api/status", "/api/logs", "/healthz") or path in STATIC_ASSETS:
+            if path in ("/", "/review", "/logs", "/api/status", "/api/logs", "/api/manual-reviews", "/healthz") or path in STATIC_ASSETS:
                 self._send(200, "text/plain; charset=utf-8", b"", include_body=False)
             else:
                 self._send(404, "text/plain; charset=utf-8", b"", include_body=False)
@@ -235,6 +334,15 @@ def start_status_server(
             self.end_headers()
             if include_body:
                 self.wfile.write(body)
+
+        def _send_json(self, status: int, payload: dict) -> None:
+            self._send(
+                status, "application/json; charset=utf-8",
+                json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            )
+
+        def _json_error(self, status: int, code: str, message: str) -> None:
+            self._send_json(status, {"error": {"code": code, "message": message}})
 
         def log_message(self, _format: str, *_args) -> None:
             return

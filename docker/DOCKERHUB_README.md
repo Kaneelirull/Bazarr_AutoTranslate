@@ -162,8 +162,10 @@ http://HOST:8765
 ```
 
 Relevant settings are `STATUS_ENABLED`, `STATUS_BIND`, `STATUS_PORT`,
-`STATUS_HISTORY_RETENTION_DAYS`, and `STATUS_RECENT_LIMIT`. The dashboard is
-read-only, refreshes every 30 seconds, and retains a manual refresh control.
+`STATUS_HISTORY_RETENTION_DAYS`, `STATUS_RECENT_LIMIT`, and
+`STATUS_MANUAL_ACTIONS_ENABLED`. The trusted-LAN dashboard has no authentication;
+audited manual-review actions are enabled by default and can be disabled while
+leaving the review page readable.
 
 ## Persistent paths
 
@@ -180,9 +182,9 @@ able to correct Lingarr-created subtitle ownership to the managed
 Correctness-critical state is stored in
 `/config/bazarr-autotranslate.sqlite3`. It transactionally records submission
 cooldowns, exact source/target hashes, Lingarr outputs, validation results,
-repair lineage, and quarantine audit history. Existing `submitted_cache.json` and
-`validation_state.json` files are imported once and preserved as
-`.migrated.bak` backups.
+repair lineage, quarantine audit history, manual review actions, and the durable
+Bazarr scan outbox. Schema v16 no longer imports pre-SQLite JSON state. Systems
+that need that recovery must migrate using the preceding release first.
 
 Only one application container may use a given `/config` directory. A second
 instance exits instead of risking duplicate translations. If SQLite cannot be

@@ -19,7 +19,12 @@
   let retrySortKey = "nextAction";
   let retrySortDirection = "asc";
   let retryVisibleCount = RETRY_BATCH_SIZE;
+  let recoveryDiagnosticsOpen = null;
+  let observationSearch = "";
+  let observationClassification = "";
+  let observationLanguage = "";
   const expandedRetryIds = new Set();
+  const expandedObservationIds = new Set();
 
   const escapeHtml = (value) => String(value ?? "—")
     .replaceAll("&", "&amp;")
@@ -81,6 +86,7 @@
       minute: "2-digit",
       second: "2-digit",
       hourCycle: "h23",
+      timeZoneName: "short",
     };
     try {
       return new Intl.DateTimeFormat("en-GB", options).format(date);
@@ -424,7 +430,97 @@
     + "</div></div>"
   );
 
-  const renderHeader = (service, cycle) => {
+  const observationClassificationLabel = (value) => ({
+    likely_invariant: "Likely invariant",
+    ambiguous: "Ambiguous",
+  }[value] || labelForState(value));
+
+  const observationId = (row) => [
+    row.itemType, row.itemId, row.targetLanguage, row.cueNumber,
+    row.classification, row.timestamp,
+  ].map((value) => String(value ?? "")).join(":");
+
+  const observationEvidence = (evidence = {}) => {
+    const confidence = (value) => (
+      value === null || value === undefined ? "n/a" : Number(value).toFixed(3)
+    );
+    const rows = [
+      ["Similarity", confidence(evidence.similarity)],
+      ["Exact normalized copy", evidence.exactNormalizedCopy ? "Yes" : "No"],
+      ["Token count", evidence.tokenCount ?? "n/a"],
+      ["Token shape", labelForState(evidence.tokenShape)],
+      ["Model markers", evidence.modelMarkerCount ?? 0],
+      ["Cue language", evidence.cueLanguage || "Unknown"],
+      ["Cue language confidence", confidence(evidence.cueLanguageConfidence)],
+      ["Whole-target confidence", confidence(evidence.wholeTargetConfidence)],
+      ["Context confidence", confidence(evidence.contextConfidence)],
+    ];
+    return `<dl class="observation-evidence">${rows.map(([label, value]) => (
+      `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`
+    )).join("")}</dl>`;
+  };
+
+  const renderValidationObservations = (observations) => {
+    const rows = Array.isArray(observations) ? observations : [];
+    const languages = [...new Set(rows.map((row) => row.targetLanguage).filter(Boolean))].sort();
+    const search = observationSearch.trim().toLocaleLowerCase();
+    const filtered = rows.filter((row) => {
+      if (observationClassification && row.classification !== observationClassification) return false;
+      if (observationLanguage && row.targetLanguage !== observationLanguage) return false;
+      if (!search) return true;
+      return [
+        row.title, row.episodeCode, row.episodeTitle, row.itemType,
+        row.targetLanguage, row.classification, row.reason, row.cueNumber,
+      ].filter((value) => value !== null && value !== undefined)
+        .join(" ").toLocaleLowerCase().includes(search);
+    });
+    const filters = `<form class="observation-filters" id="observation-filters">
+      <label>Search <input type="search" maxlength="100" value="${escapeHtml(observationSearch)}"
+        placeholder="Media, cue, or decision" data-observation-focus="search" data-focus-key="observation-search"></label>
+      <label>Classification <select data-observation-focus="classification" data-focus-key="observation-classification">
+        <option value="">All classifications</option>
+        ${["likely_invariant", "ambiguous"].map((value) => (
+          `<option value="${value}"${observationClassification === value ? " selected" : ""}>${escapeHtml(observationClassificationLabel(value))}</option>`
+        )).join("")}
+      </select></label>
+      <label>Language <select data-observation-focus="language" data-focus-key="observation-language">
+        <option value="">All languages</option>
+        ${languages.map((value) => (
+          `<option value="${escapeHtml(value)}"${observationLanguage === value ? " selected" : ""}>${escapeHtml(value)}</option>`
+        )).join("")}
+      </select></label>
+    </form>`;
+    let body;
+    if (!rows.length) {
+      body = '<p class="empty-state">No copied-source repairs were suppressed.</p>';
+    } else if (!filtered.length) {
+      body = '<p class="empty-state">No observations match these filters.</p>';
+    } else {
+      body = `<div class="table-wrap"><table class="data-table observation-table">
+        <thead><tr><th scope="col">Media</th><th scope="col">Type</th><th scope="col">Language</th>
+        <th scope="col">Cue</th><th scope="col">Decision</th><th scope="col">Classification</th>
+        <th scope="col">Evidence</th><th scope="col">Observed</th></tr></thead>
+        <tbody>${filtered.map((row) => {
+          const id = observationId(row);
+          const open = expandedObservationIds.has(id) ? " open" : "";
+          return `<tr>
+          <td class="cell-media" data-label="Media">${mediaMarkup(row)}</td>
+          <td data-label="Type">${escapeHtml(row.itemType === "movies" ? "Movie" : row.itemType === "episodes" ? "Episode" : "—")}</td>
+          <td data-label="Language">${escapeHtml(row.targetLanguage || "—")}</td>
+          <td data-label="Cue">${escapeHtml(row.cueNumber ?? "—")}</td>
+          <td data-label="Decision"><span class="badge badge-warning">Repair skipped</span></td>
+          <td data-label="Classification">${escapeHtml(observationClassificationLabel(row.classification))}</td>
+          <td data-label="Evidence"><details class="observation-details" data-observation-id="${escapeHtml(id)}"${open}><summary data-focus-key="observation-${escapeHtml(id)}">View evidence</summary>
+            <p>${escapeHtml(row.reason || "Copied-source repair was suppressed.")}</p>
+            ${observationEvidence(row.evidence)}</details></td>
+          <td data-label="Observed">${timeMarkup(row.timestamp)}</td>
+        </tr>`;
+        }).join("")}</tbody></table></div>`;
+    }
+    return `<section class="panel observation-panel">${panelHeader("Validation observations", "Latest 20 suppressed copied-source decisions")}${filters}${body}</section>`;
+  };
+
+  const renderHeader = (service, cycle, manualReviewCount) => {
     const phase = labelForState(service.phase || "startup");
     const generated = parseTime(snapshot.generatedAt);
     const stale = !generated || Date.now() - generated.getTime() > 30_000;
@@ -442,9 +538,11 @@
         </p>
       </div>
       <div class="header-actions">
-        <a class="btn btn-secondary" href="/logs">Logs</a>
-        <button class="btn btn-secondary" id="theme-toggle" type="button" aria-label="Switch color theme">Theme</button>
-        <button class="btn btn-primary" id="refresh-button" type="button">Refresh now</button>
+        <a class="btn btn-secondary" href="/" aria-current="page" data-focus-key="nav-status">Status</a>
+        <a class="btn btn-secondary" href="/review" data-focus-key="nav-review">Manual review (${number(manualReviewCount).toLocaleString()})</a>
+        <a class="btn btn-secondary" href="/logs" data-focus-key="nav-logs">Logs</a>
+        <button class="btn btn-secondary" id="theme-toggle" type="button" aria-label="Switch color theme" data-focus-key="theme-toggle">Theme</button>
+        <button class="btn btn-primary" id="refresh-button" type="button" data-focus-key="refresh-button">Refresh now</button>
       </div>
     </header>`;
   };
@@ -578,6 +676,7 @@
       ["Restart-persisted repairs", repairs.persisted_for_restart],
       ["Malformed provider responses", provider.malformed_response],
     ];
+    const hasActivity = rows.some(([, value]) => number(value) > 0) || Boolean(maintenance);
     const cards = rows.map(([label, value]) => (
       `<div class="maintenance-item"><span class="maintenance-label">${escapeHtml(label)}</span>`
       + `<strong class="maintenance-value">${number(value).toLocaleString()}</strong></div>`
@@ -585,8 +684,27 @@
     const maintenanceNote = maintenance
       ? `Latest maintenance: ${operationLabel(maintenance.operation)} - ${labelForState(maintenance.state)}`
       : "No persisted maintenance run yet.";
-    return `<section class="panel">${panelHeader("Recovery reliability", maintenanceNote)}`
-      + `<div class="maintenance-grid">${cards}</div></section>`;
+    const open = recoveryDiagnosticsOpen ?? hasActivity;
+    return `<details class="panel diagnostics-panel" data-recovery-diagnostics${open ? " open" : ""}>`
+      + `<summary data-focus-key="recovery-diagnostics"><span>Recovery reliability</span><small>${escapeHtml(maintenanceNote)}</small></summary>`
+      + `<div class="maintenance-grid">${cards}</div></details>`;
+  };
+
+  const renderRecoveryAttention = (plans, completedCycle, manualReviewCount) => {
+    const automatic = plans.filter((plan) => !plan.manualReview);
+    const dueNow = automatic.filter((plan) => (
+      plan.state === "regeneration_waiting"
+      && number(plan.eligibleCompletedCycle) <= number(completedCycle)
+    )).length;
+    const dueNext = automatic.filter((plan) => (
+      plan.state === "regeneration_waiting"
+      && number(plan.eligibleCompletedCycle) === number(completedCycle) + 1
+    )).length;
+    return `<nav class="recovery-attention" aria-label="Recovery attention">
+      <a href="#retry-queue"><span>Due now</span><strong>${dueNow.toLocaleString()}</strong></a>
+      <a href="#retry-queue"><span>Next cycle</span><strong>${dueNext.toLocaleString()}</strong></a>
+      <a href="/review"><span>Manual review</span><strong>${number(manualReviewCount).toLocaleString()}</strong></a>
+    </nav>`;
   };
 
   const retryMedia = (plan) => ({
@@ -602,9 +720,14 @@
     `retry-detail-${retryPlanId(plan).replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`
   );
 
-  const retryState = (state) => {
+  const retryState = (state, plan = null, completedCycle = 0) => {
     const states = {
-      regeneration_waiting: ["Due now", "deferred"],
+      regeneration_waiting: [
+        plan && number(plan.eligibleCompletedCycle) > number(completedCycle)
+          ? (number(plan.eligibleCompletedCycle) === number(completedCycle) + 1 ? "Next cycle" : "Scheduled")
+          : "Due now",
+        "deferred",
+      ],
       regeneration_queued: ["Admitted", "translating"],
       waiting_lane: ["Waiting for lane", "queued"],
       retry_in_progress: ["Translating", "translating"],
@@ -662,7 +785,7 @@
   };
 
   const retrySortValue = (plan, key, completedCycle) => {
-    const [stateLabel] = retryState(plan.state);
+    const [stateLabel] = retryState(plan.state, plan, completedCycle);
     if (key === "media") return retryMedia(plan).title.toLocaleLowerCase();
     if (key === "language") return String(plan.targetLanguage || "").toLocaleLowerCase();
     if (key === "status") return stateLabel.toLocaleLowerCase();
@@ -696,9 +819,20 @@
     return compareRetryValues(retryPlanId(left), retryPlanId(right));
   };
 
+  const retryCodeLabels = {
+    whole_file_validation_failure: "Whole-file validation failed",
+    copied_source: "Copied source text",
+    manual_review: "Manual review",
+    no_progress: "No progress",
+    accepted_after_retry: "Accepted after retry",
+    accepted_after_manual_recheck: "Accepted after manual recheck",
+  };
+  const retryCodeLabel = (value) => retryCodeLabels[String(value || "")]
+    || String(value || "").replaceAll("_", " ");
+
   const retryDetails = (plan, expanded) => {
     const rules = Array.isArray(plan.rules) && plan.rules.length
-      ? plan.rules.join(", ")
+      ? plan.rules.map(retryCodeLabel).join(", ")
       : "—";
     const fields = [
       ["Failure class", plan.failureClass || "—"],
@@ -717,7 +851,7 @@
     return `<tr class="retry-detail-row" id="${escapeHtml(detailId)}" ${expanded ? "" : "hidden"}>
       <td colspan="6">
         <dl class="retry-detail-grid">${fields.map(([label, value]) => (
-          `<div class="${label === "Last reason" ? "retry-detail-wide" : ""}"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`
+          `<div class="${label === "Last reason" ? "retry-detail-wide" : ""}"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(retryCodeLabel(value))}</dd></div>`
         )).join("")}</dl>
       </td>
     </tr>`;
@@ -727,7 +861,7 @@
     media: "Media",
     language: "Language",
     status: "Status",
-    attempts: "Attempts",
+    attempts: "Retries",
     nextAction: "Next action",
   };
 
@@ -752,7 +886,8 @@
       ),
     );
     const active = plans.filter((plan) => ![
-      "accepted_after_retry", "superseded",
+      "accepted_after_retry", "accepted_after_manual_recheck",
+      "manual_dismissed", "superseded",
     ].includes(plan.state)).map((plan) => {
       const job = jobsByPlan.get(retryPlanId(plan));
       if (!job) return plan;
@@ -767,7 +902,7 @@
     });
     const note = `Persistent quarantine recovery · completed cycle ${Number(completedCycle || 0)}`;
     if (!active.length) {
-      return `<section class="panel">${panelHeader("Retry queue", note)}
+      return `<section class="panel" id="retry-queue">${panelHeader("Retry queue", note)}
         <p class="empty-state">No retry work scheduled.</p>
       </section>`;
     }
@@ -785,7 +920,7 @@
     )).length;
     const rows = visible.map((plan) => {
       const media = retryMedia(plan);
-      const [stateLabel, stateTone] = retryState(plan.runtimeState || plan.state);
+      const [stateLabel, stateTone] = retryState(plan.runtimeState || plan.state, plan, completedCycle);
       const planId = retryPlanId(plan);
       const detailId = retryDetailId(plan);
       const expanded = expandedRetryIds.has(planId);
@@ -796,7 +931,9 @@
         </td>
         <td data-label="Language">${escapeHtml(plan.targetLanguage || "—")}</td>
         <td data-label="Status"><span class="badge ${stateTone}">${escapeHtml(stateLabel)}</span></td>
-        <td data-label="Attempts"><span class="duration">${Number(plan.attemptCount || 0)} / ${Number(maxAttempts || 0) === 0 ? "unlimited" : Number(maxAttempts)}</span></td>
+        <td data-label="Retries"><span class="duration">${Number(maxAttempts) === 0
+          ? `${Number(plan.attemptCount || 0)} retries &middot; Unlimited`
+          : `${Number(plan.attemptCount || 0)} of ${Number(maxAttempts)} used`}</span></td>
         <td data-label="Next action">${escapeHtml(retryNextAction(plan, completedCycle))}</td>
         <td class="cell-details" data-label="Details">
           <button type="button" class="retry-details-toggle"
@@ -812,7 +949,7 @@
       `<option value="${escapeHtml(key)}" ${retrySortKey === key ? "selected" : ""}>${escapeHtml(label)}</option>`
     )).join("");
     const remaining = Math.max(0, active.length - visible.length);
-    return `<section class="panel">${panelHeader("Retry queue", note)}
+    return `<section class="panel" id="retry-queue">${panelHeader("Retry queue", note)}
       <div class="retry-toolbar">
         <div class="retry-summary" aria-label="${active.length} active retries, ${dueNow} due now, ${dueNext} due next cycle">
           <span><strong>${active.length.toLocaleString()}</strong> active</span>
@@ -905,7 +1042,10 @@
   };
 
   const render = () => {
+    const stableFocusKey = document.activeElement?.dataset?.focusKey || "";
     const retryFocusKey = document.activeElement?.dataset?.retryFocus || "";
+    const observationFocusKey = document.activeElement?.dataset?.observationFocus || "";
+    const observationSelectionStart = document.activeElement?.selectionStart;
     const service = snapshot.service || {};
     const cycle = snapshot.currentCycle || {};
     const maintenance = snapshot.maintenance || {};
@@ -918,17 +1058,20 @@
     activeTooltipTrigger = null;
     pinnedTooltipTrigger = null;
     tooltipSequence = 0;
+    const retryPlans = snapshot.retryPlans || [];
+    const manualReviewPlans = retryPlans.filter((plan) => plan.manualReview);
     root.innerHTML = `<div class="dashboard-shell">
-      ${renderHeader(service, cycle)}
+      ${renderHeader(service, cycle, manualReviewPlans.length)}
+      ${renderRecoveryAttention(retryPlans, snapshot.completedCycle || 0, manualReviewPlans.length)}
       ${renderOverview(cycle, service)}
-      ${renderDiagnostics(snapshot.timing || {}, snapshot.circuits || [])}
-      ${renderRecoveryDiagnostics(service.recoveryDiagnostics || {})}
       ${renderRetryPlans(
-        snapshot.retryPlans || [],
+        retryPlans.filter((plan) => !plan.manualReview),
         snapshot.completedCycle || 0,
-        snapshot.retryMaxAttempts || 3,
+        snapshot.retryMaxAttempts ?? 0,
         [...active, ...upcoming],
       )}
+      ${renderDiagnostics(snapshot.timing || {}, snapshot.circuits || [])}
+      ${renderRecoveryDiagnostics(service.recoveryDiagnostics || {})}
       <section class="panel">${panelHeader("Active now", `${active.length.toLocaleString()} in progress`)}
         ${table(active, "active", "No active translations or repairs.")}
       </section>
@@ -938,6 +1081,7 @@
       <section class="panel">${panelHeader("Recent outcomes", "Latest completed work")}
         ${table(recent, "recent", "No completed jobs recorded yet.")}
       </section>
+      ${renderValidationObservations(snapshot.validationObservations || [])}
       <section class="panel">${panelHeader("Recent maintenance", "Latest completed maintenance work")}
         ${table(maintenance.recentOutcomes || [], "recent", "No maintenance outcomes recorded yet.")}
       </section>
@@ -948,11 +1092,39 @@
     </div>`;
     root.setAttribute("aria-busy", "false");
     bindControls();
+    if (stableFocusKey) {
+      const stableFocusTarget = root.querySelector(
+        `[data-focus-key="${CSS.escape(stableFocusKey)}"]`,
+      );
+      stableFocusTarget?.focus({ preventScroll: true });
+      if (
+        typeof observationSelectionStart === "number"
+        && typeof stableFocusTarget?.setSelectionRange === "function"
+      ) {
+        stableFocusTarget.setSelectionRange(
+          observationSelectionStart, observationSelectionStart,
+        );
+      }
+    }
     if (retryFocusKey) {
       const retryFocusTarget = Array.from(
         root.querySelectorAll("[data-retry-focus]"),
       ).find((node) => node.dataset.retryFocus === retryFocusKey);
       retryFocusTarget?.focus({ preventScroll: true });
+    }
+    if (observationFocusKey) {
+      const observationFocusTarget = root.querySelector(
+        `[data-observation-focus="${observationFocusKey}"]`,
+      );
+      observationFocusTarget?.focus({ preventScroll: true });
+      if (
+        typeof observationSelectionStart === "number"
+        && typeof observationFocusTarget?.setSelectionRange === "function"
+      ) {
+        observationFocusTarget.setSelectionRange(
+          observationSelectionStart, observationSelectionStart,
+        );
+      }
     }
     tick();
   };
@@ -1053,6 +1225,31 @@
     theme?.addEventListener("click", toggleTheme);
     refresh?.addEventListener("click", () => refreshStatus(true));
     bindRetryControls();
+    const observationFilters = document.getElementById("observation-filters");
+    const observationSearchInput = observationFilters?.querySelector('input[type="search"]');
+    const observationSelects = observationFilters?.querySelectorAll("select") || [];
+    observationSearchInput?.addEventListener("input", () => {
+      observationSearch = observationSearchInput.value;
+      render();
+    });
+    observationSelects[0]?.addEventListener("change", () => {
+      observationClassification = observationSelects[0].value;
+      render();
+    });
+    observationSelects[1]?.addEventListener("change", () => {
+      observationLanguage = observationSelects[1].value;
+      render();
+    });
+    document.querySelectorAll("[data-observation-id]").forEach((disclosure) => {
+      disclosure.addEventListener("toggle", () => {
+        const id = disclosure.dataset.observationId;
+        if (disclosure.open) expandedObservationIds.add(id);
+        else expandedObservationIds.delete(id);
+      });
+    });
+    document.querySelector("[data-recovery-diagnostics]")?.addEventListener("toggle", (event) => {
+      recoveryDiagnosticsOpen = event.currentTarget.open;
+    });
     updateThemeButton();
   };
 

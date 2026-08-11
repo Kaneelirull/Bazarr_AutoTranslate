@@ -374,19 +374,6 @@ class MigrationsRepositoryMixin:
                     created_at REAL NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS legacy_quarantine_index (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    artifact_path TEXT NOT NULL,
-                    artifact_hash TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    reason_code TEXT,
-                    quarantine_attempt_id INTEGER REFERENCES quarantine_attempts(id),
-                    partial_candidate_id INTEGER REFERENCES partial_candidates(id),
-                    scanned_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    UNIQUE(artifact_path, artifact_hash)
-                );
-
                 CREATE TABLE IF NOT EXISTS donor_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     retry_plan_id INTEGER REFERENCES retry_plans(id),
@@ -444,53 +431,39 @@ class MigrationsRepositoryMixin:
                 );
                 CREATE INDEX IF NOT EXISTS idx_provider_events_recent
                     ON provider_events(provider, classification, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS manual_review_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    retry_plan_id INTEGER NOT NULL REFERENCES retry_plans(id),
+                    action TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    reason_code TEXT,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_manual_review_actions_plan_time
+                    ON manual_review_actions(retry_plan_id, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS manual_review_scan_outbox (
+                    retry_plan_id INTEGER PRIMARY KEY REFERENCES retry_plans(id),
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at REAL NOT NULL,
+                    lease_owner TEXT,
+                    lease_expires_at REAL,
+                    last_error_code TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_manual_review_scan_due
+                    ON manual_review_scan_outbox(
+                        state, attempt_count, next_attempt_at, retry_plan_id
+                    );
                 """
             )
             self._migration_checkpoint("schema_objects")
-            legacy_table = db.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' "
-                "AND name='legacy_quarantine_index'"
-            ).fetchone()
-            legacy_sql = str(legacy_table["sql"] or "") if legacy_table else ""
-            if (
-                "artifact_hash TEXT NOT NULL UNIQUE" in legacy_sql
-                or "UNIQUE(artifact_path, artifact_hash)" not in legacy_sql
-            ):
-                db.execute(
-                    "ALTER TABLE legacy_quarantine_index "
-                    "RENAME TO legacy_quarantine_index_hash_only"
-                )
-                db.execute(
-                    """
-                    CREATE TABLE legacy_quarantine_index (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        artifact_path TEXT NOT NULL,
-                        artifact_hash TEXT NOT NULL,
-                        state TEXT NOT NULL,
-                        reason_code TEXT,
-                        quarantine_attempt_id INTEGER REFERENCES quarantine_attempts(id),
-                        partial_candidate_id INTEGER REFERENCES partial_candidates(id),
-                        scanned_at REAL NOT NULL,
-                        updated_at REAL NOT NULL,
-                        UNIQUE(artifact_path, artifact_hash)
-                    )
-                    """
-                )
-                db.execute(
-                    """
-                    INSERT INTO legacy_quarantine_index(
-                        id, artifact_path, artifact_hash, state, reason_code,
-                        quarantine_attempt_id, partial_candidate_id,
-                        scanned_at, updated_at
-                    )
-                    SELECT id, artifact_path, artifact_hash, state, reason_code,
-                           quarantine_attempt_id, partial_candidate_id,
-                           scanned_at, updated_at
-                    FROM legacy_quarantine_index_hash_only
-                    """
-                )
-                db.execute("DROP TABLE legacy_quarantine_index_hash_only")
-            self._migration_checkpoint("legacy_index")
+            db.execute("DROP TABLE IF EXISTS legacy_quarantine_index")
+            self._migration_checkpoint("legacy_state_removed")
             quarantine_columns = {
                 row["name"]
                 for row in self._connection.execute(
@@ -532,6 +505,53 @@ class MigrationsRepositoryMixin:
                         f"ALTER TABLE retry_plans ADD COLUMN {name} {definition}"
                     )
             self._migration_checkpoint("retry_columns")
+            self._connection.execute(
+                """
+                UPDATE retry_plans
+                SET state='regeneration_waiting',
+                    last_deferral_class='manual_review',
+                    final_outcome=NULL,
+                    claim_owner=NULL,
+                    claimed_at=NULL,
+                    submission_attempt_id=NULL,
+                    updated_at=MAX(updated_at, ?)
+                WHERE state='retry_exhausted'
+                  AND final_outcome='manual_review'
+                """,
+                (time.time(),),
+            )
+            outbox_now = time.time()
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO manual_review_scan_outbox(
+                    retry_plan_id, state, attempt_count, next_attempt_at,
+                    lease_owner, lease_expires_at, last_error_code,
+                    created_at, updated_at
+                )
+                SELECT plan.id, 'pending',
+                       (SELECT COUNT(*) FROM manual_review_actions failed
+                        WHERE failed.retry_plan_id=plan.id
+                          AND failed.action='bazarr_scan'
+                          AND failed.outcome='failed'),
+                       ?, NULL, NULL, NULL, ?, ?
+                FROM retry_plans plan
+                WHERE plan.state='accepted_after_manual_recheck'
+                  AND EXISTS (
+                      SELECT 1 FROM manual_review_actions pending
+                      WHERE pending.retry_plan_id=plan.id
+                        AND pending.action='bazarr_scan'
+                        AND pending.outcome='pending'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM manual_review_actions sent
+                      WHERE sent.retry_plan_id=plan.id
+                        AND sent.action='bazarr_scan'
+                        AND sent.outcome='dispatched'
+                  )
+                """,
+                (outbox_now, outbox_now, outbox_now),
+            )
+            self._migration_checkpoint("manual_review_normalization")
             circuit_columns = {
                 row["name"]
                 for row in self._connection.execute(
@@ -581,6 +601,8 @@ class MigrationsRepositoryMixin:
                 12: "failure, admission, and provider diagnostics",
                 13: "circuit trial lease ownership",
                 14: "successful translation source readiness",
+                15: "manual review actions and state normalization",
+                16: "atomic manual recovery and fair scan outbox",
             }
             timestamp = time.time()
             for version, name in migration_names.items():
@@ -595,9 +617,7 @@ class MigrationsRepositoryMixin:
                 "VALUES('app_schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
-            # Keep the legacy marker stable for rollback images. The additive
-            # ledger and metadata are authoritative from schema 9 onward.
-            self._connection.execute("PRAGMA user_version = 8")
+            self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             self._migration_checkpoint("schema_markers")
 
     def _migration_checkpoint(self, _name: str) -> None:
@@ -634,199 +654,3 @@ class MigrationsRepositoryMixin:
                 f"SQLite foreign_key_check failed for {self.path}: "
                 f"{len(foreign_key_errors)} violation(s)"
             )
-
-    def migrate_legacy(
-        self,
-        submit_cache_path: str | Path,
-        validation_state_path: str | Path,
-        *,
-        cooldown_seconds: int,
-    ) -> dict[str, int]:
-        if self._metadata("legacy_json_migrated") == "1":
-            return {"submissions": 0, "artifacts": 0, "holds": 0, "skipped": 0}
-
-        submit_path = Path(submit_cache_path)
-        validation_path = Path(validation_state_path)
-        stats = {"submissions": 0, "artifacts": 0, "holds": 0, "skipped": 0}
-        submit_payload = self._read_json_object(submit_path)
-        validation_payload = self._read_json_object(validation_path)
-        now = time.time()
-
-        with self._transaction() as db:
-            for key, raw in submit_payload.items():
-                try:
-                    item_id_text, target_language = key.rsplit(":", 1)
-                    item_id = int(item_id_text)
-                    if isinstance(raw, dict):
-                        submitted_at = float(raw["submittedAt"])
-                        metadata = raw
-                    else:
-                        submitted_at = float(raw)
-                        metadata = {}
-                    cooldown_until = submitted_at + max(0, cooldown_seconds)
-                    if cooldown_until <= now:
-                        continue
-                    item_type = str(metadata.get("itemType") or "legacy")
-                    target_path = metadata.get("targetPath")
-                    video_path = metadata.get("videoPath")
-                    target_identity = (
-                        _path_key(Path(video_path).with_suffix(""))
-                        if isinstance(video_path, str) and video_path
-                        else None
-                    )
-                    db.execute(
-                        """
-                        INSERT INTO translation_attempts(
-                            item_type, item_id, target_language, target_identity,
-                            target_path, expected_target_path, actual_target_path,
-                            video_path, source_path, source_hash, source_language,
-                            target_hash, target_variant, status, submitted_at, cooldown_until,
-                            updated_at
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            item_type,
-                            item_id,
-                            target_language,
-                            target_identity,
-                            _path_key(target_path),
-                            _path_key(metadata.get("expectedTargetPath")),
-                            _path_key(metadata.get("actualTargetPath")),
-                            _path_key(video_path),
-                            _path_key(metadata.get("sourcePath")),
-                            metadata.get("sourceHash"),
-                            metadata.get("sourceLanguage"),
-                            metadata.get("targetHash"),
-                            metadata.get("targetVariant"),
-                            "legacy" if item_type == "legacy" else "submitted",
-                            submitted_at,
-                            cooldown_until,
-                            now,
-                        ),
-                    )
-                    stats["submissions"] += 1
-                except (KeyError, TypeError, ValueError, AttributeError):
-                    stats["skipped"] += 1
-
-            files = validation_payload.get("files", {})
-            if isinstance(files, dict):
-                for target_path, entry in files.items():
-                    try:
-                        if not isinstance(entry, dict):
-                            raise TypeError
-                        target_hash = entry.get("targetHash")
-                        source_hash = entry.get("sourceHash")
-                        details = entry.get("details")
-                        details = details if isinstance(details, dict) else {}
-                        origin = (
-                            "lingarr"
-                            if entry.get("origin") == "lingarr"
-                            and target_hash
-                            and source_hash
-                            else "external"
-                        )
-                        created = str(
-                            entry.get("validatedAt") or _utc_iso(now)
-                        )
-                        cursor = db.execute(
-                            """
-                            INSERT INTO subtitle_artifacts(
-                                target_path, target_language, target_hash,
-                                source_path, source_language, source_hash,
-                                origin, operation, disposition, created_at,
-                                updated_at
-                            ) VALUES(?, ?, ?, ?, ?, ?, ?, 'legacy_migration',
-                                     'active', ?, ?)
-                            """,
-                            (
-                                _path_key(target_path),
-                                details.get("targetLanguage"),
-                                target_hash,
-                                _path_key(details.get("sourcePath")),
-                                details.get("sourceLanguage"),
-                                source_hash if origin == "lingarr" else None,
-                                origin,
-                                created,
-                                created,
-                            ),
-                        )
-                        artifact_id = int(cursor.lastrowid)
-                        db.execute(
-                            """
-                            INSERT INTO validation_results(
-                                artifact_id, validator_version, validation_mode,
-                                result, report_json, details_json, validated_at
-                            ) VALUES(?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                artifact_id,
-                                str(entry.get("validatorVersion", "1")),
-                                (
-                                    "source-aware"
-                                    if origin == "lingarr"
-                                    else "target-only"
-                                ),
-                                str(entry.get("result") or "unknown"),
-                                json.dumps(details.get("validation", {})),
-                                json.dumps(details),
-                                created,
-                            ),
-                        )
-                        stats["artifacts"] += 1
-                    except (TypeError, ValueError) as exc:
-                        stats["skipped"] += 1
-                        print(
-                            f"[WARNING] Skipping malformed legacy validation "
-                            f"record {target_path!r}: {exc}"
-                        )
-
-            tombstones = validation_payload.get("quarantineTombstones", {})
-            if isinstance(tombstones, dict):
-                for entry in tombstones.values():
-                    try:
-                        if not isinstance(entry, dict):
-                            raise TypeError
-                        db.execute(
-                            """
-                            INSERT OR REPLACE INTO quarantine_holds(
-                                identity, target_hash, target_path,
-                                target_language, rules_json, origin, first_seen,
-                                last_seen, hold_until, occurrences
-                            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                str(entry["identity"]),
-                                str(entry["targetHash"]),
-                                _path_key(entry["targetPath"]),
-                                str(entry["targetLanguage"]),
-                                json.dumps(entry.get("rules", [])),
-                                str(entry.get("origin") or "unknown"),
-                                str(entry["firstSeen"]),
-                                str(entry["lastSeen"]),
-                                str(entry["holdUntil"]),
-                                int(entry.get("occurrences", 1)),
-                            ),
-                        )
-                        stats["holds"] += 1
-                    except (KeyError, TypeError, ValueError) as exc:
-                        stats["skipped"] += 1
-                        print(
-                            f"[WARNING] Skipping malformed legacy quarantine "
-                            f"record: {exc}"
-                        )
-            self._set_metadata(db, "legacy_json_migrated", "1")
-            self._set_metadata(db, "legacy_json_migrated_at", _utc_iso())
-
-        for legacy_path in (submit_path, validation_path):
-            if not legacy_path.exists():
-                continue
-            backup = legacy_path.with_name(legacy_path.name + ".migrated.bak")
-            try:
-                if not backup.exists():
-                    os.replace(legacy_path, backup)
-            except OSError as exc:
-                print(
-                    f"[WARNING] Migrated {legacy_path} but could not preserve "
-                    f"backup as {backup}: {exc}"
-                )
-        return stats

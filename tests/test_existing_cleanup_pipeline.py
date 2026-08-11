@@ -24,11 +24,14 @@ os.environ.setdefault(
     "LOG_DIR", str(Path(tempfile.gettempdir()) / "bazarr-autotranslate-tests")
 )
 
-import Bazarr_AutoTranslate as app  # noqa: E402
-import clean_et_subs as cleanup  # noqa: E402
-from clean_et_subs import ValidationStateStore  # noqa: E402
-from state_store import StateStore  # noqa: E402
-from autotranslate.subtitles.core import ValidationIssue, ValidationReport  # noqa: E402
+from autotranslate.config import Config  # noqa: E402
+from autotranslate.production import load_runtime  # noqa: E402
+import autotranslate.subtitles.library as cleanup  # noqa: E402
+from autotranslate.subtitles.library import ValidationStateStore  # noqa: E402
+from autotranslate.persistence.state_store import StateStore  # noqa: E402
+from autotranslate.subtitles.foundation import ValidationIssue, ValidationReport  # noqa: E402
+
+app = load_runtime(Config.from_env(), None)
 
 
 def make_srt(text: str) -> str:
@@ -110,7 +113,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.125Z \[INFO\] Top Gear\n$",
             )
             self.assertEqual(
-                app._console_handler.format(record), "[INFO] Top Gear"
+                logging.Formatter("%(message)s").format(record), "[INFO] Top Gear"
             )
             sink.close()
 
@@ -322,31 +325,6 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(app._clear_submission_for_path(target, "et"), 1)
             self.assertIsNone(app._check_cooldown(42, "et"))
 
-    def test_submit_cache_loads_legacy_entries_and_ignores_malformed_keys(self):
-        with tempfile.TemporaryDirectory() as directory:
-            cache_file = Path(directory) / "submitted_cache.json"
-            now = app.time.time()
-            cache_file.write_text(
-                json.dumps(
-                    {
-                        "42:et": now,
-                        "not-an-id:et": {"submittedAt": now},
-                        "broken": {"submittedAt": "not-a-time"},
-                    }
-                ),
-                encoding="utf-8",
-            )
-            validation_file = Path(directory) / "validation_state.json"
-            state = StateStore(Path(directory) / "migrated.sqlite3")
-            try:
-                result = state.migrate_legacy(
-                    cache_file, validation_file, cooldown_seconds=3600
-                )
-                self.assertEqual(result["submissions"], 1)
-                self.assertIsNotNone(state.check_cooldown("legacy", 42, "et"))
-            finally:
-                state.close()
-
     def _prune_fixture(self, directory: str, *, managed=("en", "et", "sv")):
         root = Path(directory) / "media"
         root.mkdir()
@@ -487,7 +465,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             with (
                 patch.object(app, "CLEANUP_UNDERSIZED_ENABLED", True),
                 patch(
-                    "autotranslate.subtitles.core.validate_subtitle_without_source",
+                    "autotranslate.subtitles.library.validate_subtitle_without_source",
                     return_value=language_disagreement,
                 ),
             ):
@@ -502,7 +480,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 ValidationIssue("target_repetition", "repetitive subtitle content")
             ])
             with patch(
-                "autotranslate.subtitles.core.validate_subtitle_without_source",
+                "autotranslate.subtitles.library.validate_subtitle_without_source",
                 return_value=non_language_failure,
             ):
                 ready, evidence = app._managed_sidecar_is_valid(
@@ -626,7 +604,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertFalse(episodes_changed or movies_changed)
 
     def test_failed_prune_quarantine_leaves_original_untouched(self):
-        import clean_et_subs
+        import autotranslate.subtitles.library as clean_et_subs
 
         with tempfile.TemporaryDirectory() as directory:
             root, video = self._prune_fixture(directory)
@@ -1347,6 +1325,74 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertTrue(report.valid)
             translate.assert_not_called()
             self.assertIn("Esimene\nteine rida", target.read_text(encoding="utf-8"))
+
+    def test_invariant_observation_skips_repair_and_persists_as_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "Top Gear S14E01.eng.srt"
+            target = root / "Top Gear S14E01.et.srt"
+            source.write_text(
+                "442\n00:23:44,000 --> 00:23:45,000\nBefore the car.\n\n"
+                "443\n00:23:46,000 --> 00:23:48,000\nAston Martin Vanquish\n\n"
+                "444\n00:23:49,000 --> 00:23:51,000\nAfter the car.\n",
+                encoding="utf-8",
+            )
+            target.write_text(
+                "442\n00:23:44,000 --> 00:23:45,000\nEnne autot.\n\n"
+                "443\n00:23:46,000 --> 00:23:48,000\nAston Martin Vanquish\n\n"
+                "444\n00:23:49,000 --> 00:23:51,000\nPÃ¤rast autot.\n",
+                encoding="utf-8",
+            )
+            self._record_lingarr_artifact(source, target)
+            tracker = app.StatusTracker(
+                root / "status.json", root / "status_history.jsonl"
+            )
+
+            with (
+                patch.multiple(
+                    app,
+                    CLEANUP_LANGUAGES={"et"},
+                    CLEANUP_FORMAT_REPAIR_ENABLED=False,
+                    CLEANUP_REPAIR_ENABLED=True,
+                    _status_tracker=tracker,
+                ),
+                patch.object(app, "lingarr_translate_line") as translate,
+            ):
+                action, report = app._validate_translated_file(
+                    str(source), str(target), "en", "et", 42,
+                    title="Top Gear", item_type="episodes", origin="lingarr",
+                    provenance_source_hash=app._file_hash_or_none(source),
+                )
+
+            translate.assert_not_called()
+            self.assertEqual(action, "valid")
+            self.assertTrue(report.valid)
+            self.assertEqual(report.repairable_cue_indexes, [])
+            self.assertEqual(report.observations[0].cue_number, 443)
+            target_hash = app._file_hash_or_none(target)
+            record = app._validation_state.matching_record(target, target_hash)
+            self.assertEqual(record["result"], "valid_with_warnings")
+            self.assertEqual(
+                record["details"]["validation"]["observations"][0]["cueNumber"],
+                443,
+            )
+            public = tracker.snapshot()["validationObservations"]
+            self.assertEqual((public[0]["title"], public[0]["cueNumber"]), ("Top Gear", 443))
+            serialized = json.dumps(public)
+            self.assertNotIn(str(target), serialized)
+            self.assertNotIn("Aston Martin Vanquish", serialized)
+
+            database = Path(self._state_directory.name) / "state.sqlite3"
+            app._validation_state.close()
+            app._validation_state = StateStore(
+                database, validator_version=cleanup.VALIDATOR_VERSION
+            )
+            reloaded = app._validation_state.matching_record(target, target_hash)
+            self.assertEqual(reloaded["result"], "valid_with_warnings")
+            self.assertEqual(
+                reloaded["details"]["validation"]["observations"][0]["classification"],
+                "ambiguous",
+            )
 
     def test_repair_logs_attempts_without_dialogue_text(self):
         with tempfile.TemporaryDirectory() as directory:

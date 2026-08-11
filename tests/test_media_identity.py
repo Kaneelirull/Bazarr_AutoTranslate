@@ -6,7 +6,7 @@ from pathlib import Path
 DOCKER_DIR = Path(__file__).resolve().parents[1] / "docker"
 sys.path.insert(0, str(DOCKER_DIR))
 
-from media_identity import resolve_media_identity  # noqa: E402
+from autotranslate.media_identity import resolve_media_identity  # noqa: E402
 
 
 class MediaIdentityTests(unittest.TestCase):

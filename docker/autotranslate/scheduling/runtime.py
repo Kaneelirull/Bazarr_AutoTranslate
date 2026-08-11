@@ -1,5 +1,5 @@
 from __future__ import annotations
-from . import runtime_context as _runtime
+from ..composition import runtime as _runtime
 
 def _drain_lingarr_queue() -> bool:
     drain_deadline = _runtime.time.time() + 2 * _runtime.CHECK_INTERVAL
@@ -39,16 +39,18 @@ def _run_end_cycle_repair_retries(stats: dict) -> None:
             _runtime._get_validation_state().update_retry_plan(plan['id'], state='retry_in_progress', completed_cycle=_runtime._completed_cycle, end_cycle_repair_attempted=True, reason='end-of-cycle repair retry')
             if not source_path or not target_path or (not _runtime.os.path.exists(target_path)):
                 raise OSError('repair source or target is no longer available')
-            action, report = _runtime._validate_translated_file(source_path, target_path, plan.get('sourceLanguage') or '', plan['targetLanguage'], plan['itemId'], title=plan.get('mediaTitle') or '', defer_repair=False, item_type=plan['itemType'], origin='lingarr', provenance_source_hash=plan['sourceHash'], series_key=plan.get('seriesKey'), series_title=plan.get('seriesTitle'))
+            action, report = _runtime._validate_translated_file(source_path, target_path, plan.get('sourceLanguage') or '', plan['targetLanguage'], plan['itemId'], title=plan.get('mediaTitle') or '', defer_repair=False, item_type=plan['itemType'], origin='lingarr', provenance_source_hash=plan['sourceHash'], series_key=plan.get('seriesKey'), series_title=plan.get('seriesTitle'), retry_plan_id=plan['id'])
             if action in ('valid', 'valid-warning', 'formatted', 'repaired'):
-                _runtime._resolve_retry_success(plan['itemType'], plan['itemId'], plan['targetLanguage'])
+                _runtime._resolve_retry_success(
+                    plan['id'], plan['sourceHash']
+                )
                 stats['retry_repairs_accepted'] = stats.get('retry_repairs_accepted', 0) + 1
             elif action == 'repair-deferred':
-                _runtime._get_validation_state().update_retry_plan(plan['id'], state='retry_exhausted', final_outcome='manual_review', reason='end-of-cycle repair remained deferred')
+                _runtime._get_validation_state().reschedule_retry_no_progress(plan['id'], completed_cycle=_runtime._completed_cycle, deferral_class='manual_review', reason='end-of-cycle repair remained deferred', delay_cycles=1)
         except (OSError, _runtime.StateStoreError) as exc:
             print(f'{_runtime.YELLOW}[RETRY] Repair retry deferred: {exc}{_runtime.RESET}')
             try:
-                _runtime._get_validation_state().update_retry_plan(plan['id'], state='retry_exhausted', final_outcome='manual_review', reason=str(exc))
+                _runtime._get_validation_state().reschedule_retry_no_progress(plan['id'], completed_cycle=_runtime._completed_cycle, deferral_class='manual_review', reason=str(exc), delay_cycles=1)
             except _runtime.StateStoreError:
                 stats['degraded'] = True
 
@@ -326,8 +328,10 @@ def run_cycle(cycle_num: int) -> bool:
     _runtime._reconcile_circuit_trial_leases(_runtime._get_validation_state())
     _runtime._status_finish_cycle(stats)
     return bool(not _runtime.shutdown_requested and (not stats.get('degraded')) and (not stats.get('api_errors')))
-_runtime._drain_lingarr_queue = _drain_lingarr_queue
-_runtime._run_end_cycle_repair_retries = _run_end_cycle_repair_retries
-_runtime._run_regeneration_retry_batch = _run_regeneration_retry_batch
-_runtime._run_regeneration_retries = _run_regeneration_retries
-_runtime.run_cycle = run_cycle
+EXPORTS = {
+    name: globals()[name] for name in (
+        '_drain_lingarr_queue', '_run_end_cycle_repair_retries',
+        '_run_regeneration_retry_batch', '_run_regeneration_retries',
+        'run_cycle',
+    )
+}

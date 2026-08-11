@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+import os
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -31,20 +32,20 @@ from autotranslate.maintenance.coordinator import (  # noqa: E402
     MaintenanceOperation,
 )
 from autotranslate.status.facade import sanitize_public  # noqa: E402
-from autotranslate.subtitles.core import purge_old_files  # noqa: E402
+from autotranslate.subtitles.library import purge_old_files  # noqa: E402
 from autotranslate.services.lingarr import (  # noqa: E402
     LingarrClient,
     ProviderResponseError,
     parse_cue_response,
 )
-from clean_et_subs import (  # noqa: E402
+from autotranslate.subtitles.library import (  # noqa: E402
     build_detector,
     cue_source_signature,
     parse_srt_cues,
     repair_subtitle_file,
     target_language_for_code,
 )
-from state_store import StateStore  # noqa: E402
+from autotranslate.persistence.state_store import StateStore  # noqa: E402
 
 
 def make_srt(*texts: str) -> str:
@@ -55,10 +56,32 @@ def make_srt(*texts: str) -> str:
 
 
 class ArchitectureUpgradeTests(unittest.TestCase):
+    def test_package_imports_have_no_process_stream_or_thread_side_effects(self):
+        before_threads = {thread.ident for thread in threading.enumerate()}
+        stdout, stderr = sys.stdout, sys.stderr
+        __import__("autotranslate.app")
+        __import__("autotranslate.composition")
+        self.assertIs(sys.stdout, stdout)
+        self.assertIs(sys.stderr, stderr)
+        self.assertEqual(
+            {thread.ident for thread in threading.enumerate()}, before_threads
+        )
+
+    def test_only_typed_config_reads_environment(self):
+        package_root = REPO_ROOT / "docker" / "autotranslate"
+        for path in package_root.rglob("*.py"):
+            if path.name == "config.py":
+                continue
+            source = path.read_text(encoding="utf-8")
+            self.assertNotIn("os.getenv", source, str(path))
+            self.assertNotIn("os.environ", source, str(path))
+
     def test_production_runtime_has_no_unbounded_standard_executor(self):
-        runtime = (
-            REPO_ROOT / "docker" / "autotranslate" / "runtime.py"
-        ).read_text(encoding="utf-8")
+        runtime = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (REPO_ROOT / "docker" / "autotranslate").rglob("*.py")
+            if path.name != "executor.py"
+        )
         self.assertNotIn("ThreadPoolExecutor", runtime)
         self.assertNotIn("as_completed", runtime)
 
@@ -226,16 +249,16 @@ class ArchitectureUpgradeTests(unittest.TestCase):
         self.assertEqual(repairs.keys, set())
         self.assertEqual(events, [("persist", "one")])
 
-    def test_legacy_modules_are_thin_wrappers_and_package_does_not_import_them(self):
+    def test_removed_import_surfaces_are_absent_and_bootstraps_are_executable_only(self):
         docker_root = REPO_ROOT / "docker"
-        legacy_names = {
-            "Bazarr_AutoTranslate", "clean_et_subs", "state_store", "status_dashboard"
-        }
-        for name in legacy_names:
+        for name in {"Bazarr_AutoTranslate", "clean_et_subs"}:
             wrapper = docker_root / f"{name}.py"
             self.assertLessEqual(
                 len(wrapper.read_text(encoding="utf-8").splitlines()), 20, wrapper
             )
+        for name in {"state_store", "status_dashboard", "media_identity"}:
+            self.assertFalse((docker_root / f"{name}.py").exists())
+        legacy_names = {"Bazarr_AutoTranslate", "clean_et_subs", "state_store", "status_dashboard", "media_identity"}
         for module in (docker_root / "autotranslate").rglob("*.py"):
             tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
             for node in ast.walk(tree):
@@ -253,31 +276,20 @@ class ArchitectureUpgradeTests(unittest.TestCase):
     def test_production_composition_does_not_delegate_to_compatibility_runtime(self):
         package_root = REPO_ROOT / "docker" / "autotranslate"
         app_source = (package_root / "app.py").read_text(encoding="utf-8")
-        host_source = (package_root / "runtime_host.py").read_text(encoding="utf-8")
-        self.assertNotIn("from . import runtime", app_source)
-        self.assertNotIn("from . import runtime\n", host_source)
-        self.assertNotIn("from .runtime import", host_source)
-        self.assertLessEqual(
-            len((package_root / "runtime.py").read_text(encoding="utf-8").splitlines()),
-            35,
-        )
-        for compatibility in (
-            package_root / "persistence" / "state_store.py",
+        host_source = (package_root / "production.py").read_text(encoding="utf-8")
+        self.assertIn("from .production import ProductionRuntimeHost", app_source)
+        self.assertNotIn("sys.modules", host_source)
+        self.assertEqual(list(package_root.glob("runtime*.py")), [])
+        for removed in (
+            package_root / "runtime.py", package_root / "runtime_context.py",
             package_root / "status" / "dashboard.py",
             package_root / "subtitles" / "core.py",
+            package_root / "subtitles" / "validation.py",
         ):
-            self.assertLessEqual(
-                len(compatibility.read_text(encoding="utf-8").splitlines()),
-                35,
-                compatibility,
-            )
-        production_sources = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in package_root.glob("runtime_*.py")
-            if path.name not in {"runtime_host.py"}
-        )
-        self.assertNotIn(".status.dashboard", production_sources)
-        self.assertNotIn(".subtitles.core", production_sources)
+            self.assertFalse(removed.exists(), removed)
+        for path in package_root.rglob("*.py"):
+            source = path.read_text(encoding="utf-8")
+            self.assertNotRegex(source, r"(?m)^_runtime\.[A-Za-z_]\w*\s*=", str(path))
 
     def test_typed_config_preserves_required_inputs_and_shutdown_default(self):
         config = Config.from_env({
@@ -288,6 +300,13 @@ class ArchitectureUpgradeTests(unittest.TestCase):
         self.assertEqual(config.bazarr_url, "http://bazarr:6767")
         self.assertEqual(config.languages, ("en", "et", "sv"))
         self.assertEqual(config.repair_shutdown_grace_seconds, 30)
+        self.assertTrue(config.status_manual_actions_enabled)
+        read_only = Config.from_env({
+            "BAZARR_URL": "bazarr:6767", "BAZARR_API_KEY": "secret",
+            "LINGARR_URL": "lingarr:8080",
+            "STATUS_MANUAL_ACTIONS_ENABLED": "false",
+        })
+        self.assertFalse(read_only.status_manual_actions_enabled)
         with self.assertRaises(ConfigError):
             Config.from_env({"LINGARR_URL": "lingarr:8080"})
 
@@ -385,7 +404,7 @@ class ArchitectureUpgradeTests(unittest.TestCase):
         clock["now"] = 50.0
         self.assertEqual(shutdown.remaining(), 0.0)
 
-    def test_schema_ledger_is_additive_and_legacy_marker_stays_rollback_safe(self):
+    def test_schema_v16_is_authoritative_and_removes_legacy_state(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "state.sqlite3"
             store = StateStore(database, validator_version="v2", config_fingerprint="cfg")
@@ -395,9 +414,9 @@ class ArchitectureUpgradeTests(unittest.TestCase):
                         "SELECT version FROM schema_migrations"
                     )
                 }
-                self.assertTrue({9, 10, 11, 12, 13, 14}.issubset(versions))
+                self.assertTrue({9, 10, 11, 12, 13, 14, 15, 16}.issubset(versions))
                 self.assertEqual(LATEST_SCHEMA_VERSION, max(versions))
-                self.assertEqual(store._connection.execute("PRAGMA user_version").fetchone()[0], 8)
+                self.assertEqual(store._connection.execute("PRAGMA user_version").fetchone()[0], 16)
                 tables = {
                     row[0] for row in store._connection.execute(
                         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -405,9 +424,12 @@ class ArchitectureUpgradeTests(unittest.TestCase):
                 }
                 self.assertTrue({
                     "maintenance_runs", "repair_jobs", "partial_candidates",
-                    "cue_recoveries", "legacy_quarantine_index", "donor_events",
+                    "cue_recoveries", "donor_events",
                     "failure_fingerprints", "retry_admission_events", "provider_events",
+                    "manual_review_actions",
+                    "manual_review_scan_outbox",
                 }.issubset(tables))
+                self.assertNotIn("legacy_quarantine_index", tables)
                 self.assertEqual(store._connection.execute("PRAGMA quick_check").fetchone()[0], "ok")
                 self.assertEqual(store._connection.execute("PRAGMA foreign_key_check").fetchall(), [])
             finally:

@@ -154,13 +154,17 @@ Cue repair progress reports finalized cues, the current cue, attempt/max attempt
 
 | Variable | Default | Description |
 |---|---|---|
-| `STATUS_ENABLED` | `true` | Start the read-only status server |
+| `STATUS_ENABLED` | `true` | Start the trusted-LAN status server |
 | `STATUS_BIND` | `0.0.0.0` | Container interface used by the status server |
 | `STATUS_PORT` | `8765` | Container and published host port |
 | `STATUS_HISTORY_RETENTION_DAYS` | `30` | Status-event retention; minimum 7 days |
 | `STATUS_RECENT_LIMIT` | `20` | Recent terminal jobs displayed and returned |
+| `STATUS_MANUAL_ACTIONS_ENABLED` | `true` | Enable audited manual-review mutations |
 
 Endpoints:
+
+- `/review` — manual-review records and guided recovery actions
+- `/api/manual-reviews` — paginated sanitized review data and action endpoint
 
 - `/` — responsive dashboard shell with live and manual refresh controls
 - `/api/status` — the same snapshot as JSON
@@ -170,7 +174,7 @@ The stable JSON sections are `generatedAt`, `service`, `currentCycle`, `activeJo
 
 Current state is atomically written to `/config/status.json`; terminal history is appended to `/config/status_history.jsonl`. Both survive container recreation through the existing `/config` volume. Interrupted wanted jobs are finalized as deferred; interrupted maintenance jobs become a single `interrupted` maintenance outcome. Status history is compacted during normal retention housekeeping.
 
-The dashboard has no authentication. Keep port `8765` restricted to a trusted LAN or protect it with your firewall/reverse proxy. Set `STATUS_ENABLED=false` to disable the listener. A port-binding or status-file failure is non-fatal and does not stop translations.
+The dashboard has no authentication, and manual-review actions are enabled by default. Keep port `8765` restricted to a trusted LAN or protect it with your firewall/reverse proxy. Set `STATUS_MANUAL_ACTIONS_ENABLED=false` for a readable but non-mutating review page, or `STATUS_ENABLED=false` to disable the listener. A port-binding or status-file failure is non-fatal and does not stop translations.
 
 Completeness scanning covers regular subtitles in every language, including HI, SDH, numbered, and language-less sidecars. Files explicitly labelled `forced`, `foreign`, `signs`, or `commentary` are exempt. A file is undersized only when at least three configured density/coverage signals fail; an unavailable duration is a safe skip.
 
@@ -184,17 +188,18 @@ Lingarr provenance is persisted transactionally in `/config/bazarr-autotranslate
 
 Source-aware validation requires an exact target path/hash record and the current source hash. A moved adjacent source is accepted only when its language and content hash still match. Changed or unproven files fall back to conservative target-only validation. Bazarr/manual subtitles are stored as external observations without an inferred source.
 
-On the first upgraded startup, valid entries from `submitted_cache.json` and `validation_state.json` are imported once. The originals are retained as `.migrated.bak` files. Malformed rows are skipped with a warning. SQLite initialization, integrity, or write failures fail closed: new translations and source-aware repairs are deferred rather than proceeding without durable provenance.
+Release v16 no longer imports pre-SQLite JSON state or quarantine indexes. Installations that still require that recovery must first start the preceding release and verify its SQLite migration before upgrading. SQLite initialization, integrity, or write failures fail closed: new translations and source-aware repairs are deferred rather than proceeding without durable provenance.
 
 Only one Bazarr AutoTranslate container may use a given `/config` directory. A second instance exits with an explicit lock error, preventing duplicate submissions and conflicting state updates.
 
 A source-less subtitle whose only validation issue is `excessive_lines` is retained as `valid_with_warnings` by default and skipped on later scans while its hash is unchanged. Prompt leakage, malformed structure, wrong language/script, repetition, undersized content, or any other strong rule still makes it eligible for the configured cleanup action. No dialogue lines are joined automatically.
 
-Quarantine retention and retry eligibility are independent. Invalid artifacts and reports remain available for audit for `QUARANTINE_ARTIFACT_RETENTION_DAYS`, including after a later success. Cue-local failures use the bounded repair path and may receive one end-of-cycle retry. Structurally unsafe target output is regenerated from the current source after persistent completed-cycle backoff. Service failures use normal cooldown and circuit protection and do not create subtitle quarantine plans. Retry state survives restart, unchanged failed hashes do not consume attempts, and exhausted plans remain visible for manual review. The legacy `CLEANUP_QUARANTINE_HOLD_DAYS` variable is accepted with a warning but no longer affects eligibility.
+Quarantine retention and retry eligibility are independent. Invalid artifacts and reports remain available for audit for `QUARANTINE_ARTIFACT_RETENTION_DAYS`, including after a later success. Cue-local failures use the bounded repair path and may receive one end-of-cycle retry. Structurally unsafe target output is regenerated from the current source after persistent completed-cycle backoff. Service failures use normal cooldown and circuit protection and do not create subtitle quarantine plans. Retry state survives restart, unchanged failed hashes do not consume attempts, and exhausted plans remain visible for manual review.
 
-The application schema is additive through v13 while retaining SQLite
-`user_version=8` for rollback-image compatibility. The migration ledger records
-the authoritative application schema. It includes retry admission rotation,
+The application schema is v16 and SQLite `user_version=16` is authoritative.
+The upgrade preserves v15 submissions, validation, retry, manual-review,
+quarantine, and audit data while dropping obsolete pre-SQLite recovery state and
+adding the durable manual-scan outbox. It includes retry admission rotation,
 durable repair and cue recovery state, provider and donor events, canonical series aliases,
 no-progress deferrals, and owned half-open circuit leases. Existing attempts,
 eligibility, circuit history, and quarantine files remain untouched. Retry claims
@@ -202,18 +207,17 @@ recovered after a crash move to the next completed cycle without consuming a
 translation attempt, preventing the same no-progress batch from starving later
 work. Half-open protection is claimed only immediately before submission, bound
 to the Lingarr job, and released when no job was created. Before upgrading, back
-up `/config/bazarr-autotranslate.sqlite3`; rolling back to an older image requires
-stopping the new process first. Additive tables and dual-written circuit fields
-remain available for a later re-upgrade; keep the backup as an operational safeguard.
+up `/config/bazarr-autotranslate.sqlite3`. This is a breaking, non-rollback-compatible
+database upgrade; older images must not open a v16 database. Keep the backup as an
+operational safeguard.
 
-## Code layout and compatibility
+## Code layout and import policy
 
-Runtime implementations live under `autotranslate/`. The historical
-`Bazarr_AutoTranslate.py`, `clean_et_subs.py`, `state_store.py`, and
-`status_dashboard.py` files are intentionally thin compatibility entry points.
-The Docker command and standalone cleanup CLI are unchanged, and existing Python
-imports resolve to the packaged implementation modules so monkey-patching and
-documented integrations retain the same behavior.
+Runtime implementations live under `autotranslate/`. Historical Python imports,
+module-global monkey patching, and cleanup re-exports are no longer supported. The
+two top-level Python files are executable bootstraps only.
+The Docker command and standalone cleanup CLI remain available, but importing
+either executable is unsupported.
 
 Source-anchored recovery normalizes BOMs, newlines, trailing whitespace, timestamp spacing, repeated separators, and blank lines inside cues. Orphan text is folded into its preceding cue only when every numbered timestamp anchor still matches the source in order. Missing, duplicate, reordered, or mismatched anchors are never guessed.
 

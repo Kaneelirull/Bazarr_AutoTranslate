@@ -1,11 +1,11 @@
 from __future__ import annotations
-from . import runtime_context as _runtime
+from ..composition import runtime as _runtime
 
 def _scan_undersized_sidecars(stats: dict) -> bool:
     """Validate regular subtitle density for every language using sibling media duration."""
     if not _runtime.CLEANUP_UNDERSIZED_ENABLED:
         return False
-    from .subtitles.foundation import file_sha256, validate_srt_structure
+    from ..subtitles.foundation import file_sha256, validate_srt_structure
     changed = False
     seen: set[_runtime.Path] = set()
     for root in _runtime.CLEANUP_ROOTS:
@@ -108,8 +108,8 @@ def _candidate_videos() -> list[_runtime.Path]:
     return sorted(videos, key=lambda path: str(path).casefold())
 
 def _managed_sidecar_is_valid(classification: _runtime.SidecarClassification, duration: float, detector) -> tuple[bool, dict]:
-    from .subtitles.foundation import file_sha256, target_language_for_code, validate_srt_structure
-    from .subtitles.library import validate_subtitle_without_source
+    from ..subtitles.foundation import file_sha256, target_language_for_code, validate_srt_structure
+    from ..subtitles.library import validate_subtitle_without_source
     language = classification.language
     evidence = {'path': str(classification.path), 'language': language, 'valid': False}
     if language is None or any((token in _runtime._NON_FULL_SUBTITLE_TOKENS for token in classification.tokens)):
@@ -161,8 +161,8 @@ def _managed_sidecar_is_valid(classification: _runtime.SidecarClassification, du
     return (report.valid, evidence)
 
 def _apply_prune_action(video: _runtime.Path, classification: _runtime.SidecarClassification, readiness: dict, *, dry_run: bool) -> str:
-    from .subtitles.foundation import file_sha256
-    from .subtitles.library import quarantine_subtitle, write_validation_report
+    from ..subtitles.foundation import file_sha256
+    from ..subtitles.library import quarantine_subtitle, write_validation_report
     subtitle = classification.path
     try:
         video_stat = video.stat()
@@ -308,8 +308,8 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 context['stats'] = stats
     if not _runtime.CLEANUP_SCAN_EXISTING:
         return stats
-    from .subtitles.foundation import file_sha256, target_language_for_code
-    from .subtitles.library import discover_target_subtitles, find_preferred_source, validate_subtitle_without_source
+    from ..subtitles.foundation import file_sha256, target_language_for_code
+    from ..subtitles.library import discover_target_subtitles, find_preferred_source, validate_subtitle_without_source
     with _runtime._cleanup_scan_lock:
         detector = _runtime._get_cleanup_detector()
         state = _runtime._get_validation_state()
@@ -501,7 +501,7 @@ def _run_existing_cleanup_scan_safely() -> dict | None:
         return None
 
 def run_retention_housekeeping() -> dict:
-    from .subtitles.library import purge_old_files
+    from ..subtitles.library import purge_old_files
     current_log = [_runtime._app_log_sink.current_path] if _runtime._app_log_sink.current_path is not None else []
     protected = _runtime._get_validation_state().protected_artifact_paths()
     quarantine_removed = purge_old_files(_runtime.CLEANUP_QUARANTINE_DIR, _runtime.QUARANTINE_ARTIFACT_RETENTION_DAYS, exclude=protected, access_coordinator=_runtime._artifact_access)
@@ -511,19 +511,18 @@ def run_retention_housekeeping() -> dict:
     except (OSError, _runtime.StateStoreError) as e:
         print(f'{_runtime.YELLOW}[WARNING] Could not prune validation state: {e}{_runtime.RESET}')
         state_removed = 0
-    result = {'quarantine_files': len(quarantine_removed), 'log_files': len(logs_removed), 'state_entries': state_removed, 'status_events': _runtime._status_compact_history()}
+    pending_scans = _runtime._manual_review_service.dispatch_pending_scans(limit=10) if _runtime._manual_review_service is not None else {'examined': 0, 'dispatched': 0}
+    result = {'quarantine_files': len(quarantine_removed), 'log_files': len(logs_removed), 'state_entries': state_removed, 'status_events': _runtime._status_compact_history(), 'manual_scans': pending_scans['dispatched']}
     print(f"[RETENTION] Removed {result['quarantine_files']} quarantine file(s), {result['log_files']} log file(s), and {result['state_entries']} validation state record(s) plus {result['status_events']} status event(s) beyond their retention window")
     return result
-_runtime._scan_undersized_sidecars = _scan_undersized_sidecars
-_runtime._video_sidecars = _video_sidecars
-_runtime._queue_video_for_pruning = _queue_video_for_pruning
-_runtime._take_pending_prune_videos = _take_pending_prune_videos
-_runtime._video_has_pending_repair = _video_has_pending_repair
-_runtime._prune_stats = _prune_stats
-_runtime._candidate_videos = _candidate_videos
-_runtime._managed_sidecar_is_valid = _managed_sidecar_is_valid
-_runtime._apply_prune_action = _apply_prune_action
-_runtime.run_extra_sidecar_prune = run_extra_sidecar_prune
-_runtime.run_existing_cleanup_scan = run_existing_cleanup_scan
-_runtime._run_existing_cleanup_scan_safely = _run_existing_cleanup_scan_safely
-_runtime.run_retention_housekeeping = run_retention_housekeeping
+EXPORTS = {
+    name: globals()[name] for name in (
+        '_scan_undersized_sidecars', '_video_sidecars',
+        '_queue_video_for_pruning', '_take_pending_prune_videos',
+        '_video_has_pending_repair', '_prune_stats', '_candidate_videos',
+        '_managed_sidecar_is_valid', '_apply_prune_action',
+        'run_extra_sidecar_prune', 'run_existing_cleanup_scan',
+        '_run_existing_cleanup_scan_safely', 'run_retention_housekeeping',
+    )
+}
+
