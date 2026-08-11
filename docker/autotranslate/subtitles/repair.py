@@ -587,5 +587,3 @@ def repair_subtitle_file(
                 Path(temp_name).unlink()
             except OSError:
                 pass
-
-

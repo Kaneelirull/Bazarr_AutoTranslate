@@ -496,7 +496,6 @@ def validate_srt_structure(path: Path | str) -> ValidationReport:
         report.issues.append(ValidationIssue("target_structure", "subtitle contains no cues"))
     return report
 
-
 def _timestamp_end_seconds(value: str) -> Optional[float]:
     match = re.match(
         r"^\s*\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*"
@@ -1131,5 +1130,3 @@ def validate_subtitle_pair(
             report.issues.append(ValidationIssue("target_file_invalid", target_reason))
 
     return report
-
-

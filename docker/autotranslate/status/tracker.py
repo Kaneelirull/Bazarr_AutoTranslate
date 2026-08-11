@@ -1045,5 +1045,3 @@ class StatusTracker:
                     temp.unlink()
                 except OSError:
                     pass
-
-
