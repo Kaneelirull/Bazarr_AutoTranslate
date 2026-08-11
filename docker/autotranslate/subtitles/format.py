@@ -1,6 +1,6 @@
 """Pure SRT format helpers are re-exported during incremental extraction."""
 
-from .core import (
+from .foundation import (
     SubtitleCue,
     cue_source_signature,
     file_sha256,
