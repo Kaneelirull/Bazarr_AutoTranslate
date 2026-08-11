@@ -27,6 +27,8 @@ os.environ.setdefault(
 from autotranslate.config import Config  # noqa: E402
 from autotranslate.production import load_runtime  # noqa: E402
 import autotranslate.subtitles.library as cleanup  # noqa: E402
+import autotranslate.subtitles.foundation as subtitle_foundation  # noqa: E402
+import autotranslate.subtitles.repair as subtitle_repair  # noqa: E402
 from autotranslate.subtitles.library import ValidationStateStore  # noqa: E402
 from autotranslate.persistence.state_store import StateStore  # noqa: E402
 from autotranslate.subtitles.foundation import ValidationIssue, ValidationReport  # noqa: E402
@@ -221,10 +223,12 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             Path(self._state_directory.name) / "state.sqlite3",
             validator_version=cleanup.VALIDATOR_VERSION,
         )
-        self._permissions_patcher = patch.object(
-            cleanup, "normalize_managed_file", lambda _path: None
-        )
-        self._permissions_patcher.start()
+        self._permissions_patchers = [
+            patch.object(module, "normalize_managed_file", lambda _path: None)
+            for module in (cleanup, subtitle_foundation, subtitle_repair)
+        ]
+        for patcher in self._permissions_patchers:
+            patcher.start()
 
     def tearDown(self):
         app._shutdown_repair_executor()
@@ -232,7 +236,8 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
         with app._pending_repairs_lock:
             app._pending_repairs.clear()
             app._repair_keys.clear()
-        self._permissions_patcher.stop()
+        for patcher in reversed(self._permissions_patchers):
+            patcher.stop()
         if isinstance(app._validation_state, StateStore):
             app._validation_state.close()
         app._validation_state = None
