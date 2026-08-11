@@ -93,7 +93,7 @@ jobs:
         run: >-
           docker run --rm --entrypoint python
           bazarr-autotranslate:release-candidate
-          -c "import media_identity, status_dashboard"
+          -c "import autotranslate.media_identity, autotranslate.status.server"
 
       - name: Publish dated image and update latest
         if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')

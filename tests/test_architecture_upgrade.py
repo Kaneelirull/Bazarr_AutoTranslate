@@ -301,6 +301,16 @@ class ArchitectureUpgradeTests(unittest.TestCase):
             self.assertIn("subtitle_foundation", source)
             self.assertIn("subtitle_repair", source)
 
+    def test_release_smoke_check_uses_package_owned_imports(self):
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "docker-build.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "import autotranslate.media_identity, autotranslate.status.server",
+            workflow,
+        )
+        self.assertNotIn("import media_identity, status_dashboard", workflow)
+
     def test_typed_config_preserves_required_inputs_and_shutdown_default(self):
         config = Config.from_env({
             "BAZARR_URL": "bazarr:6767/",
