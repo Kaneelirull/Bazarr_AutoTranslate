@@ -25,6 +25,7 @@ ACTIVE_STATES = {"translating", "validating", *REPAIR_ACTIVE_STATES}
 MAINTENANCE_ACTIVE_STATES = {
     *REPAIR_ACTIVE_STATES,
     "queued", "scanning", "waiting_repair_completion", "synchronizing", "pruning",
+    "startup_wait", "startup_sync", "repair_drain", "startup_cleanup", "retaining",
 }
 MAINTENANCE_OUTCOMES = {
     "accepted", "repaired", "formatted", "validated", "quarantined", "deleted",
@@ -33,6 +34,10 @@ MAINTENANCE_OUTCOMES = {
 MAINTENANCE_PUBLIC_REASONS = {
     "interrupted by service restart",
     "Bazarr synchronization did not complete",
+    "Bazarr synchronization failed",
+    "retention housekeeping failed",
+    "startup failed",
+    "shutdown requested during startup",
     "validation action failed",
     "existing library scan failed",
     "repair worker failed",

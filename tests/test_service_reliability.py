@@ -61,6 +61,34 @@ class ServiceReliabilityTests(unittest.TestCase):
         app._validation_state = None
         self._state_directory.cleanup()
 
+    def test_tracked_bazarr_sync_closes_status_on_success_and_exception(self):
+        with (
+            patch.object(app, "_status_create_maintenance", return_value="sync-job") as create,
+            patch.object(app, "_status_complete_maintenance") as complete,
+            patch.object(app, "trigger_bazarr_sync") as trigger,
+            patch.object(app, "wait_for_bazarr_sync", return_value=True) as wait,
+        ):
+            self.assertTrue(app._tracked_bazarr_sync(True, True, 45))
+        create.assert_called_once_with(
+            "bazarr_sync", {"title": "Series and movies"}, state="synchronizing"
+        )
+        trigger.assert_called_once_with(True, True)
+        wait.assert_called_once_with(True, True, 45)
+        complete.assert_called_once_with(
+            "sync-job", "accepted", reason=None
+        )
+
+        with (
+            patch.object(app, "_status_create_maintenance", return_value="sync-job"),
+            patch.object(app, "_status_complete_maintenance") as complete,
+            patch.object(app, "trigger_bazarr_sync", side_effect=RuntimeError("offline")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "offline"):
+                app._tracked_bazarr_sync(True, False, 45)
+        complete.assert_called_once_with(
+            "sync-job", "failed", reason="Bazarr synchronization failed"
+        )
+
     def test_request_json_retries_transient_failures_with_bounded_backoff(self):
         response = FakeResponse({"data": []})
         with (

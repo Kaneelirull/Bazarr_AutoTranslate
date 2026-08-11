@@ -16,6 +16,7 @@ sys.path.insert(0, str(REPO_ROOT / "docker"))
 
 from autotranslate.config import Config, ConfigError  # noqa: E402
 from autotranslate.app import build_application  # noqa: E402
+import autotranslate.composition as composition  # noqa: E402
 from autotranslate.lifecycle import LifecycleController, ShutdownController  # noqa: E402
 from autotranslate.persistence.migrations import LATEST_SCHEMA_VERSION  # noqa: E402
 from autotranslate.scheduling.locks import KeyedLockRegistry  # noqa: E402
@@ -66,6 +67,19 @@ class ArchitectureUpgradeTests(unittest.TestCase):
         self.assertEqual(
             {thread.ident for thread in threading.enumerate()}, before_threads
         )
+
+    def test_runtime_log_path_delegates_to_application_logging_resource(self):
+        current = Path("/logs/current.log")
+        original = composition._logging_resource
+        try:
+            composition._logging_resource = None
+            self.assertIsNone(composition.runtime.current_log_path)
+            composition._logging_resource = type(
+                "LoggingResource", (), {"current_path": current}
+            )()
+            self.assertEqual(composition.runtime.current_log_path, current)
+        finally:
+            composition._logging_resource = original
 
     def test_only_typed_config_reads_environment(self):
         package_root = REPO_ROOT / "docker" / "autotranslate"
@@ -310,6 +324,20 @@ class ArchitectureUpgradeTests(unittest.TestCase):
             workflow,
         )
         self.assertNotIn("import media_identity, status_dashboard", workflow)
+        self.assertIn("hasattr(ApplicationLogging, 'current_path')", workflow)
+        self.assertIn(
+            "'_app_log_sink' not in run_retention_housekeeping.__code__.co_names",
+            workflow,
+        )
+
+    def test_startup_tracks_lifecycle_sync_and_retention_work(self):
+        source = (
+            REPO_ROOT / "docker" / "autotranslate" / "startup.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("startup_job_id = _runtime._status_create_maintenance", source)
+        self.assertIn("_runtime._tracked_bazarr_sync", source)
+        self.assertIn("_runtime._run_retention_housekeeping_tracked", source)
+        self.assertNotIn("_runtime.trigger_bazarr_sync(True, True)", source)
 
     def test_typed_config_preserves_required_inputs_and_shutdown_default(self):
         config = Config.from_env({

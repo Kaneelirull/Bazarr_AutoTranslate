@@ -93,7 +93,11 @@ jobs:
         run: >-
           docker run --rm --entrypoint python
           bazarr-autotranslate:release-candidate
-          -c "import autotranslate.media_identity, autotranslate.status.server"
+          -c "import autotranslate.media_identity, autotranslate.status.server;
+          from autotranslate.logging_resource import ApplicationLogging;
+          from autotranslate.maintenance.runtime import run_retention_housekeeping;
+          assert hasattr(ApplicationLogging, 'current_path');
+          assert '_app_log_sink' not in run_retention_housekeeping.__code__.co_names"
 
       - name: Publish dated image and update latest
         if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')

@@ -49,6 +49,13 @@ class RuntimeContext:
     instance instead of being registered on another Python module.
     """
 
+    @property
+    def current_log_path(self) -> Path | None:
+        """Expose the owned logging resource through a narrow runtime contract."""
+        if _logging_resource is None:
+            return None
+        return _logging_resource.current_path
+
     def __getattr__(self, name):
         try:
             return globals()[name]

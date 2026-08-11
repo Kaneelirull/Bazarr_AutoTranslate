@@ -38,6 +38,11 @@ class ApplicationLogging:
         sys.stderr = QueuedLogStream(self._logger, logging.ERROR, self._stderr)
         self._closed = False
 
+    @property
+    def current_path(self) -> Path | None:
+        """Return the active daily log without exposing sink ownership."""
+        return self._sink.current_path
+
     def close(self) -> None:
         if self._closed:
             return
