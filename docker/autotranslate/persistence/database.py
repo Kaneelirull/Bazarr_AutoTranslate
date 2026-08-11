@@ -29,6 +29,7 @@ class Database:
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA busy_timeout=30000")
         self._lock = threading.RLock()
+        self._transaction_depth = 0
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -60,6 +61,7 @@ class DatabaseState:
         self.config_fingerprint = str(config_fingerprint)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._transaction_depth = 0
         self._process_lock_handle = None
         self._connection = None
         if acquire_process_lock:
@@ -148,13 +150,28 @@ class DatabaseState:
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
+            nested = self._transaction_depth > 0
+            savepoint = f"nested_{self._transaction_depth + 1}"
             try:
-                self._connection.execute("BEGIN IMMEDIATE")
+                if nested:
+                    self._connection.execute(f"SAVEPOINT {savepoint}")
+                else:
+                    self._connection.execute("BEGIN IMMEDIATE")
+                self._transaction_depth += 1
                 yield self._connection
-                self._connection.execute("COMMIT")
+                self._transaction_depth -= 1
+                if nested:
+                    self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                else:
+                    self._connection.execute("COMMIT")
             except Exception as exc:
+                self._transaction_depth = max(0, self._transaction_depth - 1)
                 try:
-                    self._connection.execute("ROLLBACK")
+                    if nested:
+                        self._connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                        self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    else:
+                        self._connection.execute("ROLLBACK")
                 except sqlite3.Error:
                     pass
                 if isinstance(exc, sqlite3.Error):

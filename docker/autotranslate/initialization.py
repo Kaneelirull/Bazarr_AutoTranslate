@@ -1,6 +1,15 @@
-from . import runtime_context as _runtime
+from .composition import runtime as _runtime
 
 def initialize_runtime_state():
+    _runtime._repair_capacity = _runtime.threading.BoundedSemaphore(
+        _runtime.PARALLEL_TRANSLATES + _runtime.CLEANUP_REPAIR_QUEUE_MAX
+    )
+    _runtime._repair_futures = _runtime.RepairCoordinator(
+        state_provider=lambda: _runtime._get_validation_state()
+    )
+    _runtime._pending_repairs = _runtime._repair_futures.pending
+    _runtime._pending_repairs_lock = _runtime._repair_futures.lock
+    _runtime._repair_keys = _runtime._repair_futures.keys
     _runtime._episode_cache: dict[int, int] = {}
     _runtime._movie_cache: dict[int, int] = {}
     _runtime._media_cache_lock = _runtime.threading.Lock()

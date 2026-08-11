@@ -12,12 +12,14 @@ from unittest.mock import patch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "docker"))
 
-from status_dashboard import (  # noqa: E402
+from autotranslate.status.tracker import (  # noqa: E402
     StatusTracker,
     build_cycle_jobs,
     episode_identity,
     episode_identity_from_path,
     retry_media_identity,
+)
+from autotranslate.status.server import (  # noqa: E402
     render_dashboard,
     render_logs_page,
     read_logs,
@@ -450,13 +452,74 @@ class StatusDashboardTests(unittest.TestCase):
                 list(payload),
                 [
                     "generatedAt", "service", "currentCycle", "activeJobs",
-                    "upNext", "recentOutcomes", "timing", "circuits",
+                    "upNext", "recentOutcomes", "validationObservations",
+                    "timing", "circuits",
                     "retryPlans", "completedCycle",
                     "retryMaxAttempts",
                     "history", "maintenance",
                 ],
             )
             self.assertFalse((Path(directory) / "status.json.tmp").exists())
+
+    def test_retry_max_attempts_preserves_zero_as_unlimited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self.make_tracker(directory)
+            self.assertEqual(tracker.snapshot()["retryMaxAttempts"], 0)
+            tracker.set_diagnostics(timing={}, circuits=[], retry_max_attempts=0)
+            self.assertEqual(tracker.snapshot()["retryMaxAttempts"], 0)
+
+    def test_validation_observations_are_private_limited_and_recovered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock = FakeClock()
+            tracker = self.make_tracker(directory, clock=clock, recent_limit=3)
+            for index in range(22):
+                tracker.record_validation_observation(
+                    title=f"Example Show {index}",
+                    episode_code=f"S01E{index:02d}",
+                    item_type="episodes",
+                    item_id=index,
+                    target_language="et" if index % 2 else "sv",
+                    cue_number=400 + index,
+                    classification="ambiguous" if index % 2 else "likely_invariant",
+                    reason=(
+                        "Exact Title Case copy retained by the balanced policy."
+                        if index % 2 else
+                        "Copy retained because its structure indicates an invariant name or model."
+                    ),
+                    evidence={
+                        "similarity": 1.0,
+                        "exactNormalizedCopy": True,
+                        "tokenCount": 3,
+                        "tokenShape": "title_case",
+                        "modelMarkerCount": 0,
+                        "cueLanguage": "en",
+                        "cueLanguageConfidence": 0.42,
+                        "wholeTargetConfidence": 0.98,
+                        "contextConfidence": 0.97,
+                        "sourcePath": "/media/private/show.srt",
+                        "sourceText": "private subtitle dialogue",
+                        "targetHash": "private-hash",
+                    },
+                )
+                clock.advance(1)
+
+            observations = tracker.snapshot()["validationObservations"]
+            self.assertEqual(len(observations), 20)
+            self.assertEqual(observations[0]["cueNumber"], 421)
+            self.assertEqual(observations[-1]["cueNumber"], 402)
+            encoded = json.dumps(observations)
+            for private in (
+                "/media/private", "private subtitle", "private-hash", "sourcePath",
+            ):
+                self.assertNotIn(private, encoded)
+
+            recovered = self.make_tracker(directory, clock=clock, recent_limit=3)
+            self.assertEqual(
+                recovered.snapshot()["validationObservations"], observations
+            )
+            clock.advance(31 * 86400)
+            self.assertEqual(recovered.compact_history(), 22)
+            self.assertEqual(recovered.snapshot()["validationObservations"], [])
 
     def test_snapshot_writers_use_unique_temporary_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -509,8 +572,9 @@ class StatusDashboardTests(unittest.TestCase):
     def test_dashboard_exposes_configured_display_timezone(self):
         with tempfile.TemporaryDirectory() as directory:
             tracker = self.make_tracker(directory)
-            with patch.dict("os.environ", {"TZ": "Europe/Tallinn"}):
-                page = render_dashboard(tracker.snapshot())
+            page = render_dashboard(
+                tracker.snapshot(), display_timezone="Europe/Tallinn"
+            )
             self.assertIn('data-time-zone="Europe/Tallinn"', page)
 
     def test_http_routes_cache_headers_and_not_found(self):
@@ -547,6 +611,7 @@ class StatusDashboardTests(unittest.TestCase):
                 ) as response:
                     payload = json.loads(response.read())
                     self.assertIn("currentCycle", payload)
+                    self.assertEqual(payload["validationObservations"], [])
                 with urllib.request.urlopen(
                     f"http://127.0.0.1:{port}/healthz"
                 ) as response:
@@ -673,7 +738,7 @@ class StatusDashboardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             tracker = self.make_tracker(directory)
             with patch(
-                "status_dashboard._DashboardServer",
+                "autotranslate.status.server._DashboardServer",
                 side_effect=OSError("address in use"),
             ):
                 with self.assertRaises(OSError):
@@ -879,10 +944,50 @@ class StatusDashboardTests(unittest.TestCase):
             "MAX_BACKOFF_MS = 60_000",
             "if (requestInFlight || document.hidden) return",
             'aria-label="${escapeHtml(`${operationLabel(row.operation)} progress`)}"',
+            "renderRecoveryAttention",
+            'id="retry-queue"',
+            "snapshot.retryMaxAttempts ?? 0",
+            "retries &middot; Unlimited",
+            "of ${Number(maxAttempts)} used",
+            "eligibleCompletedCycle",
+            "timeZoneName: \"short\"",
+            "recoveryDiagnosticsOpen",
+            "data-recovery-diagnostics",
         ):
             self.assertIn(text, script)
         self.assertIn(".badge.maintenance-work", stylesheet)
         self.assertIn(".job-progress progress", stylesheet)
+        self.assertIn(".recovery-attention", stylesheet)
+        self.assertIn(".diagnostics-panel", stylesheet)
+
+    def test_dashboard_assets_render_accessible_validation_observations(self):
+        script = (
+            REPO_ROOT / "docker" / "static" / "dashboard.js"
+        ).read_text(encoding="utf-8")
+        stylesheet = (
+            REPO_ROOT / "docker" / "static" / "dashboard.css"
+        ).read_text(encoding="utf-8")
+        for text in (
+            "Validation observations",
+            "No copied-source repairs were suppressed.",
+            "Repair skipped",
+            "<details",
+            "data-observation-focus",
+            "data-observation-id",
+            "expandedObservationIds",
+            "data-focus-key=\"theme-toggle\"",
+            "snapshot.validationObservations",
+        ):
+            self.assertIn(text, script)
+        for selector in (
+            ".observation-filters",
+            ".badge-warning",
+            ".observation-details summary:focus-visible",
+            ".observation-evidence",
+        ):
+            self.assertIn(selector, stylesheet)
+        self.assertIn("background: var(--warning-subtle)", stylesheet)
+        self.assertIn("color: var(--warning)", stylesheet)
 
 
 if __name__ == "__main__":

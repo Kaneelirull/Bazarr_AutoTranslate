@@ -680,14 +680,13 @@ class RetriesRepositoryMixin:
             ).fetchone()
         return self._retry_plan_dict(row)
 
-    def resolve_retry_plans(
+    def resolve_retry_plan(
         self,
-        item_type: str,
-        item_id: int,
-        target_language: str,
+        plan_id: int,
+        expected_source_hash: str,
         *,
         outcome: str = "accepted_after_retry",
-    ) -> int:
+    ) -> bool:
         with self._transaction() as db:
             cursor = db.execute(
                 """
@@ -695,18 +694,18 @@ class RetriesRepositoryMixin:
                 SET state = ?, final_outcome = ?, claim_owner=NULL,
                     claimed_at=NULL, submission_attempt_id=NULL,
                     last_deferral_class=NULL, updated_at = ?
-                WHERE item_type = ? AND item_id = ? AND target_language = ?
+                WHERE id = ? AND source_hash = ?
                   AND state IN (
                     'repair_retry_queued', 'regeneration_waiting',
                     'regeneration_queued', 'retry_in_progress'
                   )
                 """,
                 (
-                    outcome, outcome, time.time(), str(item_type), int(item_id),
-                    str(target_language).lower(),
+                    outcome, outcome, time.time(), int(plan_id),
+                    str(expected_source_hash),
                 ),
             )
-            return cursor.rowcount
+            return cursor.rowcount == 1
 
     def retry_plans(self, *, include_terminal: bool = True) -> list[dict]:
         query = "SELECT * FROM retry_plans"
@@ -739,49 +738,6 @@ class RetriesRepositoryMixin:
                 params,
             ).fetchone()
         return self._retry_plan_dict(row)
-
-    def legacy_retry_candidates(self) -> list[dict]:
-        """Return legacy holds with enough immutable provenance for safe migration."""
-        if self._metadata("quarantine_retry_migrated_v4") == "1":
-            return []
-        with self._lock:
-            rows = self._connection.execute(
-                """
-                SELECT q.*, a.item_type, a.item_id, a.source_path,
-                       a.source_language, a.source_hash
-                FROM quarantine_holds q
-                JOIN subtitle_artifacts a
-                  ON a.target_hash = q.target_hash
-                 AND a.target_language = q.target_language
-                WHERE q.resolved_at IS NULL
-                  AND a.item_type IN ('episodes', 'movies')
-                  AND a.item_id IS NOT NULL
-                  AND a.source_path IS NOT NULL
-                  AND a.source_hash IS NOT NULL
-                GROUP BY q.identity, q.target_hash
-                ORDER BY q.first_seen
-                """
-            ).fetchall()
-        return [
-            {
-                "identity": row["identity"],
-                "targetPath": row["target_path"],
-                "targetHash": row["target_hash"],
-                "targetLanguage": row["target_language"],
-                "rules": json.loads(row["rules_json"]),
-                "origin": row["origin"],
-                "itemType": row["item_type"],
-                "itemId": int(row["item_id"]),
-                "sourcePath": row["source_path"],
-                "sourceLanguage": row["source_language"],
-                "sourceHash": row["source_hash"],
-            }
-            for row in rows
-        ]
-
-    def mark_legacy_retry_migration_complete(self) -> None:
-        with self._transaction() as db:
-            self._set_metadata(db, "quarantine_retry_migrated_v4", "1")
 
     def record_retry_admission(
         self,

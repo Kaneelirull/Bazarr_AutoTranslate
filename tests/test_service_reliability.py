@@ -23,11 +23,13 @@ os.environ.setdefault(
     "LOG_DIR", str(Path(tempfile.gettempdir()) / "bazarr-autotranslate-tests")
 )
 
-import Bazarr_AutoTranslate as app  # noqa: E402
-import clean_et_subs as cleanup  # noqa: E402
-from state_store import StateStore  # noqa: E402
-from state_store import StateStoreError  # noqa: E402
 from autotranslate.config import Config  # noqa: E402
+from autotranslate.production import load_runtime  # noqa: E402
+import autotranslate.subtitles.library as cleanup  # noqa: E402
+from autotranslate.persistence.state_store import StateStore  # noqa: E402
+from autotranslate.persistence.state_store import StateStoreError  # noqa: E402
+
+app = load_runtime(Config.from_env(), None)
 
 
 class FakeResponse:
@@ -433,9 +435,8 @@ class ServiceReliabilityTests(unittest.TestCase):
             target.write_text("original", encoding="utf-8")
             candidate.write_text("replacement", encoding="utf-8")
 
-            with patch.object(
-                cleanup,
-                "normalize_managed_file",
+            with patch(
+                "autotranslate.subtitles.foundation.normalize_managed_file",
                 side_effect=PermissionError("chown denied"),
             ):
                 with self.assertRaises(PermissionError):

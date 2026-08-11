@@ -15,8 +15,11 @@ os.environ.setdefault("BAZARR_URL", "http://bazarr")
 os.environ.setdefault("BAZARR_API_KEY", "test")
 os.environ.setdefault("LINGARR_URL", "http://lingarr")
 
-import Bazarr_AutoTranslate as app  # noqa: E402
-from clean_et_subs import parse_srt_cues  # noqa: E402
+from autotranslate.config import Config  # noqa: E402
+from autotranslate.production import load_runtime  # noqa: E402
+from autotranslate.subtitles.library import parse_srt_cues  # noqa: E402
+
+app = load_runtime(Config.from_env(), None)
 
 
 class AdaptiveTranslationTests(unittest.TestCase):

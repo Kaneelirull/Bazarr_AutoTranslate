@@ -9,6 +9,7 @@ from .retries import RetriesRepositoryMixin
 from .circuits import CircuitsRepositoryMixin
 from .repairs import RepairsRepositoryMixin
 from .operations import OperationsRepositoryMixin
+from .manual_reviews import ManualReviewsRepositoryMixin
 
 
 class StateStore(
@@ -19,9 +20,10 @@ class StateStore(
     CircuitsRepositoryMixin,
     RepairsRepositoryMixin,
     OperationsRepositoryMixin,
+    ManualReviewsRepositoryMixin,
     DatabaseState,
 ):
-    """Compatibility facade composed from focused SQLite repositories."""
+    """Package-owned aggregate composed from focused SQLite repositories."""
 
 
 __all__ = ["ACTIVE_RETRY_STATES", "SCHEMA_VERSION", "StateStore", "StateStoreError"]

@@ -889,17 +889,27 @@ class ArtifactsRepositoryMixin:
         }
 
     def resolve_quarantine_events(
-        self, identity: str, *, now: datetime | None = None
+        self,
+        identity: str,
+        *,
+        target_hash: str | None = None,
+        now: datetime | None = None,
     ) -> bool:
         resolved_at = (now or datetime.now(timezone.utc)).isoformat()
         with self._transaction() as db:
+            hash_clause = " AND target_hash = ?" if target_hash is not None else ""
+            params = (
+                (resolved_at, str(identity), str(target_hash))
+                if target_hash is not None else (resolved_at, str(identity))
+            )
             cursor = db.execute(
-                """
+                f"""
                 UPDATE quarantine_holds
                 SET resolved_at = ?
                 WHERE identity = ? AND resolved_at IS NULL
+                {hash_clause}
                 """,
-                (resolved_at, str(identity)),
+                params,
             )
             return cursor.rowcount > 0
 
@@ -976,35 +986,12 @@ class ArtifactsRepositoryMixin:
                 """,
                 (cutoff_timestamp,),
             ).rowcount
-            legacy_rows = db.execute(
-                """
-                SELECT id, artifact_path FROM legacy_quarantine_index
-                WHERE updated_at < ?
-                """,
-                (cutoff_timestamp,),
-            ).fetchall()
-            missing_legacy_ids = [
-                int(row["id"]) for row in legacy_rows
-                if not Path(row["artifact_path"]).exists()
-            ]
-            legacy_entries = 0
-            if missing_legacy_ids:
-                placeholders = ",".join("?" for _ in missing_legacy_ids)
-                legacy_entries = db.execute(
-                    f"DELETE FROM legacy_quarantine_index "
-                    f"WHERE id IN ({placeholders})",
-                    missing_legacy_ids,
-                ).rowcount
             partial_candidates = db.execute(
                 """
                 DELETE FROM partial_candidates AS candidate
                 WHERE candidate.created_at < ?
                   AND NOT EXISTS (
                     SELECT 1 FROM cue_recoveries
-                    WHERE partial_candidate_id=candidate.id
-                  )
-                  AND NOT EXISTS (
-                    SELECT 1 FROM legacy_quarantine_index
                     WHERE partial_candidate_id=candidate.id
                   )
                   AND (
@@ -1046,6 +1033,6 @@ class ArtifactsRepositoryMixin:
         return int(
             recovery_events + donor_events + provider_events
             + admission_events + maintenance_runs + repair_jobs
-            + failure_fingerprints + cue_recoveries + legacy_entries
+            + failure_fingerprints + cue_recoveries
             + partial_candidates + validations + holds + attempts + timings
         )

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from . import runtime_context as _runtime
+from ..composition import runtime as _runtime
 
 def _handle_signal(signum, frame):
     _runtime.shutdown_requested = True
@@ -7,14 +7,6 @@ def _handle_signal(signum, frame):
     _runtime._repair_shutdown_event.set()
     print(f'\n{_runtime.YELLOW}[WARNING] Signal {signum} received — finishing current jobs then stopping.{_runtime.RESET}')
     _runtime.sys.stdout.flush()
-
-def _load_submit_cache() -> None:
-    """Compatibility entry point; initialization performs legacy migration."""
-    _runtime._get_validation_state()
-
-def _save_submit_cache() -> None:
-    """Deprecated compatibility shim; SQLite commits each mutation."""
-    return None
 
 def _check_cooldown(item_id: int, target_lang: str, item_type: str='legacy') -> int | None:
     return _runtime._get_validation_state().check_cooldown(item_type, item_id, target_lang)
@@ -55,7 +47,7 @@ def _request_json(method: str, url: str, *, service: str, operation: str, **kwar
     return _runtime.JsonRequester(transport=_runtime.requests, sleep=lambda seconds: _runtime.time.sleep(seconds), emit=print).request(method, url, service=service, operation=operation, **kwargs)
 
 def _bazarr_client() -> _runtime.BazarrClient:
-    return _runtime.BazarrClient(_runtime.BAZARR_URL, _runtime.BAZARR_API_KEY, request_json=lambda *args, **kwargs: _runtime._request_json(*args, **kwargs), get=lambda *args, **kwargs: _runtime.requests.get(*args, **kwargs), post=lambda *args, **kwargs: _runtime.requests.post(*args, **kwargs), connect_timeout=_runtime.CONNECT_TIMEOUT, sync_start_timeout=_runtime.SYNC_START_TIMEOUT, sync_poll_interval=_runtime.SYNC_POLL_INTERVAL, time_value=lambda: _runtime.time.time(), sleep=lambda seconds: _runtime.time.sleep(seconds), shutdown_requested=lambda: _runtime.shutdown_requested, emit=print)
+    return _runtime.BazarrClient(_runtime.BAZARR_URL, _runtime.BAZARR_API_KEY, request_json=lambda *args, **kwargs: _runtime._request_json(*args, **kwargs), get=lambda *args, **kwargs: _runtime.requests.get(*args, **kwargs), post=lambda *args, **kwargs: _runtime.requests.post(*args, **kwargs), patch=lambda *args, **kwargs: _runtime.requests.patch(*args, **kwargs), connect_timeout=_runtime.CONNECT_TIMEOUT, sync_start_timeout=_runtime.SYNC_START_TIMEOUT, sync_poll_interval=_runtime.SYNC_POLL_INTERVAL, time_value=lambda: _runtime.time.time(), sleep=lambda seconds: _runtime.time.sleep(seconds), shutdown_requested=lambda: _runtime.shutdown_requested, emit=print)
 
 def fetch_wanted(item_type: str) -> list:
     result = _runtime._bazarr_client().fetch_wanted(item_type)
@@ -213,7 +205,7 @@ def lingarr_poll_job(job_id: int, deadline: float, label: str, progress_callback
 
 def _recover_failed_lingarr_job(job_id: int, source_path: str, target_path: str, source_lang: str, target_lang: str, label: str) -> dict:
     """Rebuild a failed file job from completed Lingarr lines and repair gaps."""
-    from .subtitles.foundation import SubtitleCue, parse_srt_cues, read_text_best_effort, render_srt_cues
+    from ..subtitles.foundation import SubtitleCue, parse_srt_cues, read_text_best_effort, render_srt_cues
     detail = _runtime.lingarr_get_job(job_id) or {}
     line_rows = detail.get('lines')
     if not isinstance(line_rows, list) or not line_rows:
@@ -283,37 +275,21 @@ def _recover_failed_lingarr_job(job_id: int, source_path: str, target_path: str,
             print(f'{_runtime.YELLOW}[TIMING] Could not persist repair timing: {exc}{_runtime.RESET}')
     print(f'{_runtime.GREEN}[RECOVER] Reconstructed {label} from Lingarr job {job_id}; repaired {repair_attempts} cue attempt(s){_runtime.RESET}')
     return {'recovered': True, 'path': str(destination), 'attempts': repair_attempts, 'repairedCues': repaired_cues, 'repairElapsedSeconds': round(repair_elapsed, 3), 'eventMessages': [str(event.get('message')) for event in detail.get('events', []) if isinstance(event, dict) and event.get('message')][-5:]}
-_runtime._handle_signal = _handle_signal
-_runtime._load_submit_cache = _load_submit_cache
-_runtime._save_submit_cache = _save_submit_cache
-_runtime._check_cooldown = _check_cooldown
-_runtime._record_submission = _record_submission
-_runtime._mark_submission_submitted = _mark_submission_submitted
-_runtime._mark_submission_failed = _mark_submission_failed
-_runtime._update_submission_actual_path = _update_submission_actual_path
-_runtime._clear_submission = _clear_submission
-_runtime._clear_submission_for_path = _clear_submission_for_path
-_runtime.bazarr_url = bazarr_url
-_runtime.lingarr_url = lingarr_url
-_runtime._request_json = _request_json
-_runtime._bazarr_client = _bazarr_client
-_runtime.fetch_wanted = fetch_wanted
-_runtime.fetch_subtitles = fetch_subtitles
-_runtime.trigger_bazarr_sync = trigger_bazarr_sync
-_runtime._job_matches_scan = _job_matches_scan
-_runtime.wait_for_bazarr_sync = wait_for_bazarr_sync
-_runtime._tracked_bazarr_sync = _tracked_bazarr_sync
-_runtime._lingarr_client = _lingarr_client
-_runtime.lingarr_get_languages = lingarr_get_languages
-_runtime.lingarr_build_media_cache = lingarr_build_media_cache
-_runtime.lingarr_resolve_media_id = lingarr_resolve_media_id
-_runtime.lingarr_get_active_translations = lingarr_get_active_translations
-_runtime.lingarr_submit_file = lingarr_submit_file
-_runtime.lingarr_translate_line = lingarr_translate_line
-_runtime.lingarr_get_job = lingarr_get_job
-_runtime.lingarr_cancel_job = lingarr_cancel_job
-_runtime._classify_lingarr_failure = _classify_lingarr_failure
-_runtime._sanitize_failure_message = _sanitize_failure_message
-_runtime._safe_failure_details = _safe_failure_details
-_runtime.lingarr_poll_job = lingarr_poll_job
-_runtime._recover_failed_lingarr_job = _recover_failed_lingarr_job
+EXPORTS = {
+    name: globals()[name] for name in (
+        '_handle_signal', '_check_cooldown', '_record_submission',
+        '_mark_submission_submitted', '_mark_submission_failed',
+        '_update_submission_actual_path', '_clear_submission',
+        '_clear_submission_for_path', 'bazarr_url', 'lingarr_url',
+        '_request_json', '_bazarr_client', 'fetch_wanted', 'fetch_subtitles',
+        'trigger_bazarr_sync', '_job_matches_scan', 'wait_for_bazarr_sync',
+        '_tracked_bazarr_sync', '_lingarr_client', 'lingarr_get_languages',
+        'lingarr_build_media_cache', 'lingarr_resolve_media_id',
+        'lingarr_get_active_translations', 'lingarr_submit_file',
+        'lingarr_translate_line', 'lingarr_get_job', 'lingarr_cancel_job',
+        '_classify_lingarr_failure', '_sanitize_failure_message',
+        '_safe_failure_details', 'lingarr_poll_job',
+        '_recover_failed_lingarr_job',
+    )
+}
+

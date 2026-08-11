@@ -13,8 +13,8 @@ from unittest.mock import patch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "docker"))
 
-import clean_et_subs as cleanup  # noqa: E402
-from clean_et_subs import (  # noqa: E402
+import autotranslate.subtitles.library as cleanup  # noqa: E402
+from autotranslate.subtitles.library import (  # noqa: E402
     SubtitleCue,
     ValidationIssue,
     ValidationReport,
@@ -23,6 +23,7 @@ from clean_et_subs import (  # noqa: E402
     discover_target_subtitles,
     evaluate_subtitle_completeness,
     file_sha256,
+    find_garbage_match,
     find_preferred_source,
     parse_srt_cues,
     purge_old_files,
@@ -35,8 +36,15 @@ from clean_et_subs import (  # noqa: E402
     write_validation_report,
     classify_validation_failure,
 )
-from state_store import StateStore  # noqa: E402
+from autotranslate.persistence.state_store import StateStore  # noqa: E402
 from autotranslate.scheduling.locks import ArtifactAccessCoordinator  # noqa: E402
+from autotranslate.subtitles.copied_source import (  # noqa: E402
+    AMBIGUOUS,
+    COPIED_PROSE,
+    LIKELY_INVARIANT,
+    assess_copied_source,
+)
+from autotranslate.subtitles.foundation import _normalise_for_similarity  # noqa: E402
 
 
 def make_srt(*texts: str) -> str:
@@ -632,6 +640,32 @@ class SubtitleValidationTests(unittest.TestCase):
 
             self.assertIn("excessive_lines", {issue.rule for issue in report.issues})
 
+    def test_target_only_english_dialogue_with_apologies_is_valid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "episode.en.srt"
+            target.write_text(
+                make_srt("I'm sorry.", "Oh, I'm sorry.", "I'm sorry to call you in."),
+                encoding="utf-8",
+            )
+
+            report = validate_subtitle_without_source(
+                target,
+                self.detector,
+                target_language_for_code("en"),
+                target_lang="en",
+            )
+
+            self.assertTrue(report.valid, report.summary())
+
+    def test_explicit_ai_refusals_remain_garbage(self):
+        for refusal in (
+            "I cannot translate this subtitle.",
+            "As an AI, I cannot help with that.",
+            "I am unable to translate this content.",
+        ):
+            with self.subTest(refusal=refusal):
+                self.assertEqual(find_garbage_match(refusal), "AI refusal")
+
     def test_discovers_target_variants_and_prefers_eng_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -915,6 +949,10 @@ class SubtitleValidationTests(unittest.TestCase):
             ("Land Rover Discovery and Subaru Legacy", "Land Rover Discovery ja Subaru Legacy", False),
             ("This Is Ordinary Untranslated Prose", "This Is Ordinary Untranslated Prose", True),
             ("This Is Ordinary, Untranslated Prose", "This Is Ordinary, Untranslated Prose", True),
+            ("I Found NASA Mission Control Today", "I Found NASA Mission Control Today", True),
+            ("You Can Read https://example.com Now", "You Can Read https://example.com Now", True),
+            ("We Saw Ferrari 575 and Left", "We Saw Ferrari 575 and Left", True),
+            ("They Met Aston Martin & Red Bull Yesterday", "They Met Aston Martin & Red Bull Yesterday", True),
         )
         for source_text, target_text, copied in cases:
             with self.subTest(source=source_text):
@@ -927,6 +965,91 @@ class SubtitleValidationTests(unittest.TestCase):
                 self.assertEqual(
                     "copied_source" in {issue.rule for issue in issues}, copied
                 )
+
+    def test_copied_source_assessment_is_conservative_and_auditable(self):
+        def assess(text, *, target=None):
+            compared = target or text
+            normalized_source = _normalise_for_similarity(text)
+            normalized_target = _normalise_for_similarity(compared)
+            similarity = cleanup.SequenceMatcher(
+                None, normalized_source, normalized_target
+            ).ratio()
+            return assess_copied_source(
+                text,
+                compared,
+                source_normalized=normalized_source,
+                target_normalized=normalized_target,
+                similarity=similarity,
+                repair_eligible=(
+                    len(normalized_source) >= 20
+                    and len(normalized_target) >= 20
+                    and similarity >= 0.92
+                ),
+            )
+
+        for text in (
+            "BMW 760Li",
+            "NASA Mission Control",
+            "https://www.example.com/manual",
+            "Land Rover Discovery and Subaru Legacy",
+            "Ferrari 575, Aston Martin Vanquish!",
+        ):
+            with self.subTest(likely_invariant=text):
+                self.assertEqual(assess(text).outcome, LIKELY_INVARIANT)
+
+        for text in (
+            "Aston Martin Vanquish",
+            "New York City",
+            "Dynamic Stability Control",
+            "The Grand Tour",
+            "Ludwig van Beethoven",
+        ):
+            with self.subTest(ambiguous=text):
+                self.assertEqual(assess(text).outcome, AMBIGUOUS)
+
+        for text in (
+            "This Is Ordinary Untranslated Prose",
+            "I Cannot Believe This",
+        ):
+            with self.subTest(copied_prose=text):
+                result = assess(text)
+                self.assertEqual(result.outcome, COPIED_PROSE)
+                self.assertEqual(result.evidence["modelMarkerCount"], 0)
+
+        near_copy = assess(
+            "This is ordinary untranslated prose for the audience",
+            target="This is ordinary untranslated prose for an audience",
+        )
+        self.assertEqual(near_copy.outcome, COPIED_PROSE)
+
+    def test_source_aware_report_collects_non_blocking_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "top-gear.eng.srt"
+            target = root / "top-gear.et.srt"
+            source.write_text(
+                "442\n00:23:44,000 --> 00:23:45,000\nBefore the car.\n\n"
+                "443\n00:23:46,000 --> 00:23:48,000\nAston Martin Vanquish\n\n"
+                "444\n00:23:49,000 --> 00:23:51,000\nAfter the car.\n",
+                encoding="utf-8",
+            )
+            target.write_text(
+                "442\n00:23:44,000 --> 00:23:45,000\nEnne autot.\n\n"
+                "443\n00:23:46,000 --> 00:23:48,000\nAston Martin Vanquish\n\n"
+                "444\n00:23:49,000 --> 00:23:51,000\nPÃ¤rast autot.\n",
+                encoding="utf-8",
+            )
+
+            report = self.validate_pair(source, target)
+
+            self.assertTrue(report.valid, report.summary())
+            self.assertEqual(report.repairable_cue_indexes, [])
+            self.assertEqual(len(report.observations), 1)
+            observation = report.observations[0]
+            self.assertEqual((observation.cue_number, observation.classification), (443, AMBIGUOUS))
+            serialized = report.to_dict()["observations"][0]
+            self.assertNotIn("Aston", json.dumps(serialized))
+            self.assertEqual(serialized["evidence"]["tokenShape"], "title_case")
 
     def test_top_gear_prompt_and_expansion_examples_are_rejected(self):
         bad_targets = (

@@ -12,9 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from media_identity import retry_media_identity
-
-from media_identity import retry_media_identity
+from ..media_identity import retry_media_identity
 
 WAIT_STATES = {"waiting_retry", "series_protected", "missing_source"}
 TERMINAL_STATES = {
@@ -83,6 +81,16 @@ MAINTENANCE_KEYS = (
     "variant_outputs",
     "failures",
 )
+VALIDATION_OBSERVATION_CLASSES = {"likely_invariant", "ambiguous"}
+VALIDATION_OBSERVATION_REASONS = {
+    "Copy retained because its structure indicates an invariant name or model.",
+    "Exact Title Case copy retained by the balanced policy.",
+}
+VALIDATION_EVIDENCE_KEYS = {
+    "similarity", "exactNormalizedCopy", "tokenCount", "tokenShape",
+    "modelMarkerCount", "cueLanguage", "cueLanguageConfidence",
+    "wholeTargetConfidence", "contextConfidence",
+}
 CYCLE_METRIC_KEYS = (
     "cycle_suppressions",
     "cooldown_deferrals",
@@ -684,6 +692,59 @@ class StatusTracker:
             self._append_history_locked(event)
             self._write_snapshot_locked()
 
+    def record_validation_observation(
+        self,
+        *,
+        title: str | None,
+        episode_code: str | None,
+        episode_title: str | None = None,
+        item_type: str | None,
+        item_id: int | None,
+        target_language: str | None,
+        cue_number: int | None,
+        classification: str,
+        reason: str,
+        evidence: dict | None,
+    ) -> None:
+        """Persist one privacy-whitelisted, non-blocking validation decision."""
+        if classification not in VALIDATION_OBSERVATION_CLASSES:
+            raise ValueError(f"unsupported validation observation: {classification}")
+        safe_evidence: dict[str, object] = {}
+        for key in VALIDATION_EVIDENCE_KEYS:
+            value = (evidence or {}).get(key)
+            if key in ("exactNormalizedCopy",):
+                safe_evidence[key] = bool(value)
+            elif key in ("tokenCount", "modelMarkerCount"):
+                safe_evidence[key] = max(0, int(value or 0))
+            elif key in (
+                "similarity", "cueLanguageConfidence", "wholeTargetConfidence",
+                "contextConfidence",
+            ):
+                safe_evidence[key] = (
+                    round(float(value), 3)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool)
+                    else None
+                )
+            else:
+                safe_evidence[key] = _safe_maintenance_text(value, limit=32)
+        event = {
+            "kind": "validation_observation",
+            "timestamp": _utc_iso(self.clock()),
+            "title": _safe_maintenance_text(title, "Unknown media"),
+            "episodeCode": _safe_maintenance_text(episode_code, limit=32),
+            "episodeTitle": _safe_maintenance_text(episode_title),
+            "itemType": item_type if item_type in ("episodes", "movies") else None,
+            "itemId": item_id if isinstance(item_id, int) and not isinstance(item_id, bool) else None,
+            "targetLanguage": _safe_maintenance_text(target_language, limit=16),
+            "cueNumber": cue_number if isinstance(cue_number, int) and not isinstance(cue_number, bool) else None,
+            "classification": classification,
+            "reason": reason if reason in VALIDATION_OBSERVATION_REASONS else None,
+            "evidence": safe_evidence,
+        }
+        with self._lock:
+            self._append_history_locked(event)
+            self._write_snapshot_locked()
+
     def compact_history(self) -> int:
         with self._lock:
             before = len(self._history)
@@ -924,6 +985,10 @@ class StatusTracker:
         recent = [
             event for event in reversed(self._history) if event.get("kind") == "job"
         ][:self.recent_limit]
+        validation_observations = [
+            event for event in reversed(self._history)
+            if event.get("kind") == "validation_observation"
+        ][:20]
         maintenance_active = [
             self._maintenance_public(job)
             for job in self._maintenance.get("activeJobs", [])
@@ -943,11 +1008,12 @@ class StatusTracker:
             "activeJobs": active,
             "upNext": up_next,
             "recentOutcomes": recent,
+            "validationObservations": validation_observations,
             "timing": self._service.get("timing", {}),
             "circuits": self._service.get("circuits", []),
             "retryPlans": self._service.get("retryPlans", []),
             "completedCycle": self._service.get("completedCycle", 0),
-            "retryMaxAttempts": self._service.get("retryMaxAttempts", 3),
+            "retryMaxAttempts": self._service.get("retryMaxAttempts", 0),
             "history": {
                 label: self._window_counts_locked("job", seconds)
                 for label, seconds in HISTORY_WINDOWS.items()

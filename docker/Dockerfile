@@ -16,9 +16,7 @@ COPY entrypoint.sh .
 
 RUN chmod +x entrypoint.sh clean_et_subs.py \
     && mkdir -p /var/log/bazarr-autotranslate /config \
-    && BAZARR_URL=http://bazarr:6767 BAZARR_API_KEY=build-smoke \
-       LINGARR_URL=http://lingarr:8080 \
-       python -c "import autotranslate, media_identity, state_store, status_dashboard, Bazarr_AutoTranslate"
+    && python -c "import autotranslate; import autotranslate.app; import autotranslate.persistence.state_store; import autotranslate.status.server"
 
 EXPOSE 8765
 

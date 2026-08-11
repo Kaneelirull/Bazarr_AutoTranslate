@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 16
 
 ACTIVE_RETRY_STATES = {
     "repair_retry_queued",

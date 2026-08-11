@@ -312,101 +312,6 @@ class RepairsRepositoryMixin:
                 ),
             )
 
-    def legacy_quarantine_entry(
-        self,
-        artifact_path: str | Path,
-        artifact_hash: str | None = None,
-    ) -> dict | None:
-        if artifact_hash is None:
-            # Temporary compatibility for callers written against the initial
-            # additive schema. New indexing always uses path plus content hash.
-            row = self._fetchone(
-                "SELECT * FROM legacy_quarantine_index WHERE artifact_hash=? "
-                "ORDER BY updated_at DESC LIMIT 1",
-                (str(artifact_path),),
-            )
-        else:
-            row = self._fetchone(
-                "SELECT * FROM legacy_quarantine_index "
-                "WHERE artifact_path=? AND artifact_hash=?",
-                (_path_key(artifact_path), str(artifact_hash)),
-            )
-        if row is None:
-            return None
-        return {
-            "id": int(row["id"]),
-            "state": row["state"],
-            "reasonCode": row["reason_code"],
-            "quarantineAttemptId": row["quarantine_attempt_id"],
-        }
-
-    def record_legacy_quarantine_entry(
-        self,
-        *,
-        artifact_path: str | Path,
-        artifact_hash: str,
-        state: str,
-        reason_code: str | None = None,
-        quarantine_attempt_id: int | None = None,
-        partial_candidate_id: int | None = None,
-    ) -> None:
-        timestamp = time.time()
-        with self._transaction() as db:
-            db.execute(
-                """
-                INSERT INTO legacy_quarantine_index(
-                    artifact_path, artifact_hash, state, reason_code,
-                    quarantine_attempt_id, partial_candidate_id,
-                    scanned_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(artifact_path, artifact_hash) DO UPDATE SET
-                    state=excluded.state, reason_code=excluded.reason_code,
-                    quarantine_attempt_id=COALESCE(
-                        excluded.quarantine_attempt_id, quarantine_attempt_id),
-                    partial_candidate_id=COALESCE(
-                        excluded.partial_candidate_id, partial_candidate_id),
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    _path_key(artifact_path), str(artifact_hash), str(state),
-                    reason_code, quarantine_attempt_id, partial_candidate_id,
-                    timestamp, timestamp,
-                ),
-            )
-
-    def resolve_legacy_media(
-        self,
-        *,
-        source_path: str | Path,
-        target_path: str | Path,
-        target_language: str,
-        source_hash: str,
-    ) -> dict | None:
-        normalized_source = _path_key(source_path)
-        normalized_target = _path_key(target_path)
-        with self._lock:
-            row = self._connection.execute(
-                """
-                SELECT item_type, item_id, source_language
-                FROM translation_attempts
-                WHERE target_language=? AND source_hash=?
-                  AND source_path=?
-                  AND (target_path=? OR expected_target_path=? OR actual_target_path=?)
-                ORDER BY updated_at DESC LIMIT 1
-                """,
-                (
-                    str(target_language), str(source_hash), normalized_source,
-                    normalized_target, normalized_target, normalized_target,
-                ),
-            ).fetchone()
-        if row is None or row["item_type"] not in ("episodes", "movies"):
-            return None
-        return {
-            "itemType": row["item_type"],
-            "itemId": int(row["item_id"]),
-            "sourceLanguage": row["source_language"],
-        }
-
     def recovery_summary(
         self, item_type: str, item_id: int, target_language: str
     ) -> dict:
@@ -436,6 +341,53 @@ class RepairsRepositoryMixin:
                 partial["validation_level"] if partial is not None else None
             ),
         }
+
+    def recovery_summaries(
+        self, identities: list[tuple[str, int, str]]
+    ) -> dict[tuple[str, int, str], dict]:
+        keys = [(str(kind), int(item_id), str(language)) for kind, item_id, language in identities]
+        if not keys:
+            return {}
+        where = " OR ".join(
+            "(item_type=? AND item_id=? AND target_language=?)" for _ in keys
+        )
+        params = tuple(value for key in keys for value in key)
+        with self._lock:
+            recovered_rows = self._connection.execute(
+                f"""SELECT item_type, item_id, target_language,
+                           COUNT(DISTINCT source_cue_number) AS count
+                    FROM cue_recoveries WHERE {where}
+                    GROUP BY item_type, item_id, target_language""",
+                params,
+            ).fetchall()
+            partial_rows = self._connection.execute(
+                f"""SELECT item_type, item_id, target_language,
+                           unresolved_cues_json, validation_level, created_at
+                    FROM partial_candidates WHERE {where}
+                    ORDER BY created_at DESC""",
+                params,
+            ).fetchall()
+        result = {
+            key: {
+                "validRecoveredCueCount": 0,
+                "unresolvedCueCount": 0,
+                "latestRecoveryStage": None,
+            }
+            for key in keys
+        }
+        for row in recovered_rows:
+            key = (row["item_type"], int(row["item_id"]), row["target_language"])
+            result[key]["validRecoveredCueCount"] = int(row["count"] or 0)
+        seen: set[tuple[str, int, str]] = set()
+        for row in partial_rows:
+            key = (row["item_type"], int(row["item_id"]), row["target_language"])
+            if key in seen:
+                continue
+            seen.add(key)
+            unresolved = json.loads(row["unresolved_cues_json"] or "[]")
+            result[key]["unresolvedCueCount"] = len(unresolved)
+            result[key]["latestRecoveryStage"] = row["validation_level"]
+        return result
 
     def diagnostic_aggregates(self) -> dict:
         with self._lock:

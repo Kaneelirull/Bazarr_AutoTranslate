@@ -13,7 +13,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "docker"))
 
-from state_store import StateStore, StateStoreError  # noqa: E402
+from autotranslate.persistence.state_store import StateStore, StateStoreError  # noqa: E402
 
 
 class StateStoreTests(unittest.TestCase):
@@ -247,7 +247,7 @@ class StateStoreTests(unittest.TestCase):
             )
             self.assertEqual(row["failure_category"], "context_limit")
             self.assertEqual(json.loads(row["failure_details_json"])["status"], "Failed")
-            self.assertEqual(store._fetchone("PRAGMA user_version")[0], 8)
+            self.assertEqual(store._fetchone("PRAGMA user_version")[0], 16)
             store.close()
 
     def test_schema_v4_migrates_retry_size_and_failure_columns(self):
@@ -278,7 +278,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertIn("source_cue_count", retry_columns)
             self.assertIn("failure_category", attempt_columns)
             self.assertIn("failure_details_json", attempt_columns)
-            self.assertEqual(migrated._fetchone("PRAGMA user_version")[0], 8)
+            self.assertEqual(migrated._fetchone("PRAGMA user_version")[0], 16)
             migrated.close()
 
     def test_quarantine_attempts_are_immutable_and_privacy_safe(self):
@@ -344,6 +344,32 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(plans[old["id"]]["state"], "superseded")
             self.assertEqual(plans[new["id"]]["state"], "regeneration_waiting")
             store.close()
+
+    def test_older_completion_cannot_resolve_newer_source_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            try:
+                old, _ = store.schedule_retry_plan(
+                    item_type="movies", item_id=7, target_language="sv",
+                    source_hash="old", failure_class="whole_file",
+                    rules=["cue_count_mismatch"], state="regeneration_waiting",
+                    eligible_completed_cycle=0,
+                )
+                new, _ = store.schedule_retry_plan(
+                    item_type="movies", item_id=7, target_language="sv",
+                    source_hash="new", failure_class="whole_file",
+                    rules=["cue_count_mismatch"], state="regeneration_waiting",
+                    eligible_completed_cycle=0,
+                )
+                self.assertFalse(store.resolve_retry_plan(old["id"], "old"))
+                self.assertFalse(store.resolve_retry_plan(new["id"], "old"))
+                self.assertEqual(
+                    store.manual_review_plan(new["id"])["state"],
+                    "regeneration_waiting",
+                )
+                self.assertTrue(store.resolve_retry_plan(new["id"], "new"))
+            finally:
+                store.close()
 
     def test_completed_cycle_counter_is_durable(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -486,99 +512,6 @@ class StateStoreTests(unittest.TestCase):
                     self.assertIsNotNone(
                         store.check_cooldown("episodes", item_id, "et")
                     )
-            finally:
-                store.close()
-
-    def test_legacy_json_migration_is_idempotent_and_preserves_backups(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            submit = root / "submitted_cache.json"
-            validation = root / "validation_state.json"
-            target = root / "movie.et.srt"
-            now = time.time()
-            submit.write_text(
-                json.dumps({
-                    "7:et": {
-                        "submittedAt": now,
-                        "itemType": "movies",
-                        "targetPath": str(target),
-                        "sourceHash": "source",
-                    },
-                    "bad": {"submittedAt": "bad"},
-                }),
-                encoding="utf-8",
-            )
-            validation.write_text(
-                json.dumps({
-                    "files": {
-                        str(target): {
-                            "validatorVersion": "old",
-                            "sourceHash": "source",
-                            "targetHash": "target",
-                            "result": "valid",
-                            "origin": "lingarr",
-                            "validatedAt": datetime.now(timezone.utc).isoformat(),
-                            "details": {"sourcePath": str(root / "movie.en.srt")},
-                        }
-                    },
-                    "quarantineTombstones": {},
-                }),
-                encoding="utf-8",
-            )
-            store = self.make_store(root)
-            try:
-                first = store.migrate_legacy(
-                    submit, validation, cooldown_seconds=3600
-                )
-                second = store.migrate_legacy(
-                    submit, validation, cooldown_seconds=3600
-                )
-                self.assertEqual(first["submissions"], 1)
-                self.assertEqual(first["artifacts"], 1)
-                self.assertEqual(first["skipped"], 1)
-                self.assertEqual(second["submissions"], 0)
-                self.assertTrue(
-                    (root / "submitted_cache.json.migrated.bak").exists()
-                )
-                self.assertTrue(
-                    (root / "validation_state.json.migrated.bak").exists()
-                )
-                record = store.matching_record(target, "target")
-                self.assertEqual(record["origin"], "lingarr")
-                self.assertEqual(record["sourceHash"], "source")
-            finally:
-                store.close()
-
-    def test_migration_never_trusts_incomplete_lingarr_provenance(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            validation = root / "validation_state.json"
-            target = root / "movie.et.srt"
-            validation.write_text(
-                json.dumps({
-                    "files": {
-                        str(target): {
-                            "targetHash": "target",
-                            "sourceHash": None,
-                            "result": "valid",
-                            "origin": "lingarr",
-                            "details": {},
-                        }
-                    }
-                }),
-                encoding="utf-8",
-            )
-            store = self.make_store(root)
-            try:
-                store.migrate_legacy(
-                    root / "submitted_cache.json",
-                    validation,
-                    cooldown_seconds=3600,
-                )
-                record = store.matching_record(target, "target")
-                self.assertEqual(record["origin"], "external")
-                self.assertIsNone(record["sourceHash"])
-                self.assertEqual(record["validationMode"], "target-only")
             finally:
                 store.close()
 
