@@ -14,6 +14,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "docker"))
 
 import autotranslate.subtitles.library as cleanup  # noqa: E402
+import autotranslate.subtitles.foundation as subtitle_foundation  # noqa: E402
+import autotranslate.subtitles.repair as subtitle_repair  # noqa: E402
 from autotranslate.subtitles.library import (  # noqa: E402
     SubtitleCue,
     ValidationIssue,
@@ -96,13 +98,16 @@ class SubtitleValidationTests(unittest.TestCase):
             Path(self._state_directory.name) / "state.sqlite3",
             validator_version=cleanup.VALIDATOR_VERSION,
         )
-        self._permissions_patcher = patch.object(
-            cleanup, "normalize_managed_file", lambda _path: None
-        )
-        self._permissions_patcher.start()
+        self._permissions_patchers = [
+            patch.object(module, "normalize_managed_file", lambda _path: None)
+            for module in (cleanup, subtitle_foundation, subtitle_repair)
+        ]
+        for patcher in self._permissions_patchers:
+            patcher.start()
 
     def tearDown(self):
-        self._permissions_patcher.stop()
+        for patcher in reversed(self._permissions_patchers):
+            patcher.stop()
         self.state.close()
         self._state_directory.cleanup()
 

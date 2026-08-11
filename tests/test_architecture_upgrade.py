@@ -291,6 +291,16 @@ class ArchitectureUpgradeTests(unittest.TestCase):
             source = path.read_text(encoding="utf-8")
             self.assertNotRegex(source, r"(?m)^_runtime\.[A-Za-z_]\w*\s*=", str(path))
 
+    def test_subtitle_tests_patch_package_owned_ownership_boundaries(self):
+        for name in ("test_subtitle_validation.py", "test_existing_cleanup_pipeline.py"):
+            source = (REPO_ROOT / "tests" / name).read_text(encoding="utf-8")
+            self.assertNotRegex(
+                source,
+                r'patch\.object\(\s*cleanup,\s*"normalize_managed_file"',
+            )
+            self.assertIn("subtitle_foundation", source)
+            self.assertIn("subtitle_repair", source)
+
     def test_typed_config_preserves_required_inputs_and_shutdown_default(self):
         config = Config.from_env({
             "BAZARR_URL": "bazarr:6767/",
