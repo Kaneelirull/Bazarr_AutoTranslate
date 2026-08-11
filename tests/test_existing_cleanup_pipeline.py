@@ -57,6 +57,14 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
     def setUp(self):
         app._cycle_suppressions.begin_cycle(self.id())
 
+    def test_repair_drain_is_interruptible_after_shutdown(self):
+        pending = Future()
+        started = time.monotonic()
+        with patch.object(app, "shutdown_requested", True):
+            completed = list(app._completed_repair_futures([pending]))
+        self.assertEqual(completed, [])
+        self.assertLess(time.monotonic() - started, 1.0)
+
     def test_cycle_suppression_registry_is_thread_safe_and_resets(self):
         registry = app.CycleSuppressionRegistry()
         registry.begin_cycle("cycle-1")

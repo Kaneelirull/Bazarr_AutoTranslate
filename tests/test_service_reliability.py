@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from contextlib import redirect_stdout
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ import Bazarr_AutoTranslate as app  # noqa: E402
 import clean_et_subs as cleanup  # noqa: E402
 from state_store import StateStore  # noqa: E402
 from state_store import StateStoreError  # noqa: E402
+from autotranslate.config import Config  # noqa: E402
 
 
 class FakeResponse:
@@ -82,6 +84,12 @@ class ServiceReliabilityTests(unittest.TestCase):
         self.assertEqual(payload, {"data": []})
         self.assertEqual(request.call_count, 3)
         self.assertEqual(sleep.call_args_list, [call(1), call(2)])
+
+    def test_runtime_rejects_typed_config_it_cannot_honor(self):
+        config = Config.from_env()
+        changed = replace(config, check_interval=config.check_interval + 10)
+        with self.assertRaisesRegex(RuntimeError, "check_interval"):
+            app.main(changed)
 
     def test_request_json_does_not_retry_permanent_client_failure(self):
         with (

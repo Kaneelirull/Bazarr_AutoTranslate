@@ -1,158 +1,74 @@
 from __future__ import annotations
 
 import threading
-import time
-import uuid
-from concurrent.futures import Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
-from typing import Any, Callable
+from concurrent.futures import Future
+from typing import Any, Callable, Iterator
 
-from .capacity import CapacityCoordinator
-
-
-@dataclass
-class _ActiveRepair:
-    job_id: int
-    scope_id: str
-    future: Future
-
-
-@dataclass(frozen=True)
-class RepairDrainResult:
-    completed: int
-    failed: int
-    persisted: int
-    results: tuple[Any, ...] = ()
+from .executor import completed_futures
 
 
 class RepairCoordinator:
-    """Persist-before-submit repair scheduling with bounded shutdown."""
+    """Own active repair futures, dedupe keys, and interruptible drainage."""
 
     def __init__(
         self,
-        state: Any,
-        capacity: CapacityCoordinator,
         *,
-        workers: int,
-        shutdown_grace_seconds: int = 30,
-    ):
-        self.state = state
-        self.capacity = capacity
-        self.shutdown_grace_seconds = max(1, int(shutdown_grace_seconds))
-        self._executor = ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="repair-worker")
-        self._lock = threading.RLock()
-        self._active: dict[int, _ActiveRepair] = {}
-        self._accepting = True
+        state_provider: Callable[[], Any] | None = None,
+    ) -> None:
+        self.lock = threading.RLock()
+        self.pending: dict[Future, dict] = {}
+        self.keys: set[tuple] = set()
+        self._state_provider = state_provider
 
-    def submit(
-        self,
-        scope_id: str,
-        dedupe_key: str,
-        metadata: dict,
-        work: Callable[[], Any],
-    ) -> int | None:
-        with self._lock:
-            if not self._accepting:
-                return None
-            job_id = self.state.enqueue_repair_job(
-                dedupe_key=dedupe_key,
-                target_language=metadata.get("target_language") or "",
-                item_type=metadata.get("item_type"),
-                item_id=metadata.get("item_id"),
-                source_path=metadata.get("source_path"),
-                target_path=metadata.get("target_path"),
-                source_hash=metadata.get("source_hash"),
-                target_hash=metadata.get("target_hash"),
-                cue_indexes=metadata.get("cue_indexes") or (),
-                payload={key: value for key, value in metadata.items() if "path" not in key.lower()},
-            )
-            if job_id in self._active:
-                return None
-            future = self._executor.submit(self._run, job_id, work)
-            self._active[job_id] = _ActiveRepair(job_id, str(scope_id), future)
-            return job_id
+    def reserve(self, key: tuple) -> bool:
+        """Atomically reserve a dedupe key before persistence/submission."""
+        with self.lock:
+            if key in self.keys:
+                return False
+            self.keys.add(key)
+            return True
 
-    def _run(self, job_id: int, work: Callable[[], Any]) -> Any:
-        token = self.capacity.acquire("repair")
-        if token is None:
-            self.state.transition_repair_job(
-                job_id,
-                "persisted_for_restart",
-                shutdown_classification="cancelled_before_start",
-            )
+    def release_reservation(self, key: tuple) -> None:
+        with self.lock:
+            self.keys.discard(key)
+
+    def persist(self, **values: Any) -> int | None:
+        """Persist a repair before worker submission when a store is configured."""
+        if self._state_provider is None:
             return None
-        owner = f"repair:{job_id}:{uuid.uuid4().hex}"
-        self.state.transition_repair_job(
-            job_id,
-            "active",
-            lease_owner=owner,
-            lease_expires_at=time.time() + self.shutdown_grace_seconds,
-        )
-        try:
-            result = work()
-            self.state.transition_repair_job(
-                job_id, "completed", expected_states=("active",)
-            )
-            return result
-        except Exception as exc:
-            self.state.transition_repair_job(
-                job_id, "failed", error_code=type(exc).__name__,
-                expected_states=("active",),
-            )
-            raise
-        finally:
-            self.capacity.release(token)
+        state = self._state_provider()
+        if not hasattr(state, "enqueue_repair_job"):
+            return None
+        return state.enqueue_repair_job(**values)
 
-    def drain(self, scope_id: str) -> RepairDrainResult:
-        scope = str(scope_id)
-        with self._lock:
-            entries = [
-                entry for entry in self._active.values()
-                if entry.scope_id == scope
-            ]
-        if not entries:
-            return RepairDrainResult(0, 0, 0)
-        wait([entry.future for entry in entries])
-        completed = failed = persisted = 0
-        results: list[Any] = []
-        for entry in entries:
-            try:
-                result = entry.future.result()
-                results.append(result)
-                row = next((
-                    job for job in self.state.repair_jobs_for_restart()
-                    if job["id"] == entry.job_id
-                ), None)
-                if row is not None:
-                    persisted += 1
-                else:
-                    completed += 1
-            except Exception:
-                failed += 1
-            finally:
-                with self._lock:
-                    self._active.pop(entry.job_id, None)
-        return RepairDrainResult(
-            completed=completed,
-            failed=failed,
-            persisted=persisted,
-            results=tuple(results),
+    def register(self, future: Future, metadata: dict) -> None:
+        with self.lock:
+            self.pending[future] = metadata
+
+    def snapshot(self) -> list[tuple[Future, dict]]:
+        with self.lock:
+            return list(self.pending.items())
+
+    def take(self, future: Future) -> dict:
+        with self.lock:
+            metadata = self.pending.pop(future, {})
+            self.keys.discard(metadata.get("key"))
+            return metadata
+
+    def completed(
+        self,
+        futures: list[Future],
+        *,
+        stop_requested: Callable[[], bool],
+        poll_seconds: float = 0.25,
+    ) -> Iterator[Future]:
+        yield from completed_futures(
+            futures,
+            stop_requested=stop_requested,
+            poll_seconds=poll_seconds,
         )
 
-    def shutdown(self) -> int:
-        with self._lock:
-            self._accepting = False
-            entries = list(self._active.values())
-            futures = [entry.future for entry in entries]
-        self.capacity.stop_accepting()
-        _done, pending = wait(futures, timeout=self.shutdown_grace_seconds)
-        for entry in entries:
-            if entry.future in pending:
-                self.state.transition_repair_job(
-                    entry.job_id,
-                    "persisted_for_restart",
-                    shutdown_classification="interrupted",
-                    expected_states=("queued", "active"),
-                )
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        return len(pending)
+    @property
+    def active_count(self) -> int:
+        with self.lock:
+            return len(self.pending)

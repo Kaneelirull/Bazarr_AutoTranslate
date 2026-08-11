@@ -102,6 +102,20 @@ class MaintenanceResult:
     metrics: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class RepairJobResult:
+    action: str
+    report: object
+    title: str
+    target_lang: str
+    item_type: str | None
+    item_id: int | None
+    attempts: int = 0
+    second_attempts: int = 0
+    target_path: str = ""
+    donor_source_attempt: int | None = None
+
+
 @dataclass(frozen=True)
 class RetryOutcome:
     plan_id: int

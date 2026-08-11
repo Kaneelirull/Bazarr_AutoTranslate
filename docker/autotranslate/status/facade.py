@@ -1,13 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 
 PRIVATE_KEYS = {
-    "subtitleLine", "sourcePath", "targetPath", "artifactPath", "reportPath",
-    "apiKey", "requestBody", "responseBody", "targetText",
+    "subtitleline", "sourcepath", "targetpath", "artifactpath", "reportpath",
+    "apikey", "requestbody", "responsebody", "targettext", "sourcetext",
+    "prompt", "headers", "authorization",
 }
+
+_WINDOWS_PATH = re.compile(r"^[a-zA-Z]:[\\/]")
+
+
+def _private_key(value: object) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", str(value).casefold())
+    return (
+        normalized in PRIVATE_KEYS
+        or normalized.endswith("path")
+        or normalized.endswith("apikey")
+    )
 
 
 def sanitize_public(value: Any) -> Any:
@@ -15,13 +28,19 @@ def sanitize_public(value: Any) -> Any:
         return {
             str(key): sanitize_public(item)
             for key, item in value.items()
-            if str(key) not in PRIVATE_KEYS
+            if not _private_key(key)
         }
     if isinstance(value, list):
         return [sanitize_public(item) for item in value]
     if isinstance(value, tuple):
         return [sanitize_public(item) for item in value]
-    return value
+    if isinstance(value, str):
+        if value.startswith(("/", "\\\\")) or _WINDOWS_PATH.match(value):
+            return "[redacted path]"
+        return value[:500]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return f"[{type(value).__name__}]"
 
 
 @dataclass

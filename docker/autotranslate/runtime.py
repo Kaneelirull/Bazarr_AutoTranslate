@@ -15,11 +15,8 @@ import atexit
 from concurrent.futures import (
     CancelledError,
     Future,
-    ThreadPoolExecutor,
-    as_completed,
     wait,
 )
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,184 +30,47 @@ from .status.dashboard import (
 from media_identity import resolve_media_identity, retry_media_identity
 from .persistence.state_store import StateStore, StateStoreError
 from .scheduling.locks import ArtifactAccessCoordinator
+from .services.bazarr import BazarrClient, ServiceRequestError
+from .services.http import JsonRequester
+from .services.lingarr import (
+    LingarrActiveTranslation,
+    LingarrClient,
+    LingarrProvider,
+    LingarrSourceLanguage,
+    ProviderResponseError,
+)
+from .models import RepairJobResult
+from .scheduling.suppressions import CycleSuppressionRegistry
+from .scheduling.retries import RetryQueueProcessor
+from .scheduling.repairs import RepairCoordinator
+from .scheduling.executor import (
+    DaemonExecutor as _DaemonExecutor,
+    DaemonRepairExecutor as _DaemonRepairExecutor,
+    completed_futures,
+)
+from .scheduling.capacity import (
+    FileLaneGate as _FileLaneGate,
+    SharedCapacityCoordinator as _SharedCapacityCoordinator,
+    TranslationCapacityGate as _TranslationCapacityGate,
+)
+from .status.logging import (
+    DailyLogHandler as _DailyLogHandler,
+    DailyLogSink as _DailyLogSink,
+    QueuedLogStream as _QueuedLogStream,
+    TeeStream as _TeeStream,
+    UtcLogFormatter as _UtcLogFormatter,
+)
 from .cycle import CycleRunner
-from .lifecycle import LifecycleController
+from .lifecycle import LifecycleController, ShutdownController
 from .maintenance.coordinator import MaintenanceCoordinator, MaintenanceOperation
+from .maintenance.library import ExistingLibraryMaintenance
+from .maintenance.retention import run_retention
+from .status.facade import StatusFacade
 
 # Unbuffered output
 sys.stdout = os.fdopen(sys.stdout.fileno(), "w", buffering=1)
 sys.stderr = os.fdopen(sys.stderr.fileno(), "w", buffering=1)
 
-
-class _DailyLogSink:
-    def __init__(self, log_dir: Path):
-        self.log_dir = log_dir
-        self._lock = threading.Lock()
-        self._date = ""
-        self._file = None
-        self.current_path: Path | None = None
-
-    def write(self, value: str) -> None:
-        if not value:
-            return
-        with self._lock:
-            current_date = time.strftime("%Y-%m-%d")
-            if self._file is None or current_date != self._date:
-                if self._file is not None:
-                    self._file.close()
-                self.log_dir.mkdir(parents=True, exist_ok=True)
-                self.current_path = self.log_dir / f"bazarr-autotranslate-{current_date}.log"
-                self._file = self.current_path.open("a", encoding="utf-8", buffering=1)
-                self._date = current_date
-            self._file.write(value)
-
-    def flush(self) -> None:
-        with self._lock:
-            if self._file is not None:
-                self._file.flush()
-
-    def close(self) -> None:
-        with self._lock:
-            if self._file is not None:
-                self._file.close()
-                self._file = None
-
-
-class _TeeStream:
-    def __init__(self, primary, sink: _DailyLogSink):
-        self.primary = primary
-        self.sink = sink
-
-    def write(self, value: str) -> int:
-        written = self.primary.write(value)
-        self.sink.write(value)
-        return written
-
-    def flush(self) -> None:
-        self.primary.flush()
-        self.sink.flush()
-
-    def fileno(self):
-        return self.primary.fileno()
-
-    def isatty(self) -> bool:
-        return self.primary.isatty()
-
-    @property
-    def encoding(self):
-        return self.primary.encoding
-
-
-class _DaemonRepairExecutor:
-    """Minimal Future executor whose workers cannot block interpreter exit."""
-
-    def __init__(self, max_workers: int, thread_name_prefix: str):
-        self._queue: queue.Queue = queue.Queue()
-        self._lock = threading.Lock()
-        self._stopped = False
-        self._threads = [
-            threading.Thread(
-                target=self._worker,
-                name=f"{thread_name_prefix}_{index}",
-                daemon=True,
-            )
-            for index in range(max(1, int(max_workers)))
-        ]
-        for thread in self._threads:
-            thread.start()
-
-    def submit(self, function, /, *args, **kwargs) -> Future:
-        future = Future()
-        with self._lock:
-            if self._stopped:
-                raise RuntimeError("repair executor is shut down")
-            self._queue.put((future, function, args, kwargs))
-        return future
-
-    def _worker(self) -> None:
-        while True:
-            work = self._queue.get()
-            try:
-                if work is None:
-                    return
-                future, function, args, kwargs = work
-                if not future.set_running_or_notify_cancel():
-                    continue
-                try:
-                    future.set_result(function(*args, **kwargs))
-                except BaseException as exc:
-                    future.set_exception(exc)
-            finally:
-                self._queue.task_done()
-
-    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
-        with self._lock:
-            if self._stopped:
-                return
-            self._stopped = True
-            if cancel_futures:
-                while True:
-                    try:
-                        work = self._queue.get_nowait()
-                    except queue.Empty:
-                        break
-                    if work is not None:
-                        work[0].cancel()
-                    self._queue.task_done()
-            for _thread in self._threads:
-                self._queue.put(None)
-        if wait:
-            for thread in self._threads:
-                thread.join()
-
-class _DailyLogHandler(logging.Handler):
-    def __init__(self, sink: _DailyLogSink):
-        super().__init__()
-        self.sink = sink
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.sink.write(self.format(record) + "\n")
-
-
-class _UtcLogFormatter(logging.Formatter):
-    converter = time.gmtime
-
-
-class _QueuedLogStream:
-    """Turn fragmented print writes into one queued record per thread and line."""
-
-    def __init__(self, logger: logging.Logger, level: int, primary):
-        self.logger = logger
-        self.level = level
-        self.primary = primary
-        self._local = threading.local()
-
-    def write(self, value: str) -> int:
-        if not value:
-            return 0
-        pending = getattr(self._local, "pending", "") + value
-        lines = pending.split("\n")
-        self._local.pending = lines.pop()
-        for line in lines:
-            if line:
-                self.logger.log(self.level, line)
-        return len(value)
-
-    def flush(self) -> None:
-        pending = getattr(self._local, "pending", "")
-        if pending:
-            self.logger.log(self.level, pending)
-            self._local.pending = ""
-
-    def fileno(self):
-        return self.primary.fileno()
-
-    def isatty(self) -> bool:
-        return self.primary.isatty()
-
-    @property
-    def encoding(self):
-        return self.primary.encoding
 
 # ANSI colors (disabled outside TTY)
 _tty = sys.stdout.isatty()
@@ -466,9 +326,12 @@ _repair_executor = None
 _repair_executor_lock = threading.Lock()
 _repair_shutdown_event = threading.Event()
 _repair_capacity = threading.BoundedSemaphore(PARALLEL_TRANSLATES + CLEANUP_REPAIR_QUEUE_MAX)
-_pending_repairs: dict[Future, dict] = {}
-_pending_repairs_lock = threading.Lock()
-_repair_keys: set[tuple] = set()
+_repair_futures = RepairCoordinator(
+    state_provider=lambda: _get_validation_state()
+)
+_pending_repairs = _repair_futures.pending
+_pending_repairs_lock = _repair_futures.lock
+_repair_keys = _repair_futures.keys
 _artifact_access = ArtifactAccessCoordinator()
 _duration_cache: dict[tuple[str, int, int], float | None] = {}
 _duration_cache_lock = threading.Lock()
@@ -477,353 +340,73 @@ _pending_prune_lock = threading.Lock()
 _maintenance_scan_contexts: dict[str, dict] = {}
 _maintenance_scan_contexts_lock = threading.Lock()
 _status_tracker: StatusTracker | None = None
+_status_facade: StatusFacade | None = None
 _completed_cycle = 0
+_runtime_resources_lock = threading.Lock()
+_active_state_store: StateStore | None = None
+_active_status_server = None
+
+
+def _register_runtime_resources(
+    *,
+    state_store: StateStore | None = None,
+    status_server=None,
+) -> None:
+    global _active_state_store, _active_status_server
+    with _runtime_resources_lock:
+        if state_store is not None:
+            _active_state_store = state_store
+        if status_server is not None:
+            _active_status_server = status_server
+
+
+def close_runtime_resources() -> None:
+    """Close production resources once, in reverse construction order."""
+    global _active_state_store, _active_status_server
+    _shutdown_repair_executor()
+    with _runtime_resources_lock:
+        status_server = _active_status_server
+        state_store = _active_state_store
+        _active_status_server = None
+        _active_state_store = None
+    if status_server is not None:
+        status_server.shutdown()
+        status_server.server_close()
+    if state_store is not None:
+        state_store.close()
 
 _episode_cache: dict[int, int] = {}
 _movie_cache: dict[int, int] = {}
 _media_cache_lock = threading.Lock()
 
 
-@dataclass
-class RepairJobResult:
-    action: str
-    report: object
-    title: str
-    target_lang: str
-    item_type: str | None
-    item_id: int | None
-    attempts: int = 0
-    second_attempts: int = 0
-    target_path: str = ""
-    donor_source_attempt: int | None = None
-
-
-class CycleSuppressionRegistry:
-    """Thread-safe quarantine/delete suppression scoped to the active cycle."""
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._cycle_id: str | None = None
-        self._entries: dict[str, dict] = {}
-
-    def begin_cycle(self, cycle_id: str) -> None:
-        with self._lock:
-            self._cycle_id = str(cycle_id)
-            self._entries = {}
-
-    def suppress(self, identity: str | None, *, action: str) -> dict | None:
-        if identity is None:
-            return None
-        with self._lock:
-            entry = {
-                "identity": identity,
-                "action": action,
-                "cycleId": self._cycle_id,
-            }
-            self._entries[identity] = entry
-            return dict(entry)
-
-    def get(self, identity: str | None) -> dict | None:
-        if identity is None:
-            return None
-        with self._lock:
-            entry = self._entries.get(identity)
-            return dict(entry) if entry is not None else None
-
-
 _cycle_suppressions = CycleSuppressionRegistry()
 
 
-@dataclass(frozen=True)
-class LingarrSourceLanguage:
-    name: str
-    code: str
-    targets: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class LingarrActiveTranslation:
-    media_id: int | None
-    media_type: str
-    status: str
-
-    @property
-    def media_key(self) -> tuple[int, str] | None:
-        if self.media_id is None:
-            return None
-        return self.media_id, self.media_type.lower()
-
-
-class ServiceRequestError(RuntimeError):
-    def __init__(self, service: str, operation: str, message: str):
-        super().__init__(f"{service} {operation}: {message}")
-        self.service = service
-        self.operation = operation
-
-
-class TranslationCapacityGate:
+class TranslationCapacityGate(_TranslationCapacityGate):
     def __init__(self, limit: int):
-        self.limit = max(1, limit)
-        self._condition = threading.Condition()
-        self._next_token = 1
-        self._reservations: dict[int, tuple[int, str]] = {}
-
-    def _effective_count(
-        self, active: list[LingarrActiveTranslation]
-    ) -> int:
-        active_keys = Counter(
-            entry.media_key for entry in active if entry.media_key is not None
+        super().__init__(
+            limit,
+            active_translations=lambda: lingarr_get_active_translations(),
+            shutdown_requested=lambda: shutdown_requested,
+            poll_interval=POLL_INTERVAL,
+            emit=print,
+            service_errors=(ServiceRequestError,),
         )
-        reservation_keys = Counter(self._reservations.values())
-        visible_reservations = sum(
-            min(count, active_keys.get(key, 0))
-            for key, count in reservation_keys.items()
-        )
-        return len(active) + len(self._reservations) - visible_reservations
 
-    def acquire(self, media_id: int, media_type: str) -> int | None:
-        media_key = (int(media_id), media_type.lower())
-        while not shutdown_requested:
-            try:
-                active = lingarr_get_active_translations()
-            except ServiceRequestError as exc:
-                print(
-                    f"{YELLOW}[DEFER] Cannot verify Lingarr capacity: {exc}{RESET}"
-                )
-                return None
 
-            with self._condition:
-                effective = self._effective_count(active)
-                active_keys = {
-                    entry.media_key
-                    for entry in active
-                    if entry.media_key is not None
-                }
-                if effective < self.limit and media_key not in active_keys:
-                    token = self._next_token
-                    self._next_token += 1
-                    self._reservations[token] = media_key
-                    return token
-                print(
-                    f"[INFO] Lingarr queue full ({effective}/{self.limit}) "
-                    f"— waiting {POLL_INTERVAL}s..."
-                )
-                self._condition.wait(timeout=POLL_INTERVAL)
-        return None
+class SharedCapacityCoordinator(_SharedCapacityCoordinator):
+    def __init__(self, limit: int):
+        super().__init__(limit, shutdown_requested=lambda: shutdown_requested)
 
-    def release(self, token: int | None) -> None:
-        if token is None:
-            return
-        with self._condition:
-            self._reservations.pop(token, None)
-            self._condition.notify_all()
 
-    def reset(self) -> None:
-        with self._condition:
-            self._reservations.clear()
-            self._condition.notify_all()
+class FileLaneGate(_FileLaneGate):
+    def __init__(self, workers: int):
+        super().__init__(workers, shutdown_requested=lambda: shutdown_requested)
 
 
 _translation_capacity = TranslationCapacityGate(PARALLEL_TRANSLATES)
-
-
-class SharedCapacityCoordinator:
-    """Coordinate file translations and repairs with repair-first admission."""
-
-    def __init__(self, limit: int):
-        self.limit = max(1, limit)
-        self._condition = threading.Condition()
-        self._active = 0
-        self._waiting_repairs = 0
-        self._next_token = 1
-        self._tokens: dict[int, str] = {}
-        self._local = threading.local()
-
-    def acquire_translation(self) -> int | None:
-        with self._condition:
-            while not shutdown_requested:
-                if self._active < self.limit and self._waiting_repairs == 0:
-                    token = self._next_token
-                    self._next_token += 1
-                    self._tokens[token] = "translation"
-                    self._active += 1
-                    self._local.translation_token = token
-                    return token
-                self._condition.wait(timeout=1)
-        return None
-
-    def reserve_repair(self) -> int | None:
-        """Reserve repair priority, transferring the caller's file slot if held."""
-        with self._condition:
-            translation_token = getattr(self._local, "translation_token", None)
-            if self._tokens.get(translation_token) == "translation":
-                self._tokens[translation_token] = "repair-reserved"
-                self._local.translation_token = None
-                return translation_token
-            token = self._next_token
-            self._next_token += 1
-            self._tokens[token] = "repair-waiting"
-            self._waiting_repairs += 1
-            self._condition.notify_all()
-            return token
-
-    def start_repair(self, token: int) -> bool:
-        with self._condition:
-            while not shutdown_requested:
-                state = self._tokens.get(token)
-                if state == "repair-reserved":
-                    self._tokens[token] = "repair"
-                    return True
-                if state != "repair-waiting":
-                    return False
-                if self._active < self.limit:
-                    self._waiting_repairs -= 1
-                    self._active += 1
-                    self._tokens[token] = "repair"
-                    return True
-                self._condition.wait(timeout=1)
-            self._cancel_waiter(token)
-            return False
-
-    def _cancel_waiter(self, token: int) -> None:
-        if self._tokens.pop(token, None) == "repair-waiting":
-            self._waiting_repairs -= 1
-        self._condition.notify_all()
-
-    def release(self, token: int | None) -> None:
-        if token is None:
-            return
-        with self._condition:
-            state = self._tokens.pop(token, None)
-            if state in ("translation", "repair", "repair-reserved"):
-                self._active = max(0, self._active - 1)
-            elif state == "repair-waiting":
-                self._waiting_repairs = max(0, self._waiting_repairs - 1)
-            if getattr(self._local, "translation_token", None) == token:
-                self._local.translation_token = None
-            self._condition.notify_all()
-
-    def release_current_translation(self) -> None:
-        self.release(getattr(self._local, "translation_token", None))
-
-    def reset(self) -> None:
-        with self._condition:
-            self._tokens.clear()
-            self._active = 0
-            self._waiting_repairs = 0
-            self._local.translation_token = None
-            self._condition.notify_all()
-
-
 _shared_capacity = SharedCapacityCoordinator(PARALLEL_TRANSLATES)
-
-
-class FileLaneGate:
-    """Prefer dedicated lanes while lending any capacity that would sit idle."""
-
-    def __init__(self, workers: int):
-        self.workers = max(1, workers)
-        # Lane numbers start at one: odd lanes handle short jobs and even lanes
-        # handle long jobs.  A lone worker remains a short lane, although long
-        # work may use it when no short job is waiting.
-        self.short_capacity = (self.workers + 1) // 2
-        self.long_capacity = self.workers // 2
-        self._condition = threading.Condition()
-        self._active_long = 0
-        self._active_short = 0
-        self._waiters: dict[int, tuple[bool, float, int]] = {}
-        self._next_waiter = 0
-
-    def acquire(self, is_long: bool, estimate_seconds: float = 0.0) -> str | None:
-        with self._condition:
-            token = self._next_waiter
-            self._next_waiter += 1
-            self._waiters[token] = (
-                bool(is_long),
-                max(0.0, float(estimate_seconds)),
-                token,
-            )
-            try:
-                while not shutdown_requested:
-                    long_waiters = sorted(
-                        (
-                            (waiter_token, estimate, sequence)
-                            for waiter_token, (long_job, estimate, sequence)
-                            in self._waiters.items()
-                            if long_job
-                        ),
-                        key=lambda entry: (-entry[1], entry[2]),
-                    )
-                    short_waiters = sorted(
-                        (
-                            (waiter_token, estimate, sequence)
-                            for waiter_token, (long_job, estimate, sequence)
-                            in self._waiters.items()
-                            if not long_job
-                        ),
-                        key=lambda entry: (-entry[1], entry[2]),
-                    )
-                    if self.workers == 1:
-                        preferred = short_waiters or long_waiters
-                        available = (
-                            self._active_long + self._active_short == 0
-                            and bool(preferred)
-                            and preferred[0][0] == token
-                        )
-                        lane = "long" if is_long else "short"
-                    elif is_long:
-                        preferred_long = (
-                            bool(long_waiters) and long_waiters[0][0] == token
-                        )
-                        if preferred_long and self._active_long < self.long_capacity:
-                            available = True
-                            lane = "long"
-                        else:
-                            available = (
-                                preferred_long
-                                and self._active_short < self.short_capacity
-                                and not short_waiters
-                            )
-                            lane = "long (borrowed)"
-                    else:
-                        preferred_short = (
-                            bool(short_waiters) and short_waiters[0][0] == token
-                        )
-                        if preferred_short and self._active_short < self.short_capacity:
-                            available = True
-                            lane = "short"
-                        else:
-                            available = (
-                                preferred_short
-                                and self._active_long < self.long_capacity
-                                and not long_waiters
-                            )
-                            lane = "short (borrowed)"
-                    if available:
-                        self._waiters.pop(token, None)
-                        if lane in {"long", "short (borrowed)"}:
-                            self._active_long += 1
-                        else:
-                            self._active_short += 1
-                        self._condition.notify_all()
-                        return lane
-                    self._condition.wait(timeout=1)
-            finally:
-                self._waiters.pop(token, None)
-                self._condition.notify_all()
-        return None
-
-    def release(self, lane: str | None) -> None:
-        if lane is None:
-            return
-        with self._condition:
-            if lane in {"long", "short (borrowed)"}:
-                self._active_long = max(0, self._active_long - 1)
-            else:
-                self._active_short = max(0, self._active_short - 1)
-            self._condition.notify_all()
-
-
 _file_lane_gate = FileLaneGate(PARALLEL_TRANSLATES)
 
 
@@ -1023,7 +606,7 @@ def _status_admit_retry(plan: dict, identity: dict) -> None:
 
 
 def _refresh_status_diagnostics() -> None:
-    if _status_tracker is None or not hasattr(_status_tracker, "set_diagnostics"):
+    if _status_facade is None:
         return
     target = next(iter(CLEANUP_LANGUAGES), LANGUAGES[-1] if LANGUAGES else "et")
     try:
@@ -1061,7 +644,7 @@ def _refresh_status_diagnostics() -> None:
                 )
             )
             plan["manualReview"] = plan.get("lastDeferralClass") == "manual_review"
-        _status_tracker.set_diagnostics(
+        _status_facade.set_diagnostics(
             timing={"file": file_timing, "repair": repair_timing},
             circuits=_get_validation_state().circuit_breakers(),
             retries=retry_plans,
@@ -1074,10 +657,10 @@ def _refresh_status_diagnostics() -> None:
 
 
 def _status_set_phase(phase: str, *, next_cycle_at: float | None = None) -> None:
-    if _status_tracker is None:
+    if _status_facade is None:
         return
     try:
-        _status_tracker.set_phase(phase, next_cycle_at=next_cycle_at)
+        _status_facade.set_phase(phase, next_cycle_at=next_cycle_at)
     except OSError as exc:
         print(f"{YELLOW}[STATUS] Could not persist service phase: {exc}{RESET}")
 
@@ -1530,11 +1113,14 @@ def _initialize_state_store() -> StateStore:
 # ---------------------------------------------------------------------------
 
 shutdown_requested = False
+_shutdown_controller = ShutdownController(REPAIR_SHUTDOWN_GRACE_SECONDS)
 
 
 def _handle_signal(signum, frame):
     global shutdown_requested
     shutdown_requested = True
+    _shutdown_controller.request()
+    _repair_shutdown_event.set()
     print(f"\n{YELLOW}[WARNING] Signal {signum} received — finishing current jobs then stopping.{RESET}")
     sys.stdout.flush()
 
@@ -1675,192 +1261,62 @@ def _request_json(
     operation: str,
     **kwargs,
 ):
-    request = getattr(requests, method.lower())
-    last_error: Exception | None = None
-    for attempt in range(1, 4):
-        try:
-            response = request(url, **kwargs)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as exc:
-            last_error = exc
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            retryable = status is None or status == 429 or status >= 500
-            if not retryable or attempt == 3:
-                break
-        except ValueError as exc:
-            raise ServiceRequestError(
-                service, operation, f"invalid JSON response: {exc}"
-            ) from exc
-
-        delay = attempt
-        print(
-            f"{YELLOW}[WARNING] {service} {operation} failed "
-            f"(attempt {attempt}/3); retrying in {delay}s{RESET}"
-        )
-        time.sleep(delay)
-
-    raise ServiceRequestError(service, operation, str(last_error)) from last_error
+    return JsonRequester(
+        transport=requests,
+        sleep=lambda seconds: time.sleep(seconds),
+        emit=print,
+    ).request(
+        method,
+        url,
+        service=service,
+        operation=operation,
+        **kwargs,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Bazarr API
 # ---------------------------------------------------------------------------
 
-def fetch_wanted(item_type: str) -> list:
-    url = bazarr_url(f"{item_type}/wanted")
-    dbg(f"fetch_wanted({item_type}): GET {url}")
-    payload = _request_json(
-        "get",
-        url,
-        service="Bazarr",
-        operation=f"fetch {item_type} wanted queue",
-        headers=BAZARR_HEADERS,
-        params={"start": 0, "length": -1},
-        timeout=CONNECT_TIMEOUT,
+def _bazarr_client() -> BazarrClient:
+    return BazarrClient(
+        BAZARR_URL,
+        BAZARR_API_KEY,
+        request_json=lambda *args, **kwargs: _request_json(*args, **kwargs),
+        get=lambda *args, **kwargs: requests.get(*args, **kwargs),
+        post=lambda *args, **kwargs: requests.post(*args, **kwargs),
+        connect_timeout=CONNECT_TIMEOUT,
+        sync_start_timeout=SYNC_START_TIMEOUT,
+        sync_poll_interval=SYNC_POLL_INTERVAL,
+        time_value=lambda: time.time(),
+        sleep=lambda seconds: time.sleep(seconds),
+        shutdown_requested=lambda: shutdown_requested,
+        emit=print,
     )
-    if not isinstance(payload, dict) or not isinstance(payload.get("data", []), list):
-        raise ServiceRequestError(
-            "Bazarr", f"fetch {item_type} wanted queue", "unexpected response schema"
-        )
-    result = payload.get("data", [])
+
+
+def fetch_wanted(item_type: str) -> list:
+    result = _bazarr_client().fetch_wanted(item_type)
     dbg(f"fetch_wanted({item_type}): {len(result)} item(s)")
     return result
 
 
 def fetch_subtitles(item_type: str, item_id: int) -> tuple[str, list]:
-    if item_type == "episodes":
-        url = bazarr_url("episodes")
-        params = {"episodeid[]": item_id}
-    else:
-        url = bazarr_url("movies")
-        params = {"radarrid[]": item_id}
-    payload = _request_json(
-        "get",
-        url,
-        service="Bazarr",
-        operation=f"fetch {item_type} subtitles for {item_id}",
-        headers=BAZARR_HEADERS,
-        params=params,
-        timeout=CONNECT_TIMEOUT,
-    )
-    if not isinstance(payload, dict) or not isinstance(payload.get("data", []), list):
-        raise ServiceRequestError(
-            "Bazarr",
-            f"fetch {item_type} subtitles for {item_id}",
-            "unexpected response schema",
-        )
-    data = payload.get("data", [])
-    if data:
-        if not isinstance(data[0], dict):
-            raise ServiceRequestError(
-                "Bazarr",
-                f"fetch {item_type} subtitles for {item_id}",
-                "unexpected item schema",
-            )
-        vp = data[0].get("path", "")
-        subs = data[0].get("subtitles", [])
-        if not isinstance(subs, list):
-            raise ServiceRequestError(
-                "Bazarr",
-                f"fetch {item_type} subtitles for {item_id}",
-                "unexpected subtitles schema",
-            )
-        dbg(f"fetch_subtitles({item_type}, {item_id}): video_path={vp!r}")
-        return vp, subs
-    return "", []
+    result = _bazarr_client().fetch_subtitles(item_type, item_id)
+    dbg(f"fetch_subtitles({item_type}, {item_id}): video_path={result[0]!r}")
+    return result
 
 
 def trigger_bazarr_sync(had_episodes: bool, had_movies: bool) -> None:
-    tasks = []
-    if had_episodes:
-        tasks.append("series_full_scan_subtitles")
-    if had_movies:
-        tasks.append("movies_full_scan_subtitles")
-    for taskid in tasks:
-        try:
-            r = requests.post(
-                bazarr_url("system/tasks"),
-                headers=BAZARR_HEADERS,
-                params={"taskid": taskid},
-                timeout=CONNECT_TIMEOUT,
-            )
-            if r.status_code == 204:
-                print(f"[INFO] Triggered Bazarr task: {taskid}")
-            else:
-                print(f"{YELLOW}[WARNING] Bazarr task {taskid} returned {r.status_code}{RESET}")
-        except Exception as e:
-            print(f"{RED}[ERROR] Failed to trigger Bazarr task {taskid}: {e}{RESET}")
+    _bazarr_client().trigger_sync(had_episodes, had_movies)
 
 
 def _job_matches_scan(job: dict, had_episodes: bool, had_movies: bool) -> bool:
-    name = (job.get("job_name") or "").lower()
-    status = (job.get("status") or "").lower()
-    if status != "running":
-        return False
-    if had_episodes and "episode" in name and "subtitle" in name:
-        return True
-    if had_movies and "movie" in name and "subtitle" in name:
-        return True
-    if had_episodes and "series" in name and "subtitle" in name:
-        return True
-    return False
+    return BazarrClient._job_matches(job, had_episodes, had_movies)
 
 
 def wait_for_bazarr_sync(had_episodes: bool, had_movies: bool, timeout: int) -> bool:
-    if not had_episodes and not had_movies:
-        return True
-
-    print(f"[INFO] Waiting for Bazarr subtitle scan to complete (timeout {timeout}s)...")
-    deadline = time.time() + timeout
-    start_deadline = min(deadline, time.time() + SYNC_START_TIMEOUT)
-    logged_jobs: set[int] = set()
-    observed_running = False
-
-    while not shutdown_requested:
-        try:
-            r = requests.get(bazarr_url("system/jobs"), headers=BAZARR_HEADERS, timeout=CONNECT_TIMEOUT)
-            r.raise_for_status()
-            jobs = r.json().get("data", [])
-        except Exception as e:
-            print(f"{YELLOW}[WARNING] Could not poll Bazarr jobs: {e}{RESET}")
-            jobs = []
-
-        active = [j for j in jobs if _job_matches_scan(j, had_episodes, had_movies)]
-        if not active:
-            if observed_running:
-                print(f"{GREEN}[OK] Bazarr subtitle scan completed{RESET}")
-                return True
-            if time.time() >= start_deadline:
-                print(
-                    f"{YELLOW}[WARNING] Bazarr subtitle scan did not appear within "
-                    f"{SYNC_START_TIMEOUT}s{RESET}"
-                )
-                return False
-        else:
-            observed_running = True
-
-        for job in active:
-            jid = job.get("job_id")
-            if jid not in logged_jobs:
-                logged_jobs.add(jid)
-                print(f"[INFO] Bazarr scan running: {job.get('job_name', 'unknown')}")
-            if job.get("is_progress"):
-                pv = job.get("progress_value", 0)
-                pm = job.get("progress_max", 0)
-                msg = job.get("progress_message", "")
-                print(f"[SYNC] {job.get('job_name')}: {pv}/{pm} — {msg}")
-
-        if time.time() >= deadline:
-            print(f"{YELLOW}[WARNING] Bazarr sync timed out after {timeout}s — continuing anyway{RESET}")
-            return False
-
-        for _ in range(SYNC_POLL_INTERVAL):
-            if shutdown_requested:
-                return False
-            time.sleep(1)
-
-    return False
+    return _bazarr_client().wait_for_sync(had_episodes, had_movies, timeout)
 
 
 def _tracked_bazarr_sync(
@@ -1890,128 +1346,32 @@ def _tracked_bazarr_sync(
 # Lingarr API
 # ---------------------------------------------------------------------------
 
+def _lingarr_client() -> LingarrClient:
+    return LingarrClient(
+        LINGARR_URL,
+        LINGARR_HEADERS,
+        request_json=lambda *args, **kwargs: _request_json(*args, **kwargs),
+        get=lambda *args, **kwargs: requests.get(*args, **kwargs),
+        post=lambda *args, **kwargs: requests.post(*args, **kwargs),
+        connect_timeout=CONNECT_TIMEOUT,
+        shutdown_requested=lambda: shutdown_requested,
+        emit=print,
+    )
+
 def lingarr_get_languages() -> list[LingarrSourceLanguage]:
-    try:
-        payload = _request_json(
-            "get",
-            lingarr_url("Translate/languages"),
-            service="Lingarr",
-            operation="fetch languages",
-            headers=LINGARR_HEADERS,
-            timeout=CONNECT_TIMEOUT,
-        )
-    except ServiceRequestError as exc:
-        print(f"{YELLOW}[WARNING] Could not fetch Lingarr languages: {exc}{RESET}")
-        return []
-    if not isinstance(payload, list):
-        print(
-            f"{YELLOW}[WARNING] Lingarr languages response has an unexpected schema{RESET}"
-        )
-        return []
-
-    languages: list[LingarrSourceLanguage] = []
-    for index, entry in enumerate(payload):
-        if not isinstance(entry, dict):
-            print(
-                f"{YELLOW}[WARNING] Ignoring malformed Lingarr language entry "
-                f"at index {index}{RESET}"
-            )
-            continue
-        name = entry.get("name")
-        code = entry.get("code")
-        targets = entry.get("targets")
-        if targets is None:
-            targets = []
-        if (
-            not isinstance(name, str)
-            or not name.strip()
-            or not isinstance(code, str)
-            or not code.strip()
-            or not isinstance(targets, list)
-            or not all(isinstance(target, str) and target.strip() for target in targets)
-        ):
-            print(
-                f"{YELLOW}[WARNING] Ignoring malformed Lingarr language entry "
-                f"at index {index}{RESET}"
-            )
-            continue
-        languages.append(
-            LingarrSourceLanguage(
-                name=name.strip(),
-                code=code.strip(),
-                targets=tuple(target.strip() for target in targets),
-            )
-        )
-    return languages
-
+    return _lingarr_client().languages()
 
 def lingarr_build_media_cache() -> None:
     global _episode_cache, _movie_cache
-    episode_cache: dict[int, int] = {}
-    movie_cache: dict[int, int] = {}
-
-    page = 1
-    while not shutdown_requested:
-        try:
-            r = requests.get(
-                lingarr_url("Media/movies"),
-                headers=LINGARR_HEADERS,
-                params={"pageNumber": page, "pageSize": 100},
-                timeout=CONNECT_TIMEOUT,
-            )
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            print(f"{RED}[ERROR] lingarr_build_media_cache movies page {page}: {e}{RESET}")
-            break
-
-        for movie in data.get("items", []):
-            rid = movie.get("radarrId")
-            mid = movie.get("id")
-            if rid is not None and mid is not None:
-                movie_cache[int(rid)] = int(mid)
-
-        total = data.get("totalCount", 0)
-        page_size = data.get("pageSize", 100) or 100
-        if page * page_size >= total or not data.get("items"):
-            break
-        page += 1
-
-    page = 1
-    while not shutdown_requested:
-        try:
-            r = requests.get(
-                lingarr_url("Media/shows"),
-                headers=LINGARR_HEADERS,
-                params={"pageNumber": page, "pageSize": 50},
-                timeout=CONNECT_TIMEOUT,
-            )
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            print(f"{RED}[ERROR] lingarr_build_media_cache shows page {page}: {e}{RESET}")
-            break
-
-        for show in data.get("items", []):
-            for season in show.get("seasons", []) or []:
-                for ep in season.get("episodes", []) or []:
-                    sid = ep.get("sonarrId")
-                    eid = ep.get("id")
-                    if sid is not None and eid is not None:
-                        episode_cache[int(sid)] = int(eid)
-
-        total = data.get("totalCount", 0)
-        page_size = data.get("pageSize", 50) or 50
-        if page * page_size >= total or not data.get("items"):
-            break
-        page += 1
-
+    episode_cache, movie_cache = _lingarr_client().media_cache()
     with _media_cache_lock:
         _episode_cache = episode_cache
         _movie_cache = movie_cache
-
-    print(f"[INFO] Lingarr media cache: {len(movie_cache)} movie(s), {len(episode_cache)} episode(s)")
-
+    print(
+        f"[INFO] Lingarr media cache: {len(movie_cache)} movie(s), "
+        f"{len(episode_cache)} episode(s)"
+    )
+    return
 
 def lingarr_resolve_media_id(item_type: str, item_id: int) -> int | None:
     with _media_cache_lock:
@@ -2021,44 +1381,7 @@ def lingarr_resolve_media_id(item_type: str, item_id: int) -> int | None:
 
 
 def lingarr_get_active_translations() -> list[LingarrActiveTranslation]:
-    try:
-        payload = _request_json(
-            "get",
-            lingarr_url("TranslationRequest/active"),
-            service="Lingarr",
-            operation="fetch active translations",
-            headers=LINGARR_HEADERS,
-            timeout=CONNECT_TIMEOUT,
-        )
-    except ServiceRequestError:
-        raise
-    if not isinstance(payload, list):
-        raise ServiceRequestError(
-            "Lingarr", "fetch active translations", "unexpected response schema"
-        )
-
-    active: list[LingarrActiveTranslation] = []
-    for entry in payload:
-        if not isinstance(entry, dict):
-            raise ServiceRequestError(
-                "Lingarr", "fetch active translations", "malformed active entry"
-            )
-        media_id = entry.get("mediaId")
-        media_type = entry.get("mediaType")
-        status = entry.get("status")
-        if (
-            (media_id is not None and not isinstance(media_id, int))
-            or not isinstance(media_type, str)
-            or not media_type
-            or not isinstance(status, str)
-            or not status
-        ):
-            raise ServiceRequestError(
-                "Lingarr", "fetch active translations", "malformed active entry"
-            )
-        active.append(LingarrActiveTranslation(media_id, media_type, status))
-    return active
-
+    return _lingarr_client().active_translations()
 
 def lingarr_submit_file(
     media_id: int,
@@ -2075,23 +1398,7 @@ def lingarr_submit_file(
         "mediaType": media_type,
         "subtitleFormat": "srt",
     }
-    dbg(f"lingarr_submit_file: POST {body}")
-    try:
-        r = requests.post(
-            lingarr_url("Translate/file"),
-            headers=LINGARR_HEADERS,
-            json=body,
-            timeout=CONNECT_TIMEOUT,
-        )
-        r.raise_for_status()
-        job_id = r.json().get("jobId")
-        if job_id is not None:
-            return int(job_id)
-        print(f"{RED}[ERROR] lingarr_submit_file: no jobId in response{RESET}")
-    except Exception as e:
-        print(f"{RED}[ERROR] lingarr_submit_file: {e}{RESET}")
-    return None
-
+    return _lingarr_client().submit_file(body)
 
 def lingarr_translate_line(
     subtitle_line: str,
@@ -2133,151 +1440,51 @@ def lingarr_translate_line(
         except (OSError, StateStoreError):
             pass
 
-    body = {
-        "subtitleLine": subtitle_line,
-        "sourceLanguage": source_lang,
-        "targetLanguage": target_lang,
-        "contextLinesBefore": [] if strict else context_before,
-        "contextLinesAfter": [] if strict else context_after,
-    }
-    if strict:
-        body["instructions"] = (
-            "Return only the translated subtitle cue in the requested target "
-            "language and script. Do not include commentary or surrounding dialogue."
+    def provider_event(event: dict) -> None:
+        record_provider_event(
+            event.get("classification", "transport"),
+            retryable=bool(event.get("retryable")),
+            http_status=event.get("status"),
+            payload=event.get("payload"),
         )
-    dbg(
-        f"lingarr_translate_line: POST source={source_lang} target={target_lang} "
-        f"before={len(context_before)} after={len(context_after)} chars={len(subtitle_line)}"
+        if outcome_meta is not None:
+            outcome_meta.update({
+                "httpStatus": event.get("status"),
+                "httpDurationSeconds": round(float(event.get("duration", 0)), 3),
+                "cancelled": event.get("classification") == "cancelled",
+            })
+
+    provider = LingarrProvider(
+        base_url=LINGARR_URL,
+        headers=LINGARR_HEADERS,
+        post=lambda *args, **kwargs: requests.post(*args, **kwargs),
+        timeout=max(CONNECT_TIMEOUT, 120),
+        max_attempts=1,
+        on_event=provider_event,
     )
-    started = time.monotonic()
     try:
-        request_args = {
-            "headers": LINGARR_HEADERS,
-            "json": body,
-            # Normal provider reliability is independent of shutdown grace.
-            "timeout": max(CONNECT_TIMEOUT, 120),
-        }
-        if cancellation_requested is None:
-            r = requests.post(lingarr_url("Translate/line"), **request_args)
-        else:
-            request_result: queue.Queue = queue.Queue(maxsize=1)
-
-            def run_request() -> None:
-                try:
-                    request_result.put((requests.post(
-                        lingarr_url("Translate/line"), **request_args
-                    ), None))
-                except Exception as exc:  # forwarded to the repair worker
-                    request_result.put((None, exc))
-
-            # A timed-out provider socket must not hold application shutdown.
-            # The daemon owns only the HTTP call; all state writes remain here.
-            threading.Thread(
-                target=run_request,
-                name="lingarr-line-request",
-                daemon=True,
-            ).start()
-            while True:
-                if cancellation_requested():
-                    if outcome_meta is not None:
-                        outcome_meta.update({
-                            "cancelled": True,
-                            "httpDurationSeconds": round(
-                                time.monotonic() - started, 3
-                            ),
-                        })
-                    return None
-                try:
-                    r, request_error = request_result.get(timeout=0.1)
-                    break
-                except queue.Empty:
-                    continue
-            if request_error is not None:
-                raise request_error
-        elapsed = time.monotonic() - started
-        if outcome_meta is not None:
-            outcome_meta.update({"httpStatus": r.status_code, "httpDurationSeconds": round(elapsed, 3)})
-        identity = f"{repair_label} cue {cue_number}".strip() if cue_number is not None else "line repair"
-        attempt_label = f" attempt {attempt}" if attempt is not None else ""
-        print(f"[REPAIR] Lingarr HTTP {r.status_code} for {identity}{attempt_label} after {elapsed:.1f}s")
-        r.raise_for_status()
-        try:
-            payload = r.json()
-        except ValueError:
-            payload = r.text
-
-        if isinstance(payload, str) and payload.strip():
-            record_provider_event(
-                "success", retryable=False, http_status=r.status_code, payload=payload
-            )
-            return payload.strip()
-        if isinstance(payload, dict):
-            for key in ("translatedSubtitle", "translatedLine", "translation", "text"):
-                value = payload.get(key)
-                if isinstance(value, str) and value.strip():
-                    record_provider_event(
-                        "success",
-                        retryable=False,
-                        http_status=r.status_code,
-                        payload=payload,
-                    )
-                    return value.strip()
-        record_provider_event(
-            "malformed_response",
-            retryable=True,
-            http_status=r.status_code,
-            payload=payload,
+        return provider.translate_cue(
+            subtitle_line,
+            source_lang,
+            target_lang,
+            context_before,
+            context_after,
+            strict=strict,
+            cancellation_requested=cancellation_requested,
         )
-        print(f"{RED}[ERROR] lingarr_translate_line: unexpected response shape{RESET}")
-    except Exception as e:
-        elapsed = time.monotonic() - started
-        status = getattr(getattr(e, "response", None), "status_code", None)
-        retryable = status is None or status == 429 or status >= 500
-        record_provider_event(
-            (
-                "transport"
-                if status is None
-                else "http_retryable" if retryable else "http_permanent"
-            ),
-            retryable=retryable,
-            http_status=status,
+    except ProviderResponseError as exc:
+        dbg(
+            f"lingarr_translate_line failed for {repair_label or 'line repair'}: "
+            f"{exc}"
         )
-        if outcome_meta is not None:
-            outcome_meta.update({"httpStatus": status, "httpDurationSeconds": round(elapsed, 3)})
-        print(f"{RED}[ERROR] lingarr_translate_line failed after {elapsed:.1f}s: {e}{RESET}")
-    return None
+        return None
 
 
 def lingarr_get_job(job_id: int) -> dict | None:
-    try:
-        r = requests.get(
-            lingarr_url(f"TranslationRequest/{job_id}"),
-            headers=LINGARR_HEADERS,
-            timeout=CONNECT_TIMEOUT,
-        )
-        if r.status_code == 200:
-            return r.json()
-    except Exception as e:
-        dbg(f"lingarr_get_job({job_id}): {e}")
-    return None
-
+    return _lingarr_client().get_job(job_id)
 
 def lingarr_cancel_job(job_id: int) -> bool:
-    detail = lingarr_get_job(job_id)
-    if not detail:
-        return False
-    try:
-        response = requests.post(
-            lingarr_url("TranslationRequest/cancel"),
-            headers=LINGARR_HEADERS,
-            json=detail,
-            timeout=CONNECT_TIMEOUT,
-        )
-        return response.status_code in (200, 202, 204)
-    except requests.RequestException as exc:
-        print(f"{YELLOW}[WARNING] Could not cancel Lingarr job {job_id}: {exc}{RESET}")
-        return False
-
+    return _lingarr_client().cancel_job(job_id)
 
 def _classify_lingarr_failure(status: str | None, text: str) -> str:
     folded = f"{status or ''} {text}".casefold()
@@ -4458,7 +3665,7 @@ def _publish_repair_status(future: Future, metadata: dict) -> None:
 
 def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, target_lang: str) -> str:
     with _pending_repairs_lock:
-        if repair_key in _repair_keys:
+        if not _repair_futures.reserve(repair_key):
             print(f"[REPAIR] Duplicate repair suppressed for {label} '{target_lang}'")
             return "repair-duplicate"
         cue_count = len(getattr(report, "repairable_cue_indexes", []) or [])
@@ -4496,6 +3703,7 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             job_kwargs, label, target_lang, initial_details
         )
         if not _repair_capacity.acquire(blocking=False):
+            _repair_futures.release_reservation(repair_key)
             print(f"[REPAIR] Queue full; deferred {label} '{target_lang}' to the next scan")
             _status_ref_complete(
                 status_ref, "deferred", reason="repair queue full"
@@ -4513,7 +3721,7 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
                         tuple(getattr(report, "repairable_cue_indexes", []) or []),
                     )).encode("utf-8")
                 ).hexdigest()
-                durable_job_id = state.enqueue_repair_job(
+                durable_job_id = _repair_futures.persist(
                     dedupe_key=durable_key,
                     item_type=job_kwargs.get("item_type"),
                     item_id=job_kwargs.get("item_id"),
@@ -4536,6 +3744,7 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
                     },
                 )
             except StateStoreError as exc:
+                _repair_futures.release_reservation(repair_key)
                 _repair_capacity.release()
                 _status_ref_complete(
                     status_ref, "deferred", reason="repair persistence unavailable"
@@ -4566,7 +3775,6 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             "publication_lock": threading.Lock(),
             "publication_started": False,
         }
-        _repair_keys.add(repair_key)
         capacity_token = _shared_capacity.reserve_repair()
         try:
             future = _get_repair_executor().submit(
@@ -4576,14 +3784,14 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
                 metadata,
             )
         except Exception:
-            _repair_keys.discard(repair_key)
+            _repair_futures.release_reservation(repair_key)
             _shared_capacity.release(capacity_token)
             _repair_capacity.release()
             _status_ref_complete(
                 status_ref, "failed", reason="repair worker submission failed"
             )
             raise
-        _pending_repairs[future] = metadata
+        _repair_futures.register(future, metadata)
         _scan_child_queued(metadata.get("maintenance_scan_job_id"))
     future.add_done_callback(
         lambda completed, repair_metadata=metadata: _publish_repair_status(
@@ -4595,6 +3803,16 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
     return "repair-queued"
 
 
+def _completed_repair_futures(futures: list[Future]):
+    """Yield completions while allowing a signal to interrupt phase drainage."""
+    yield from _repair_futures.completed(
+        futures,
+        stop_requested=lambda: (
+            shutdown_requested or _shutdown_controller.is_requested()
+        ),
+    )
+
+
 def _drain_pending_repairs(stats: dict) -> list[RepairJobResult]:
     stats.setdefault("completed", 0)
     stats.setdefault("failed", 0)
@@ -4604,10 +3822,8 @@ def _drain_pending_repairs(stats: dict) -> list[RepairJobResult]:
     with _pending_repairs_lock:
         futures = list(_pending_repairs)
     results: list[RepairJobResult] = []
-    for future in as_completed(futures):
-        with _pending_repairs_lock:
-            metadata = _pending_repairs.pop(future, {})
-            _repair_keys.discard(metadata.get("key"))
+    for future in _completed_repair_futures(futures):
+        metadata = _repair_futures.take(future)
         _repair_capacity.release()
         try:
             result = future.result()
@@ -4680,9 +3896,8 @@ def _shutdown_repair_executor() -> None:
             f"[REPAIR] Draining active repair worker(s) for up to "
             f"{REPAIR_SHUTDOWN_GRACE_SECONDS}s"
         )
-        with _pending_repairs_lock:
-            pending_metadata = list(_pending_repairs.items())
-            futures = [future for future, _metadata in pending_metadata]
+        pending_metadata = _repair_futures.snapshot()
+        futures = [future for future, _metadata in pending_metadata]
         for future, metadata in pending_metadata:
             if future.running() or future.done():
                 continue
@@ -4702,7 +3917,12 @@ def _shutdown_repair_executor() -> None:
                 except StateStoreError:
                     pass
             future.cancel()
-        deadline = time.monotonic() + max(0, REPAIR_SHUTDOWN_GRACE_SECONDS)
+        timeout = (
+            _shutdown_controller.remaining()
+            if _shutdown_controller.is_requested()
+            else max(0, REPAIR_SHUTDOWN_GRACE_SECONDS)
+        )
+        deadline = time.monotonic() + timeout
         _done, pending = wait(
             futures,
             timeout=max(0.0, deadline - time.monotonic()),
@@ -7870,15 +7090,21 @@ def _run_regeneration_retry_batch(
     dispatch_workers = max(
         PARALLEL_TRANSLATES * 4, PARALLEL_TRANSLATES + 1
     )
-    with ThreadPoolExecutor(
+    executor = _DaemonExecutor(
         max_workers=min(len(admitted), dispatch_workers) or 1,
         thread_name_prefix="retry-worker",
-    ) as executor:
+    )
+    try:
         futures = {
             executor.submit(run_retry, plan, item, item_type, id_field): plan
             for plan, item, item_type, id_field in admitted
         }
-        for future in as_completed(futures):
+        for future in completed_futures(
+            futures,
+            stop_requested=lambda: (
+                shutdown_requested or _shutdown_controller.is_requested()
+            ),
+        ):
             plan = futures[future]
             worker_error: Exception | None = None
             try:
@@ -7942,6 +7168,13 @@ def _run_regeneration_retry_batch(
                     f"{exc}{RESET}"
                 )
                 stats["degraded"] = True
+    finally:
+        stopping = shutdown_requested or _shutdown_controller.is_requested()
+        executor.shutdown(
+            wait=stopping,
+            cancel_futures=True,
+            timeout=_shutdown_controller.remaining() if stopping else None,
+        )
 
     for plan in plans:
         if int(plan["id"]) not in submitted_plan_ids:
@@ -7965,33 +7198,17 @@ def _run_regeneration_retries(
 ) -> None:
     """Work-conserving retry admission without recursive refill calls."""
     del refill_round  # retained for compatibility with existing callers/tests
-    remaining_budget = max(
-        1,
-        int(
-            RETRY_BATCH_SIZE_PER_CYCLE
-            if submission_budget is None
-            else submission_budget
-        ),
+    RetryQueueProcessor(
+        batch_size=RETRY_BATCH_SIZE_PER_CYCLE,
+        run_batch=_run_regeneration_retry_batch,
+        shutdown_requested=lambda: shutdown_requested,
+        emit=print,
+    ).process(
+        stats,
+        submission_budget=submission_budget,
+        examined_plan_ids=examined_plan_ids,
+        series_admissions=series_admissions,
     )
-    examined = examined_plan_ids if examined_plan_ids is not None else set()
-    admissions = series_admissions if series_admissions is not None else {}
-    while remaining_budget > 0 and not shutdown_requested:
-        examined_before = len(examined)
-        submissions_used, plans_examined = _run_regeneration_retry_batch(
-            stats,
-            remaining_budget,
-            examined,
-            admissions,
-        )
-        remaining_budget = max(0, remaining_budget - submissions_used)
-        if remaining_budget <= 0 or plans_examined == 0:
-            break
-        if len(examined) <= examined_before:
-            break
-        print(
-            f"[RETRY] Refilling {remaining_budget} translation slot(s) after "
-            "reconciliation/no-progress outcomes"
-        )
 
 
 def run_cycle(cycle_num: int) -> bool:
@@ -8066,7 +7283,11 @@ def run_cycle(cycle_num: int) -> bool:
             finally:
                 _shared_capacity.release_current_translation()
 
-        with ThreadPoolExecutor(max_workers=dispatch_workers) as executor:
+        executor = _DaemonExecutor(
+            max_workers=dispatch_workers,
+            thread_name_prefix="translation-worker",
+        )
+        try:
             futures = {
                 executor.submit(
                     run_item_with_capacity_cleanup,
@@ -8075,10 +7296,12 @@ def run_cycle(cycle_num: int) -> bool:
                 (item, itype, ifield)
                 for item, itype, ifield in work
             }
-            for future in as_completed(futures):
-                if shutdown_requested:
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
+            for future in completed_futures(
+                futures,
+                stop_requested=lambda: (
+                    shutdown_requested or _shutdown_controller.is_requested()
+                ),
+            ):
                 try:
                     future.result()
                 except Exception as e:
@@ -8100,6 +7323,13 @@ def run_cycle(cycle_num: int) -> bool:
                                 "failed",
                                 reason="translation worker exception",
                             )
+        finally:
+            stopping = shutdown_requested or _shutdown_controller.is_requested()
+            executor.shutdown(
+                wait=stopping,
+                cancel_futures=True,
+                timeout=_shutdown_controller.remaining() if stopping else None,
+            )
 
     repair_results: list[RepairJobResult] = []
     pending_count = len(_pending_repairs)
@@ -8452,7 +7682,9 @@ def _run_legacy_quarantine_index(state_store: StateStore) -> dict:
         state=state_store,
         root=CLEANUP_QUARANTINE_DIR,
         inspect_artifact=inspect,
-        shutdown_requested=lambda: shutdown_requested,
+        shutdown_requested=lambda: (
+            shutdown_requested or _shutdown_controller.is_requested()
+        ),
     )
     result = indexer.run()
     print(
@@ -8517,9 +7749,54 @@ def _requeue_persisted_repairs(state_store: StateStore) -> int:
     return queued
 
 
-def main() -> int:
-    global _status_tracker, _completed_cycle
+def main(config=None) -> int:
+    global _status_tracker, _status_facade, _completed_cycle
+    if config is not None:
+        expected = {
+            "bazarr_url": config.bazarr_url,
+            "bazarr_api_key": config.bazarr_api_key,
+            "lingarr_url": config.lingarr_url,
+            "lingarr_api_key": config.lingarr_api_key,
+            "languages": tuple(config.languages),
+            "parallel_translates": config.parallel_translates,
+            "check_interval": config.check_interval,
+            "connect_timeout": config.connect_timeout,
+            "poll_interval": config.poll_interval,
+            "poll_timeout": config.poll_timeout,
+            "repair_shutdown_grace_seconds": (
+                config.repair_shutdown_grace_seconds
+            ),
+            "state_dir": Path(config.state_dir),
+            "quarantine_dir": Path(config.quarantine_dir),
+            "log_dir": Path(config.log_dir),
+        }
+        actual = {
+            "bazarr_url": BAZARR_URL,
+            "bazarr_api_key": BAZARR_API_KEY,
+            "lingarr_url": LINGARR_URL,
+            "lingarr_api_key": LINGARR_API_KEY,
+            "languages": tuple(LANGUAGES),
+            "parallel_translates": PARALLEL_TRANSLATES,
+            "check_interval": CHECK_INTERVAL,
+            "connect_timeout": CONNECT_TIMEOUT,
+            "poll_interval": POLL_INTERVAL,
+            "poll_timeout": POLL_TIMEOUT,
+            "repair_shutdown_grace_seconds": REPAIR_SHUTDOWN_GRACE_SECONDS,
+            "state_dir": Path(STATE_DIR),
+            "quarantine_dir": CLEANUP_QUARANTINE_DIR,
+            "log_dir": LOG_DIR,
+        }
+        if expected != actual:
+            mismatched = sorted(
+                key for key in expected if expected[key] != actual[key]
+            )
+            raise RuntimeError(
+                "runtime configuration was imported before composition; "
+                "construct Application before importing compatibility modules "
+                f"(mismatched: {', '.join(mismatched)})"
+            )
     state_store = _initialize_state_store()
+    _register_runtime_resources(state_store=state_store)
     backfilled_source_readiness = state_store.backfill_source_readiness()
     _completed_cycle = state_store.completed_cycle()
     recovered_repairs = state_store.recover_repair_jobs()
@@ -8559,11 +7836,13 @@ def main() -> int:
                 retention_days=STATUS_HISTORY_RETENTION_DAYS,
                 recent_limit=STATUS_RECENT_LIMIT,
             )
+            _status_facade = StatusFacade(_status_tracker)
             _refresh_status_diagnostics()
             try:
                 status_server, _ = start_status_server(
                     _status_tracker, STATUS_BIND, STATUS_PORT, LOG_DIR
                 )
+                _register_runtime_resources(status_server=status_server)
                 print(f"[STATUS] Dashboard listening on http://{STATUS_BIND}:{STATUS_PORT}")
             except OSError as exc:
                 print(
@@ -8572,6 +7851,7 @@ def main() -> int:
                 )
         except OSError as exc:
             _status_tracker = None
+            _status_facade = None
             print(
                 f"{YELLOW}[STATUS] Could not initialize persistent status state: "
                 f"{exc}; translations will continue{RESET}"
@@ -8736,6 +8016,9 @@ def main() -> int:
         nonlocal last_cleanup_scan
         last_cleanup_scan = time.monotonic()
 
+    existing_library = ExistingLibraryMaintenance(
+        _run_existing_cleanup_scan_safely
+    )
     maintenance = MaintenanceCoordinator((
         MaintenanceOperation(
             "retention",
@@ -8745,7 +8028,7 @@ def main() -> int:
             ),
             run=lambda: tracked_maintenance(
                 "retention", "retention interval elapsed",
-                run_retention_housekeeping,
+                lambda: run_retention(run_retention_housekeeping),
             ),
             mark_completed=mark_retention_completed,
         ),
@@ -8759,10 +8042,12 @@ def main() -> int:
             ),
             run=lambda: tracked_maintenance(
                 "existing_library_scan", "cleanup scan interval elapsed",
-                _run_existing_cleanup_scan_safely,
+                existing_library.run,
             ),
             mark_completed=mark_scan_completed,
         ),
+    ), stop_requested=lambda: (
+        shutdown_requested or _shutdown_controller.is_requested()
     ))
 
     def lifecycle_phase(phase: str, **values) -> None:
@@ -8803,18 +8088,16 @@ def main() -> int:
 
     controller.run(cycle, on_iteration=report_iteration)
 
-    _shutdown_repair_executor()
-    if status_server is not None:
-        status_server.shutdown()
-        status_server.server_close()
-    state_store.close()
     print("[INFO] Bazarr AutoTranslate stopped cleanly.")
     return 0
 
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        try:
+            sys.exit(main())
+        finally:
+            close_runtime_resources()
     except Exception as e:
         print(f"{RED}[FATAL] {e}{RESET}", file=sys.stderr)
         import traceback

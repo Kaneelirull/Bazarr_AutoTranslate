@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Protocol
 
 from .config import Config
 
@@ -22,14 +22,40 @@ class Application:
                 self.close_resources()
 
 
-def build_application(config: Config | None = None) -> Application:
+class RuntimeHost(Protocol):
+    def run(self) -> int: ...
+    def close(self) -> None: ...
+
+
+class PackagedRuntimeHost:
+    """Production host for the packaged runtime and its owned resources."""
+
+    def __init__(self, config: Config) -> None:
+        from . import runtime
+
+        self.config = config
+        self._runtime = runtime
+
+    def run(self) -> int:
+        return self._runtime.main(self.config)
+
+    def close(self) -> None:
+        self._runtime.close_runtime_resources()
+
+
+def build_application(
+    config: Config | None = None,
+    *,
+    host_factory: Callable[[Config], RuntimeHost] = PackagedRuntimeHost,
+) -> Application:
     """Construct the production application without executing it."""
     resolved = config or Config.from_env()
-    # Imported only while composing the compatibility-backed domain services;
-    # the executable itself and all resource lifetime remain owned here.
-    from . import runtime
-
-    return Application(config=resolved, run_lifecycle=runtime.main)
+    host = host_factory(resolved)
+    return Application(
+        config=resolved,
+        run_lifecycle=host.run,
+        close_resources=host.close,
+    )
 
 
 def main() -> int:

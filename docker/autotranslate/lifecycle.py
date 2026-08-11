@@ -1,9 +1,45 @@
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 from typing import Callable
 
 from .models import LifecyclePhase, MaintenanceResult
+
+
+class ShutdownController:
+    """One process-wide shutdown deadline shared by every lifecycle owner."""
+
+    def __init__(
+        self,
+        grace_seconds: float,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._grace_seconds = max(0.0, float(grace_seconds))
+        self._monotonic = monotonic
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._deadline: float | None = None
+
+    def request(self) -> bool:
+        """Request shutdown once and preserve the original deadline."""
+        with self._lock:
+            first_request = self._deadline is None
+            if first_request:
+                self._deadline = self._monotonic() + self._grace_seconds
+            self._event.set()
+            return first_request
+
+    def is_requested(self) -> bool:
+        return self._event.is_set()
+
+    def remaining(self) -> float:
+        with self._lock:
+            if self._deadline is None:
+                return self._grace_seconds
+            return max(0.0, self._deadline - self._monotonic())
 
 
 @dataclass
@@ -25,6 +61,8 @@ class LifecycleController:
         if healthy:
             self.advance_completed_cycle()
         self.refresh_diagnostics()
+        if self.shutdown_requested():
+            return healthy, MaintenanceResult(healthy=True)
         self.set_phase(LifecyclePhase.POST_CYCLE_MAINTENANCE.value)
         maintenance = self.run_maintenance()
         self.refresh_diagnostics()

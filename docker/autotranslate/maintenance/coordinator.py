@@ -17,14 +17,22 @@ class MaintenanceOperation:
 class MaintenanceCoordinator:
     """Runs due maintenance serially and leaves failed operations due."""
 
-    def __init__(self, operations: Iterable[MaintenanceOperation]):
+    def __init__(
+        self,
+        operations: Iterable[MaintenanceOperation],
+        *,
+        stop_requested: Callable[[], bool] = lambda: False,
+    ):
         self.operations = tuple(operations)
+        self.stop_requested = stop_requested
 
     def run_due(self) -> MaintenanceResult:
         attempted: list[str] = []
         failed: list[str] = []
         metrics: dict[str, object] = {}
         for operation in self.operations:
+            if self.stop_requested():
+                break
             if not operation.due():
                 continue
             attempted.append(operation.name)
@@ -35,6 +43,8 @@ class MaintenanceCoordinator:
                 metrics[f"{operation.name}Failure"] = type(exc).__name__
                 continue
             operation.mark_completed()
+            if self.stop_requested():
+                break
         return MaintenanceResult(
             healthy=not failed,
             attempted=tuple(attempted),

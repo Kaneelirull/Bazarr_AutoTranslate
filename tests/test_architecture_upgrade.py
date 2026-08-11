@@ -3,7 +3,10 @@ import ast
 import sqlite3
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
 
 
@@ -11,13 +14,26 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "docker"))
 
 from autotranslate.config import Config, ConfigError  # noqa: E402
-from autotranslate.lifecycle import LifecycleController  # noqa: E402
+from autotranslate.app import build_application  # noqa: E402
+from autotranslate.lifecycle import LifecycleController, ShutdownController  # noqa: E402
 from autotranslate.persistence.migrations import LATEST_SCHEMA_VERSION  # noqa: E402
-from autotranslate.scheduling.capacity import CapacityCoordinator  # noqa: E402
 from autotranslate.scheduling.locks import KeyedLockRegistry  # noqa: E402
+from autotranslate.scheduling.locks import ArtifactAccessCoordinator  # noqa: E402
 from autotranslate.scheduling.repairs import RepairCoordinator  # noqa: E402
+from autotranslate.scheduling.retries import RetryQueueProcessor  # noqa: E402
+from autotranslate.scheduling.executor import (  # noqa: E402
+    DaemonExecutor,
+    completed_futures,
+)
 from autotranslate.models import MaintenanceResult  # noqa: E402
+from autotranslate.maintenance.coordinator import (  # noqa: E402
+    MaintenanceCoordinator,
+    MaintenanceOperation,
+)
+from autotranslate.status.facade import sanitize_public  # noqa: E402
+from autotranslate.subtitles.core import purge_old_files  # noqa: E402
 from autotranslate.services.lingarr import (  # noqa: E402
+    LingarrClient,
     ProviderResponseError,
     parse_cue_response,
 )
@@ -39,6 +55,108 @@ def make_srt(*texts: str) -> str:
 
 
 class ArchitectureUpgradeTests(unittest.TestCase):
+    def test_production_runtime_has_no_unbounded_standard_executor(self):
+        runtime = (
+            REPO_ROOT / "docker" / "autotranslate" / "runtime.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("ThreadPoolExecutor", runtime)
+        self.assertNotIn("as_completed", runtime)
+
+    def test_daemon_executor_drain_is_interruptible(self):
+        release = threading.Event()
+        executor = DaemonExecutor(1, "shutdown-test")
+        future = executor.submit(release.wait)
+        started = time.monotonic()
+        completed = list(completed_futures(
+            [future], stop_requested=lambda: True, poll_seconds=0.01
+        ))
+        elapsed = time.monotonic() - started
+        executor.shutdown(wait=False, cancel_futures=True)
+        release.set()
+        self.assertEqual(completed, [])
+        self.assertLess(elapsed, 0.5)
+
+    def test_daemon_executor_join_obeys_shared_deadline(self):
+        release = threading.Event()
+        running = threading.Event()
+        executor = DaemonExecutor(1, "deadline-test")
+        executor.submit(lambda: running.set() or release.wait())
+        self.assertTrue(running.wait(1))
+        started = time.monotonic()
+        executor.shutdown(wait=True, cancel_futures=True, timeout=0.02)
+        elapsed = time.monotonic() - started
+        release.set()
+        self.assertLess(elapsed, 0.5)
+
+    def test_zero_retry_budget_never_claims_work(self):
+        calls = []
+        RetryQueueProcessor(
+            batch_size=5,
+            run_batch=lambda *_args: calls.append(True) or (1, 1),
+            shutdown_requested=lambda: False,
+        ).process({}, submission_budget=0)
+        self.assertEqual(calls, [])
+
+    def test_lingarr_client_rejects_malformed_collection_shapes(self):
+        class Response:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return []
+
+        events = []
+        client = LingarrClient(
+            "http://lingarr",
+            {},
+            request_json=lambda *_args, **_kwargs: [],
+            get=lambda *_args, **_kwargs: Response(),
+            post=lambda *_args, **_kwargs: Response(),
+            connect_timeout=10,
+            emit=events.append,
+        )
+        self.assertEqual(client.media_cache(), ({}, {}))
+        self.assertIsNone(client.get_job(7))
+        self.assertTrue(any("response must be an object" in event for event in events))
+
+    def test_status_facade_redacts_private_keys_paths_and_objects(self):
+        safe = sanitize_public({
+            "source_path": r"C:\\media\\private.srt",
+            "requestBody": {"subtitleLine": "private dialogue"},
+            "reason": RuntimeError("secret response"),
+            "metrics": {"completed": 2},
+        })
+        encoded = json.dumps(safe)
+        self.assertNotIn("private.srt", encoded)
+        self.assertNotIn("private dialogue", encoded)
+        self.assertNotIn("secret response", encoded)
+        self.assertEqual(safe["metrics"]["completed"], 2)
+
+    def test_maintenance_stops_admitting_operations_after_shutdown(self):
+        events = []
+        stopped = {"value": False}
+
+        def first():
+            events.append("first")
+            stopped["value"] = True
+            return {}
+
+        coordinator = MaintenanceCoordinator(
+            (
+                MaintenanceOperation("first", lambda: True, first, lambda: None),
+                MaintenanceOperation(
+                    "second", lambda: True,
+                    lambda: events.append("second") or {}, lambda: None,
+                ),
+            ),
+            stop_requested=lambda: stopped["value"],
+        )
+        result = coordinator.run_due()
+        self.assertEqual(events, ["first"])
+        self.assertEqual(result.attempted, ("first",))
+
     def test_keyed_lock_registry_evicts_unique_paths(self):
         registry = KeyedLockRegistry()
         for index in range(1000):
@@ -46,43 +164,67 @@ class ArchitectureUpgradeTests(unittest.TestCase):
                 self.assertGreaterEqual(registry.size, 1)
         self.assertEqual(registry.size, 0)
 
-    def test_repair_coordinator_drains_only_its_scope(self):
+    def test_retention_waits_for_active_artifact_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "donor.srt"
+            artifact.write_text("private donor", encoding="utf-8")
+            coordinator = ArtifactAccessCoordinator()
+            started = threading.Event()
+            finished = threading.Event()
+
+            def retain():
+                started.set()
+                purge_old_files(
+                    directory,
+                    1,
+                    now_timestamp=time.time() + (2 * 86400),
+                    access_coordinator=coordinator,
+                )
+                finished.set()
+
+            with coordinator.hold(artifact):
+                worker = threading.Thread(target=retain)
+                worker.start()
+                self.assertTrue(started.wait(1))
+                self.assertFalse(finished.wait(0.05))
+                self.assertTrue(artifact.exists())
+            worker.join(1)
+            self.assertTrue(finished.is_set())
+            self.assertFalse(artifact.exists())
+            self.assertEqual(coordinator.registry_size, 0)
+
+    def test_repair_coordinator_persists_before_registration_and_dedupes(self):
+        events = []
+
         class State:
-            def __init__(self):
-                self.next_id = 0
-                self.states = {}
+            def enqueue_repair_job(self, **values):
+                events.append(("persist", values["dedupe_key"]))
+                return 7
 
-            def enqueue_repair_job(self, **_values):
-                self.next_id += 1
-                self.states[self.next_id] = "queued"
-                return self.next_id
-
-            def transition_repair_job(self, job_id, state, expected_states=(), **_values):
-                if expected_states and self.states[job_id] not in expected_states:
-                    return False
-                self.states[job_id] = state
-                return True
-
-            def repair_jobs_for_restart(self):
-                return [
-                    {"id": job_id} for job_id, state in self.states.items()
-                    if state == "persisted_for_restart"
-                ]
-
-        state = State()
-        repairs = RepairCoordinator(
-            state, CapacityCoordinator(2), workers=2,
-            shutdown_grace_seconds=1,
+        repairs = RepairCoordinator(state_provider=State)
+        self.assertTrue(repairs.reserve(("one",)))
+        self.assertFalse(repairs.reserve(("one",)))
+        self.assertEqual(
+            repairs.persist(dedupe_key="one", target_language="et"), 7
         )
-        repairs.submit("cycle-1", "one", {"target_language": "et"}, lambda: "one")
-        repairs.submit("scan-1", "two", {"target_language": "sv"}, lambda: "two")
-        cycle = repairs.drain("cycle-1")
-        self.assertEqual(cycle.completed, 1)
-        self.assertEqual(cycle.results, ("one",))
-        scan = repairs.drain("scan-1")
-        self.assertEqual(scan.completed, 1)
-        self.assertEqual(scan.results, ("two",))
-        self.assertEqual(repairs.shutdown(), 0)
+        first = Future()
+        second = Future()
+        first.set_result("one")
+        second.set_result("two")
+        repairs.register(first, {"key": ("one",)})
+        self.assertTrue(repairs.reserve(("two",)))
+        repairs.register(second, {"key": ("two",)})
+        completed = list(
+            repairs.completed(
+                [first, second], stop_requested=lambda: False
+            )
+        )
+        self.assertEqual(set(completed), {first, second})
+        repairs.take(first)
+        repairs.take(second)
+        self.assertEqual(repairs.active_count, 0)
+        self.assertEqual(repairs.keys, set())
+        self.assertEqual(events, [("persist", "one")])
 
     def test_legacy_modules_are_thin_wrappers_and_package_does_not_import_them(self):
         docker_root = REPO_ROOT / "docker"
@@ -120,6 +262,32 @@ class ArchitectureUpgradeTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             Config.from_env({"LINGARR_URL": "lingarr:8080"})
 
+    def test_application_owns_host_lifecycle_and_cleanup(self):
+        events = []
+
+        class Host:
+            def __init__(self, config):
+                events.append(("build", config.bazarr_url))
+
+            def run(self):
+                events.append(("run", None))
+                return 7
+
+            def close(self):
+                events.append(("close", None))
+
+        config = Config.from_env({
+            "BAZARR_URL": "bazarr:6767",
+            "BAZARR_API_KEY": "secret",
+            "LINGARR_URL": "lingarr:8080",
+        })
+        application = build_application(config, host_factory=Host)
+        self.assertEqual(application.run(), 7)
+        self.assertEqual(
+            events,
+            [("build", "http://bazarr:6767"), ("run", None), ("close", None)],
+        )
+
     def test_lingarr_cue_parser_accepts_contract_and_classifies_shape(self):
         self.assertEqual(parse_cue_response(" Tere "), "Tere")
         for key in ("translatedSubtitle", "translatedLine", "translation", "text"):
@@ -148,6 +316,45 @@ class ArchitectureUpgradeTests(unittest.TestCase):
         self.assertFalse(maintenance.healthy)
         self.assertLess(events.index(("advance", 1)), events.index(("maintenance", None)))
         self.assertEqual(events[-1], ("sleep", 1200))
+
+    def test_lifecycle_skips_maintenance_when_cycle_requests_shutdown(self):
+        events = []
+        stopped = {"value": False}
+
+        def run_cycle(_cycle):
+            events.append("cycle")
+            stopped["value"] = True
+            return False
+
+        controller = LifecycleController(
+            run_cycle=run_cycle,
+            advance_completed_cycle=lambda: events.append("advance") or 1,
+            run_maintenance=lambda: (
+                events.append("maintenance") or MaintenanceResult(True)
+            ),
+            set_phase=lambda phase, **_kwargs: events.append(phase),
+            refresh_diagnostics=lambda: events.append("diagnostics"),
+            sleep_interruptibly=lambda _seconds: events.append("sleep") or True,
+            check_interval=1200,
+            shutdown_requested=lambda: stopped["value"],
+        )
+
+        healthy, maintenance = controller.run_iteration(1)
+
+        self.assertFalse(healthy)
+        self.assertTrue(maintenance.healthy)
+        self.assertNotIn("maintenance", events)
+        self.assertNotIn("sleep", events)
+
+    def test_shutdown_controller_preserves_first_deadline(self):
+        clock = {"now": 10.0}
+        shutdown = ShutdownController(30, monotonic=lambda: clock["now"])
+        self.assertTrue(shutdown.request())
+        clock["now"] = 25.0
+        self.assertFalse(shutdown.request())
+        self.assertEqual(shutdown.remaining(), 15.0)
+        clock["now"] = 50.0
+        self.assertEqual(shutdown.remaining(), 0.0)
 
     def test_schema_ledger_is_additive_and_legacy_marker_stays_rollback_safe(self):
         with tempfile.TemporaryDirectory() as directory:

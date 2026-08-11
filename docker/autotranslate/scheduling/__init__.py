@@ -1,6 +1,6 @@
 from .capacity import CapacityCoordinator, CapacityToken
 from .locks import ArtifactAccessCoordinator, KeyedLockRegistry
-from .repairs import RepairCoordinator, RepairDrainResult
+from .repairs import RepairCoordinator
 
 __all__ = [
     "ArtifactAccessCoordinator",
@@ -8,5 +8,4 @@ __all__ = [
     "CapacityToken",
     "KeyedLockRegistry",
     "RepairCoordinator",
-    "RepairDrainResult",
 ]
