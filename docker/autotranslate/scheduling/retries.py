@@ -1,48 +1,41 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 
 @dataclass
 class RetryQueueProcessor:
-    """Work-conserving durable retry admission."""
+    """Work-conserving retry refill owned by the scheduling layer."""
 
-    state: Any
-    completed_cycle: Callable[[], int]
     batch_size: int
-    per_series_limit: int
+    run_batch: Callable[[dict, int, set[int], dict[str, int]], tuple[int, int]]
+    shutdown_requested: Callable[[], bool]
+    emit: Callable[[str], None] = print
 
-    def process(self, examine: Callable[[dict], str]) -> dict[str, int]:
-        metrics = {"examined": 0, "reconciled": 0, "translationRequired": 0, "submitted": 0, "noProgress": 0}
-        submission_budget = max(1, int(self.batch_size))
-        seen: set[int] = set()
-        while metrics["submitted"] < submission_budget:
-            claimed = self.state.claim_due_retry_plans(
-                self.completed_cycle(), limit=1,
-                per_series_limit=max(1, int(self.per_series_limit)),
+    def process(
+        self,
+        stats: dict,
+        *,
+        submission_budget: int | None = None,
+        examined_plan_ids: set[int] | None = None,
+        series_admissions: dict[str, int] | None = None,
+    ) -> None:
+        remaining = max(
+            0,
+            int(self.batch_size if submission_budget is None else submission_budget),
+        )
+        examined = examined_plan_ids if examined_plan_ids is not None else set()
+        admissions = series_admissions if series_admissions is not None else {}
+        while remaining > 0 and not self.shutdown_requested():
+            examined_before = len(examined)
+            submissions, plans = self.run_batch(
+                stats, remaining, examined, admissions
             )
-            if not claimed:
+            remaining = max(0, remaining - submissions)
+            if remaining <= 0 or plans == 0 or len(examined) <= examined_before:
                 break
-            plan = claimed[0]
-            if plan["id"] in seen:
-                break
-            seen.add(plan["id"])
-            metrics["examined"] += 1
-            self.state.record_retry_admission(plan["id"], self.completed_cycle(), "examined")
-            classification = examine(plan)
-            if classification == "submitted":
-                metrics["translationRequired"] += 1
-                metrics["submitted"] += 1
-                self.state.record_retry_admission(plan["id"], self.completed_cycle(), "submitted")
-            elif classification == "reconciled":
-                metrics["reconciled"] += 1
-                self.state.record_retry_admission(plan["id"], self.completed_cycle(), "reconciled")
-            else:
-                metrics["noProgress"] += 1
-                self.state.record_retry_admission(plan["id"], self.completed_cycle(), "no_progress", classification)
-                self.state.reschedule_retry_no_progress(
-                    plan["id"], completed_cycle=self.completed_cycle(),
-                    deferral_class=classification, reason=classification,
-                )
-        return metrics
+            self.emit(
+                f"[RETRY] Refilling {remaining} translation slot(s) after "
+                "reconciliation/no-progress outcomes"
+            )
