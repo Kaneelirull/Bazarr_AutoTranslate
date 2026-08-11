@@ -28,19 +28,19 @@ class RuntimeHost(Protocol):
 
 
 class PackagedRuntimeHost:
-    """Production host for the packaged runtime and its owned resources."""
+    """Production host assembled from feature-owned runtime modules."""
 
     def __init__(self, config: Config) -> None:
-        from . import runtime
+        from .runtime_host import ProductionRuntimeHost
 
         self.config = config
-        self._runtime = runtime
+        self._host = ProductionRuntimeHost(config)
 
     def run(self) -> int:
-        return self._runtime.main(self.config)
+        return self._host.run()
 
     def close(self) -> None:
-        self._runtime.close_runtime_resources()
+        self._host.close()
 
 
 def build_application(

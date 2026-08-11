@@ -250,6 +250,35 @@ class ArchitectureUpgradeTests(unittest.TestCase):
                     f"{module} imports outward compatibility module(s): {imported}",
                 )
 
+    def test_production_composition_does_not_delegate_to_compatibility_runtime(self):
+        package_root = REPO_ROOT / "docker" / "autotranslate"
+        app_source = (package_root / "app.py").read_text(encoding="utf-8")
+        host_source = (package_root / "runtime_host.py").read_text(encoding="utf-8")
+        self.assertNotIn("from . import runtime", app_source)
+        self.assertNotIn("from . import runtime\n", host_source)
+        self.assertNotIn("from .runtime import", host_source)
+        self.assertLessEqual(
+            len((package_root / "runtime.py").read_text(encoding="utf-8").splitlines()),
+            35,
+        )
+        for compatibility in (
+            package_root / "persistence" / "state_store.py",
+            package_root / "status" / "dashboard.py",
+            package_root / "subtitles" / "core.py",
+        ):
+            self.assertLessEqual(
+                len(compatibility.read_text(encoding="utf-8").splitlines()),
+                35,
+                compatibility,
+            )
+        production_sources = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in package_root.glob("runtime_*.py")
+            if path.name not in {"runtime_host.py"}
+        )
+        self.assertNotIn(".status.dashboard", production_sources)
+        self.assertNotIn(".subtitles.core", production_sources)
+
     def test_typed_config_preserves_required_inputs_and_shutdown_default(self):
         config = Config.from_env({
             "BAZARR_URL": "bazarr:6767/",
