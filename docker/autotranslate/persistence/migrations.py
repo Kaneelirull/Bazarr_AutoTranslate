@@ -15,6 +15,8 @@ from typing import Iterable, Iterator
 
 from .common import ACTIVE_RETRY_STATES, SCHEMA_VERSION, StateStoreError, _path_key, _utc_iso
 
+LATEST_SCHEMA_VERSION = SCHEMA_VERSION
+
 class MigrationsRepositoryMixin:
     def _migrate_schema(self) -> None:
         # ``Connection.executescript`` commits implicitly, which used to leave

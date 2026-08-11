@@ -1,8 +1,4 @@
-"""Existing-library maintenance adapters.
-
-The production scanner is still exposed by the compatibility module while its
-call site is migrated to :class:`MaintenanceCoordinator`.
-"""
+"""Existing-library maintenance adapter for coordinated production scans."""
 
 from __future__ import annotations
 
