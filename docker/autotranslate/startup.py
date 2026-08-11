@@ -152,42 +152,72 @@ def main(config=None) -> int:
     print(f'  Resubmit cooldown : {_runtime.RESUBMIT_COOLDOWN}s')
     print(f"  Debug mode        : {('ON' if _runtime.DEBUG else 'off')}")
     _runtime.sys.stdout.flush()
-    langs = _runtime.lingarr_get_languages()
-    if langs:
-        mappings = []
-        for language in langs:
-            targets = ', '.join(language.targets) if language.targets else 'none'
-            mappings.append(f'{language.name} ({language.code} -> {targets})')
-        print(f"[INFO] Lingarr supports languages: {'; '.join(mappings)}")
-    print('[INFO] Waiting 30s for services to start...')
-    _runtime._status_set_phase('startup_wait')
-    _runtime.sys.stdout.flush()
-    for _ in range(30):
+    startup_job_id = _runtime._status_create_maintenance(
+        'startup', {'title': 'Service startup'}, state='startup_wait'
+    )
+
+    def startup_phase(phase: str) -> None:
+        _runtime._status_set_phase(phase)
+        _runtime._status_update_maintenance(startup_job_id, phase)
+
+    def stop_during_startup() -> int:
+        _runtime._status_complete_maintenance(
+            startup_job_id, 'deferred',
+            reason='shutdown requested during startup',
+        )
+        print('[INFO] Bazarr AutoTranslate stopped during startup.')
+        return 0
+
+    try:
+        startup_phase('startup_wait')
+        langs = _runtime.lingarr_get_languages()
+        if langs:
+            mappings = []
+            for language in langs:
+                targets = ', '.join(language.targets) if language.targets else 'none'
+                mappings.append(f'{language.name} ({language.code} -> {targets})')
+            print(f"[INFO] Lingarr supports languages: {'; '.join(mappings)}")
+        print('[INFO] Waiting 30s for services to start...')
+        _runtime.sys.stdout.flush()
+        for _ in range(30):
+            if _runtime.shutdown_requested:
+                break
+            _runtime.time.sleep(1)
         if _runtime.shutdown_requested:
-            break
-        _runtime.time.sleep(1)
-    if not _runtime.shutdown_requested:
+            return stop_during_startup()
+
         print('[INFO] Running initial Bazarr subtitle synchronization...')
-        _runtime._status_set_phase('startup_sync')
-        _runtime.trigger_bazarr_sync(True, True)
-        _runtime.wait_for_bazarr_sync(True, True, _runtime.SYNC_TIMEOUT)
-    if not _runtime.shutdown_requested:
+        startup_phase('startup_sync')
+        _runtime._tracked_bazarr_sync(True, True, _runtime.SYNC_TIMEOUT)
+        if _runtime.shutdown_requested:
+            return stop_during_startup()
+
         startup_repairs = _runtime._requeue_persisted_repairs(state_store)
         if startup_repairs:
             print(f'[REPAIR] Requeued {startup_repairs} durable startup repair(s)')
-            _runtime._status_set_phase('repair_drain')
+            startup_phase('repair_drain')
             _runtime._drain_pending_repairs({})
-    _runtime._status_set_phase('startup_cleanup')
-    _runtime.run_retention_housekeeping()
-    last_retention_check = _runtime.time.monotonic()
-    cycle = _runtime._completed_cycle + 1
-    _runtime._cycle_suppressions.begin_cycle(str(cycle))
-    last_cleanup_scan = 0.0
-    if not _runtime.shutdown_requested and _runtime.CLEANUP_SCAN_EXISTING:
-        _runtime._status_set_phase('startup_cleanup')
-        startup_cleanup = _runtime._run_existing_cleanup_scan_safely()
-        if startup_cleanup is not None:
-            last_cleanup_scan = _runtime.time.monotonic()
+        if _runtime.shutdown_requested:
+            return stop_during_startup()
+
+        startup_phase('startup_cleanup')
+        _runtime._run_retention_housekeeping_tracked()
+        last_retention_check = _runtime.time.monotonic()
+        cycle = _runtime._completed_cycle + 1
+        _runtime._cycle_suppressions.begin_cycle(str(cycle))
+        last_cleanup_scan = 0.0
+        if _runtime.CLEANUP_SCAN_EXISTING:
+            startup_cleanup = _runtime._run_existing_cleanup_scan_safely()
+            if startup_cleanup is not None:
+                last_cleanup_scan = _runtime.time.monotonic()
+        if _runtime.shutdown_requested:
+            return stop_during_startup()
+    except Exception:
+        _runtime._status_complete_maintenance(
+            startup_job_id, 'failed', reason='startup failed'
+        )
+        raise
+    _runtime._status_complete_maintenance(startup_job_id, 'accepted')
 
     def run_cycle_owned(cycle_number: int) -> bool:
         _runtime._cycle_suppressions.begin_cycle(str(cycle_number))
@@ -219,7 +249,7 @@ def main(config=None) -> int:
         nonlocal last_cleanup_scan
         last_cleanup_scan = _runtime.time.monotonic()
     existing_library = _runtime.ExistingLibraryMaintenance(_runtime._run_existing_cleanup_scan_safely)
-    maintenance = _runtime.MaintenanceCoordinator((_runtime.MaintenanceOperation('retention', due=lambda: _runtime.time.monotonic() - last_retention_check >= _runtime.RETENTION_CHECK_INTERVAL, run=lambda: tracked_maintenance('retention', 'retention interval elapsed', lambda: _runtime.run_retention(_runtime.run_retention_housekeeping)), mark_completed=mark_retention_completed), _runtime.MaintenanceOperation('existing_library_scan', due=lambda: bool(_runtime.CLEANUP_SCAN_EXISTING and last_cleanup_scan > 0 and (_runtime.time.monotonic() - last_cleanup_scan >= _runtime.CLEANUP_SCAN_INTERVAL)), run=lambda: tracked_maintenance('existing_library_scan', 'cleanup scan interval elapsed', existing_library.run), mark_completed=mark_scan_completed)), stop_requested=lambda: _runtime.shutdown_requested or _runtime._shutdown_controller.is_requested())
+    maintenance = _runtime.MaintenanceCoordinator((_runtime.MaintenanceOperation('retention', due=lambda: _runtime.time.monotonic() - last_retention_check >= _runtime.RETENTION_CHECK_INTERVAL, run=lambda: tracked_maintenance('retention', 'retention interval elapsed', lambda: _runtime.run_retention(_runtime._run_retention_housekeeping_tracked)), mark_completed=mark_retention_completed), _runtime.MaintenanceOperation('existing_library_scan', due=lambda: bool(_runtime.CLEANUP_SCAN_EXISTING and last_cleanup_scan > 0 and (_runtime.time.monotonic() - last_cleanup_scan >= _runtime.CLEANUP_SCAN_INTERVAL)), run=lambda: tracked_maintenance('existing_library_scan', 'cleanup scan interval elapsed', existing_library.run), mark_completed=mark_scan_completed)), stop_requested=lambda: _runtime.shutdown_requested or _runtime._shutdown_controller.is_requested())
 
     def lifecycle_phase(phase: str, **values) -> None:
         if phase == 'cooldown':

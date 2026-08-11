@@ -502,7 +502,7 @@ def _run_existing_cleanup_scan_safely() -> dict | None:
 
 def run_retention_housekeeping() -> dict:
     from ..subtitles.library import purge_old_files
-    current_log = [_runtime._app_log_sink.current_path] if _runtime._app_log_sink.current_path is not None else []
+    current_log = [_runtime.current_log_path] if _runtime.current_log_path is not None else []
     protected = _runtime._get_validation_state().protected_artifact_paths()
     quarantine_removed = purge_old_files(_runtime.CLEANUP_QUARANTINE_DIR, _runtime.QUARANTINE_ARTIFACT_RETENTION_DAYS, exclude=protected, access_coordinator=_runtime._artifact_access)
     logs_removed = purge_old_files(_runtime.LOG_DIR, _runtime.RETENTION_DAYS, exclude=current_log)
@@ -515,6 +515,21 @@ def run_retention_housekeeping() -> dict:
     result = {'quarantine_files': len(quarantine_removed), 'log_files': len(logs_removed), 'state_entries': state_removed, 'status_events': _runtime._status_compact_history(), 'manual_scans': pending_scans['dispatched']}
     print(f"[RETENTION] Removed {result['quarantine_files']} quarantine file(s), {result['log_files']} log file(s), and {result['state_entries']} validation state record(s) plus {result['status_events']} status event(s) beyond their retention window")
     return result
+
+def _run_retention_housekeeping_tracked() -> dict:
+    job_id = _runtime._status_create_maintenance(
+        'retention', {'title': 'Retention housekeeping'}, state='retaining'
+    )
+    try:
+        result = run_retention_housekeeping()
+    except Exception:
+        _runtime._status_complete_maintenance(
+            job_id, 'failed', reason='retention housekeeping failed'
+        )
+        raise
+    _runtime._status_complete_maintenance(job_id, 'accepted')
+    return result
+
 EXPORTS = {
     name: globals()[name] for name in (
         '_scan_undersized_sidecars', '_video_sidecars',
@@ -523,6 +538,6 @@ EXPORTS = {
         '_managed_sidecar_is_valid', '_apply_prune_action',
         'run_extra_sidecar_prune', 'run_existing_cleanup_scan',
         '_run_existing_cleanup_scan_safely', 'run_retention_housekeeping',
+        '_run_retention_housekeeping_tracked',
     )
 }
-

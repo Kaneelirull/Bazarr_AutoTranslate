@@ -71,8 +71,14 @@ def wait_for_bazarr_sync(had_episodes: bool, had_movies: bool, timeout: int) -> 
 def _tracked_bazarr_sync(had_episodes: bool, had_movies: bool, timeout: int) -> bool:
     scope = 'Series and movies' if had_episodes and had_movies else 'Series' if had_episodes else 'Movies'
     job_id = _runtime._status_create_maintenance('bazarr_sync', {'title': scope}, state='synchronizing')
-    _runtime.trigger_bazarr_sync(had_episodes, had_movies)
-    success = _runtime.wait_for_bazarr_sync(had_episodes, had_movies, timeout)
+    try:
+        _runtime.trigger_bazarr_sync(had_episodes, had_movies)
+        success = _runtime.wait_for_bazarr_sync(had_episodes, had_movies, timeout)
+    except Exception:
+        _runtime._status_complete_maintenance(
+            job_id, 'failed', reason='Bazarr synchronization failed'
+        )
+        raise
     _runtime._status_complete_maintenance(job_id, 'accepted' if success else 'failed', reason=None if success else 'Bazarr synchronization did not complete')
     return success
 
@@ -292,4 +298,3 @@ EXPORTS = {
         '_recover_failed_lingarr_job',
     )
 }
-

@@ -838,6 +838,41 @@ class StatusDashboardTests(unittest.TestCase):
             )
             self.assertEqual(finished["history"]["1h"]["accepted"], 0)
 
+    def test_startup_job_remains_active_through_backend_lifecycle_states(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = StatusTracker(
+                Path(directory) / "status.json",
+                Path(directory) / "history.jsonl",
+            )
+            job_id = tracker.create_maintenance_job(
+                "startup", {"title": "Service startup"}, state="startup_wait"
+            )
+            for state in (
+                "startup_sync", "repair_drain", "startup_cleanup",
+            ):
+                self.assertTrue(tracker.transition_maintenance(job_id, state))
+                active = tracker.snapshot()["maintenance"]["activeJobs"]
+                self.assertEqual(len(active), 1)
+                self.assertEqual(active[0]["operation"], "startup")
+                self.assertEqual(active[0]["state"], state)
+            retention_id = tracker.create_maintenance_job(
+                "retention", {"title": "Retention housekeeping"},
+                state="retaining",
+            )
+            active = tracker.snapshot()["maintenance"]["activeJobs"]
+            self.assertEqual(
+                [(row["operation"], row["state"]) for row in active],
+                [("startup", "startup_cleanup"), ("retention", "retaining")],
+            )
+            self.assertTrue(tracker.complete_maintenance(retention_id, "accepted"))
+            self.assertTrue(tracker.complete_maintenance(job_id, "accepted"))
+            snapshot = tracker.snapshot()
+            self.assertEqual(snapshot["maintenance"]["activeJobs"], [])
+            self.assertEqual(
+                snapshot["maintenance"]["recentOutcomes"][0]["outcome"],
+                "accepted",
+            )
+
     def test_maintenance_restart_recovers_as_interrupted_once(self):
         with tempfile.TemporaryDirectory() as directory:
             snapshot_path = Path(directory) / "status.json"
@@ -959,6 +994,17 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn(".job-progress progress", stylesheet)
         self.assertIn(".recovery-attention", stylesheet)
         self.assertIn(".diagnostics-panel", stylesheet)
+        render = script[script.index('root.innerHTML = `<div class="dashboard-shell">'):]
+        overview_position = render.index("renderOverview")
+        active_position = render.index('panelHeader("Active now"')
+        recovery_position = render.index("renderRecoveryAttention")
+        retry_position = render.index("renderRetryPlans")
+        self.assertLess(overview_position, active_position)
+        self.assertLess(active_position, recovery_position)
+        self.assertLess(active_position, retry_position)
+        self.assertIn('startup: "Startup"', script)
+        self.assertIn('retention: "Retention"', script)
+        self.assertIn('retaining: "Applying retention"', script)
 
     def test_dashboard_assets_render_accessible_validation_observations(self):
         script = (

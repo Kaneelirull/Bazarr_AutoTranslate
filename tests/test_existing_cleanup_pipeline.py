@@ -29,6 +29,8 @@ from autotranslate.production import load_runtime  # noqa: E402
 import autotranslate.subtitles.library as cleanup  # noqa: E402
 import autotranslate.subtitles.foundation as subtitle_foundation  # noqa: E402
 import autotranslate.subtitles.repair as subtitle_repair  # noqa: E402
+import autotranslate.composition as composition  # noqa: E402
+import autotranslate.maintenance.runtime as maintenance_runtime  # noqa: E402
 from autotranslate.subtitles.library import ValidationStateStore  # noqa: E402
 from autotranslate.persistence.state_store import StateStore  # noqa: E402
 from autotranslate.subtitles.foundation import ValidationIssue, ValidationReport  # noqa: E402
@@ -61,6 +63,77 @@ def make_timed_srt(cue_count: int, final_second: int, text: str = "Dialogue line
 class ExistingCleanupPipelineTests(unittest.TestCase):
     def setUp(self):
         app._cycle_suppressions.begin_cycle(self.id())
+
+    def test_retention_uses_owned_logging_path_without_legacy_sink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log_dir = root / "logs"
+            quarantine_dir = root / "quarantine"
+            current_log = log_dir / "bazarr-autotranslate-current.log"
+            validation_state = SimpleNamespace(
+                protected_artifact_paths=lambda: {root / "protected.srt"},
+                prune_older_than=lambda _days: 3,
+            )
+            calls = []
+
+            def purge(path, days, **kwargs):
+                calls.append((Path(path), days, kwargs))
+                return []
+
+            with (
+                patch.object(
+                    composition, "_logging_resource",
+                    SimpleNamespace(current_path=current_log),
+                ),
+                patch.multiple(
+                    app,
+                    LOG_DIR=log_dir,
+                    CLEANUP_QUARANTINE_DIR=quarantine_dir,
+                    RETENTION_DAYS=30,
+                    QUARANTINE_ARTIFACT_RETENTION_DAYS=10,
+                    _manual_review_service=None,
+                ),
+                patch.object(app, "_get_validation_state", return_value=validation_state),
+                patch.object(app, "_status_compact_history", return_value=2),
+                patch.object(cleanup, "purge_old_files", side_effect=purge),
+            ):
+                result = app.run_retention_housekeeping()
+
+            self.assertEqual(calls[1][0], log_dir)
+            self.assertEqual(calls[1][2]["exclude"], [current_log])
+            self.assertEqual(result["state_entries"], 3)
+            self.assertEqual(result["status_events"], 2)
+
+    def test_tracked_retention_completes_or_fails_status_job(self):
+        with (
+            patch.object(app, "_status_create_maintenance", return_value="retention-job") as create,
+            patch.object(app, "_status_complete_maintenance") as complete,
+            patch.object(
+                maintenance_runtime, "run_retention_housekeeping",
+                return_value={"log_files": 0},
+            ),
+        ):
+            self.assertEqual(
+                app._run_retention_housekeeping_tracked(), {"log_files": 0}
+            )
+        create.assert_called_once_with(
+            "retention", {"title": "Retention housekeeping"}, state="retaining"
+        )
+        complete.assert_called_once_with("retention-job", "accepted")
+
+        with (
+            patch.object(app, "_status_create_maintenance", return_value="retention-job"),
+            patch.object(app, "_status_complete_maintenance") as complete,
+            patch.object(
+                maintenance_runtime, "run_retention_housekeeping",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                app._run_retention_housekeeping_tracked()
+        complete.assert_called_once_with(
+            "retention-job", "failed", reason="retention housekeeping failed"
+        )
 
     def test_repair_drain_is_interruptible_after_shutdown(self):
         pending = Future()

@@ -114,6 +114,7 @@
       scanning: "Scanning library",
       waiting_repair_completion: "Waiting for repairs",
       synchronizing: "Synchronizing Bazarr",
+      retaining: "Applying retention",
       pruning: "Pruning sidecars",
       startup_wait: "Startup wait",
       startup_sync: "Startup synchronization",
@@ -163,6 +164,8 @@
     sidecar_pruning: "Sidecar pruning",
     bazarr_sync: "Bazarr synchronization",
     existing_library_scan: "Existing-library scan",
+    startup: "Startup",
+    retention: "Retention",
   }[operation] || String(operation || "Work").replaceAll("_", " "));
 
   const progressMarkup = (row) => {
@@ -368,7 +371,11 @@
 
     const cell = (row, key, index) => {
       if (key === "position") return `<span class="queue-position">#${index + 1}</span>`;
-      if (key === "work") return `<span class="badge ${row.workKind === "maintenance" ? "maintenance-work" : "cycle-work"}">${escapeHtml(row.workKind === "maintenance" ? "Maintenance" : "Cycle")}</span>`;
+      if (key === "work") {
+        const maintenance = row.workKind === "maintenance";
+        const label = row.operation === "startup" ? "Startup" : maintenance ? "Maintenance" : "Cycle";
+        return `<span class="badge ${maintenance ? "maintenance-work" : "cycle-work"}">${escapeHtml(label)}</span>`;
+      }
       if (key === "media") return mediaMarkup(row);
       if (key === "type") return escapeHtml(row.itemType === "movies" ? "Movie" : "Episode");
       if (key === "operation") return escapeHtml(operationLabel(row.operation));
@@ -1062,8 +1069,11 @@
     const manualReviewPlans = retryPlans.filter((plan) => plan.manualReview);
     root.innerHTML = `<div class="dashboard-shell">
       ${renderHeader(service, cycle, manualReviewPlans.length)}
-      ${renderRecoveryAttention(retryPlans, snapshot.completedCycle || 0, manualReviewPlans.length)}
       ${renderOverview(cycle, service)}
+      <section class="panel">${panelHeader("Active now", `${active.length.toLocaleString()} in progress`)}
+        ${table(active, "active", "No active translations, repairs, startup, or maintenance.")}
+      </section>
+      ${renderRecoveryAttention(retryPlans, snapshot.completedCycle || 0, manualReviewPlans.length)}
       ${renderRetryPlans(
         retryPlans.filter((plan) => !plan.manualReview),
         snapshot.completedCycle || 0,
@@ -1072,9 +1082,6 @@
       )}
       ${renderDiagnostics(snapshot.timing || {}, snapshot.circuits || [])}
       ${renderRecoveryDiagnostics(service.recoveryDiagnostics || {})}
-      <section class="panel">${panelHeader("Active now", `${active.length.toLocaleString()} in progress`)}
-        ${table(active, "active", "No active translations or repairs.")}
-      </section>
       <section class="panel">${panelHeader("Up next", "Next 10 queued jobs")}
         ${table(upcoming, "upcoming", "No queued jobs.")}
       </section>
