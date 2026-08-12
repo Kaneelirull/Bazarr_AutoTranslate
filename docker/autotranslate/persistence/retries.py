@@ -589,10 +589,11 @@ class RetriesRepositoryMixin:
         deferral_class: str,
         reason: str,
         delay_cycles: int = 1,
+        lease_generation: int | None = None,
     ) -> dict | None:
         eligible = max(0, int(completed_cycle)) + max(1, int(delay_cycles))
         with self._transaction() as db:
-            db.execute(
+            cursor = db.execute(
                 """
                 UPDATE retry_plans SET
                     state='regeneration_waiting',
@@ -602,6 +603,18 @@ class RetriesRepositoryMixin:
                     claim_owner=NULL, claimed_at=NULL,
                     submission_attempt_id=NULL, updated_at=?
                 WHERE id=?
+                  AND state IN (
+                    'repair_retry_queued', 'regeneration_waiting',
+                    'regeneration_queued', 'retry_in_progress'
+                  )
+                  AND (
+                    ? IS NULL OR EXISTS (
+                      SELECT 1 FROM circuit_breakers circuit
+                      WHERE circuit.state='half_open'
+                        AND circuit.trial_plan_id=retry_plans.id
+                        AND circuit.lease_generation=?
+                    )
+                  )
                 """,
                 (
                     eligible,
@@ -609,8 +622,12 @@ class RetriesRepositoryMixin:
                     str(reason)[:500],
                     time.time(),
                     int(plan_id),
+                    lease_generation,
+                    lease_generation,
                 ),
             )
+            if cursor.rowcount != 1:
+                return None
             row = db.execute(
                 "SELECT * FROM retry_plans WHERE id=?", (int(plan_id),)
             ).fetchone()
@@ -686,6 +703,7 @@ class RetriesRepositoryMixin:
         expected_source_hash: str,
         *,
         outcome: str = "accepted_after_retry",
+        lease_generation: int | None = None,
     ) -> bool:
         with self._transaction() as db:
             cursor = db.execute(
@@ -699,10 +717,19 @@ class RetriesRepositoryMixin:
                     'repair_retry_queued', 'regeneration_waiting',
                     'regeneration_queued', 'retry_in_progress'
                   )
+                  AND (
+                    ? IS NULL OR EXISTS (
+                      SELECT 1 FROM circuit_breakers circuit
+                      WHERE circuit.state='half_open'
+                        AND circuit.trial_plan_id=retry_plans.id
+                        AND circuit.lease_generation=?
+                    )
+                  )
                 """,
                 (
                     outcome, outcome, time.time(), int(plan_id),
                     str(expected_source_hash),
+                    lease_generation, lease_generation,
                 ),
             )
             return cursor.rowcount == 1
@@ -718,6 +745,13 @@ class RetriesRepositoryMixin:
         with self._lock:
             rows = self._connection.execute(query, params).fetchall()
         return [self._retry_plan_dict(row) for row in rows]
+
+    def retry_plan(self, plan_id: int) -> dict | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM retry_plans WHERE id=?", (int(plan_id),)
+            ).fetchone()
+        return self._retry_plan_dict(row)
 
     def active_retry_plan(
         self, item_type: str, item_id: int, target_language: str

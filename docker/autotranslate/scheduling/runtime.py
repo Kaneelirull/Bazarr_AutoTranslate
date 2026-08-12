@@ -35,24 +35,72 @@ def _run_end_cycle_repair_retries(stats: dict) -> None:
             break
         source_path = plan.get('sourcePath')
         target_path = plan.get('targetPath')
+        trial = _runtime._get_validation_state().circuit_trial_for_retry_plan(plan['id'])
+        retry_resolved = False
         try:
             _runtime._get_validation_state().update_retry_plan(plan['id'], state='retry_in_progress', completed_cycle=_runtime._completed_cycle, end_cycle_repair_attempted=True, reason='end-of-cycle repair retry')
             if not source_path or not target_path or (not _runtime.os.path.exists(target_path)):
                 raise OSError('repair source or target is no longer available')
             action, report = _runtime._validate_translated_file(source_path, target_path, plan.get('sourceLanguage') or '', plan['targetLanguage'], plan['itemId'], title=plan.get('mediaTitle') or '', defer_repair=False, item_type=plan['itemType'], origin='lingarr', provenance_source_hash=plan['sourceHash'], series_key=plan.get('seriesKey'), series_title=plan.get('seriesTitle'), retry_plan_id=plan['id'])
             if action in ('valid', 'valid-warning', 'formatted', 'repaired'):
-                _runtime._resolve_retry_success(
-                    plan['id'], plan['sourceHash']
+                retry_resolved = _runtime._resolve_retry_success(
+                    plan['id'], plan['sourceHash'],
+                    lease_generation=trial['leaseGeneration'] if trial is not None else None,
                 )
-                stats['retry_repairs_accepted'] = stats.get('retry_repairs_accepted', 0) + 1
+                if retry_resolved and trial is not None:
+                    _runtime._get_validation_state().settle_circuit_trial_for_retry(
+                        plan['id'], lease_generation=trial['leaseGeneration'],
+                        outcome='success', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+                    )
+                elif trial is not None:
+                    _runtime._get_validation_state().settle_circuit_trial_for_retry(
+                        plan['id'], lease_generation=trial['leaseGeneration'],
+                        outcome='deferred', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+                        reason='retry acceptance was superseded by a source change',
+                    )
+                if retry_resolved:
+                    stats['retry_repairs_accepted'] = stats.get('retry_repairs_accepted', 0) + 1
             elif action == 'repair-deferred':
-                _runtime._get_validation_state().reschedule_retry_no_progress(plan['id'], completed_cycle=_runtime._completed_cycle, deferral_class='manual_review', reason='end-of-cycle repair remained deferred', delay_cycles=1)
+                manual_review = bool(getattr(report, 'manual_review', False))
+                _runtime._get_validation_state().reschedule_retry_no_progress(plan['id'], completed_cycle=_runtime._completed_cycle, deferral_class='manual_review' if manual_review else 'repair_deferred', reason='end-of-cycle repair remained deferred', delay_cycles=1, lease_generation=trial['leaseGeneration'] if trial is not None else None)
+                if trial is not None:
+                    _runtime._get_validation_state().settle_circuit_trial_for_retry(
+                        plan['id'], lease_generation=trial['leaseGeneration'],
+                        outcome='deferred', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+                        reason='end-of-cycle repair remained deferred',
+                    )
+            else:
+                manual_review = bool(getattr(report, 'manual_review', False))
+                _runtime._get_validation_state().reschedule_retry_no_progress(
+                    plan['id'], completed_cycle=_runtime._completed_cycle,
+                    deferral_class='manual_review' if manual_review else 'validation_failed',
+                    reason=f'end-of-cycle repair finished with {action}', delay_cycles=1,
+                    lease_generation=trial['leaseGeneration'] if trial is not None else None,
+                )
+                if trial is not None:
+                    _runtime._get_validation_state().settle_circuit_trial_for_retry(
+                        plan['id'], lease_generation=trial['leaseGeneration'],
+                        outcome='failure' if action in ('quarantined', 'deleted') else 'deferred',
+                        open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+                        reason=f'end-of-cycle repair finished with {action}',
+                    )
         except (OSError, _runtime.StateStoreError) as exc:
             print(f'{_runtime.YELLOW}[RETRY] Repair retry deferred: {exc}{_runtime.RESET}')
+            if retry_resolved:
+                stats['degraded'] = True
+                continue
             try:
-                _runtime._get_validation_state().reschedule_retry_no_progress(plan['id'], completed_cycle=_runtime._completed_cycle, deferral_class='manual_review', reason=str(exc), delay_cycles=1)
+                _runtime._get_validation_state().reschedule_retry_no_progress(plan['id'], completed_cycle=_runtime._completed_cycle, deferral_class='repair_deferred', reason=str(exc), delay_cycles=1, lease_generation=trial['leaseGeneration'] if trial is not None else None)
+                if trial is not None:
+                    _runtime._get_validation_state().settle_circuit_trial_for_retry(
+                        plan['id'], lease_generation=trial['leaseGeneration'],
+                        outcome='deferred', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+                        reason=str(exc),
+                    )
             except _runtime.StateStoreError:
                 stats['degraded'] = True
+        finally:
+            _runtime._refresh_status_diagnostics()
 
 def _run_regeneration_retry_batch(stats: dict, submission_budget: int, examined_plan_ids: set[int] | None=None, series_admissions: dict[str, int] | None=None) -> tuple[int, int]:
     if _runtime.shutdown_requested:

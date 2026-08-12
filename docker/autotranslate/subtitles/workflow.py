@@ -831,6 +831,24 @@ def _publish_repair_status(future: _runtime.Future, metadata: dict) -> None:
             except _runtime.StateStoreError:
                 pass
         _runtime._complete_repair_status(metadata, 'failed', reason='repair worker failed')
+        retry_plan_id = metadata.get('retry_plan_id')
+        trial_generation = metadata.get('trial_generation')
+        if retry_plan_id is not None and trial_generation is not None:
+            try:
+                state = _runtime._get_validation_state()
+                state.reschedule_retry_no_progress(
+                    retry_plan_id, completed_cycle=_runtime._completed_cycle,
+                    deferral_class='worker_exception', reason='repair worker failed',
+                    delay_cycles=1, lease_generation=trial_generation,
+                )
+                state.settle_circuit_trial_for_retry(
+                    retry_plan_id, lease_generation=trial_generation,
+                    outcome='deferred', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+                    reason='repair worker failed',
+                )
+                _runtime._refresh_status_diagnostics()
+            except _runtime.StateStoreError as exc:
+                print(f'{_runtime.YELLOW}[CIRCUIT] Could not release failed repair trial: {exc}{_runtime.RESET}')
         _runtime._scan_child_finished(metadata.get('maintenance_scan_job_id'), 'failed')
         return
     durable_job_id = metadata.get('durable_job_id')
@@ -842,15 +860,18 @@ def _publish_repair_status(future: _runtime.Future, metadata: dict) -> None:
                 _runtime._get_validation_state().transition_repair_job(durable_job_id, 'completed' if result.action in ('repaired', 'quarantined', 'deleted') else 'failed', error_code=None if result.action in ('repaired', 'quarantined', 'deleted') else result.action, expected_states=('queued', 'active'))
         except _runtime.StateStoreError as exc:
             print(f'{_runtime.YELLOW}[REPAIR] Durable completion update failed: {exc}{_runtime.RESET}')
-    if result.action in ('repaired', 'quarantined', 'deleted'):
-        series_key = metadata.get('series_key')
-        series_title = metadata.get('series_title')
-        if series_key and series_title:
-            try:
-                _runtime._get_validation_state().record_circuit_outcome(series_key=series_key, series_title=series_title, success=result.action == 'repaired', reason=None if result.action == 'repaired' else f'invalid subtitle {result.action}', threshold=_runtime.CIRCUIT_FAILURE_THRESHOLD, open_cycles=_runtime.CIRCUIT_OPEN_CYCLES, config_fingerprint=_runtime._CIRCUIT_CONFIG_FINGERPRINT, trial_owner=metadata.get('trial_owner'), trial_job_id=metadata.get('trial_job_id'), trial_plan_id=metadata.get('trial_plan_id'), lease_generation=metadata.get('trial_generation'))
-                _runtime._refresh_status_diagnostics()
-            except _runtime.StateStoreError as exc:
-                print(f'{_runtime.YELLOW}[CIRCUIT] Could not record repair outcome: {exc}{_runtime.RESET}')
+    linked_retry_plan_id = metadata.get('retry_plan_id')
+    linked_trial_generation = metadata.get('trial_generation')
+    linked_trial_current = False
+    if linked_retry_plan_id is not None and linked_trial_generation is not None:
+        try:
+            linked_trial = _runtime._get_validation_state().circuit_trial_for_retry_plan(linked_retry_plan_id)
+            linked_trial_current = bool(
+                linked_trial is not None
+                and linked_trial.get('leaseGeneration') == linked_trial_generation
+            )
+        except _runtime.StateStoreError:
+            linked_trial_current = False
     if result.action == 'repaired':
         source_path = metadata.get('source_path')
         source_language = metadata.get('source_lang')
@@ -858,24 +879,127 @@ def _publish_repair_status(future: _runtime.Future, metadata: dict) -> None:
             _runtime._record_successful_source_readiness(source_path, source_language, result.target_path, result.target_lang)
         result.retry_plan_id = metadata.get('retry_plan_id')
         result.expected_source_hash = metadata.get('expected_source_hash')
-        _runtime._resolve_retry_success(
+        retry_plan_id = metadata.get('retry_plan_id')
+        trial_generation = metadata.get('trial_generation')
+        retry_resolved = _runtime._resolve_retry_success(
             result.retry_plan_id, result.expected_source_hash,
             outcome='accepted_after_donor_recovery' if result.donor_source_attempt is not None else 'accepted_after_retry',
+            lease_generation=trial_generation,
         )
+        if retry_plan_id is None or trial_generation is None:
+            series_key = metadata.get('series_key')
+            series_title = metadata.get('series_title')
+            if series_key and series_title:
+                try:
+                    _runtime._get_validation_state().record_circuit_outcome(
+                        series_key=series_key, series_title=series_title,
+                        success=True, threshold=_runtime.CIRCUIT_FAILURE_THRESHOLD,
+                        open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+                        config_fingerprint=_runtime._CIRCUIT_CONFIG_FINGERPRINT,
+                    )
+                    _runtime._refresh_status_diagnostics()
+                except _runtime.StateStoreError as exc:
+                    print(f'{_runtime.YELLOW}[CIRCUIT] Could not record repair outcome: {exc}{_runtime.RESET}')
+        elif retry_resolved and linked_trial_current:
+            try:
+                _runtime._get_validation_state().settle_circuit_trial_for_retry(
+                    retry_plan_id, lease_generation=trial_generation,
+                    outcome='success', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+                )
+                _runtime._refresh_status_diagnostics()
+            except _runtime.StateStoreError as exc:
+                print(f'{_runtime.YELLOW}[CIRCUIT] Could not record repair outcome: {exc}{_runtime.RESET}')
         _runtime._complete_repair_status(metadata, 'repaired', repaired=True, details={'attempts': result.attempts})
     elif result.action in ('quarantined', 'deleted'):
-        _runtime._schedule_validation_retry(report=result.report, action=result.action, source_path=metadata.get('source_path') or '', source_lang=metadata.get('source_lang') or '', target_path=result.target_path, target_lang=result.target_lang, item_type=result.item_type, item_id=result.item_id, title=result.title, series_key=metadata.get('series_key'), series_title=metadata.get('series_title'))
+        series_key = metadata.get('series_key')
+        series_title = metadata.get('series_title')
+        if series_key and series_title:
+            try:
+                retry_plan_id = metadata.get('retry_plan_id')
+                trial_generation = metadata.get('trial_generation')
+                if retry_plan_id is not None and trial_generation is not None and linked_trial_current:
+                    _runtime._get_validation_state().settle_circuit_trial_for_retry(
+                        retry_plan_id, lease_generation=trial_generation,
+                        outcome='success' if result.action == 'repaired' else 'failure',
+                        open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+                        reason=None if result.action == 'repaired' else f'invalid subtitle {result.action}',
+                    )
+                elif retry_plan_id is None and trial_generation is None:
+                    _runtime._get_validation_state().record_circuit_outcome(series_key=series_key, series_title=series_title, success=result.action == 'repaired', reason=None if result.action == 'repaired' else f'invalid subtitle {result.action}', threshold=_runtime.CIRCUIT_FAILURE_THRESHOLD, open_cycles=_runtime.CIRCUIT_OPEN_CYCLES, config_fingerprint=_runtime._CIRCUIT_CONFIG_FINGERPRINT)
+                _runtime._refresh_status_diagnostics()
+            except _runtime.StateStoreError as exc:
+                print(f'{_runtime.YELLOW}[CIRCUIT] Could not record repair outcome: {exc}{_runtime.RESET}')
+        if linked_retry_plan_id is None or linked_trial_current:
+            _runtime._schedule_validation_retry(report=result.report, action=result.action, source_path=metadata.get('source_path') or '', source_lang=metadata.get('source_lang') or '', target_path=result.target_path, target_lang=result.target_lang, item_type=result.item_type, item_id=result.item_id, title=result.title, series_key=metadata.get('series_key'), series_title=metadata.get('series_title'))
         _runtime._complete_repair_status(metadata, result.action, reason=result.action, details={'attempts': result.attempts})
     elif result.action == 'repair-deferred':
-        _runtime._schedule_validation_retry(report=result.report, action=result.action, source_path=metadata.get('source_path') or '', source_lang=metadata.get('source_lang') or '', target_path=result.target_path, target_lang=result.target_lang, item_type=result.item_type, item_id=result.item_id, title=result.title, series_key=metadata.get('series_key'), series_title=metadata.get('series_title'))
+        if linked_retry_plan_id is None or linked_trial_current:
+            _runtime._schedule_validation_retry(report=result.report, action=result.action, source_path=metadata.get('source_path') or '', source_lang=metadata.get('source_lang') or '', target_path=result.target_path, target_lang=result.target_lang, item_type=result.item_type, item_id=result.item_id, title=result.title, series_key=metadata.get('series_key'), series_title=metadata.get('series_title'))
+        retry_plan_id = metadata.get('retry_plan_id')
+        trial_generation = metadata.get('trial_generation')
+        if retry_plan_id is not None and trial_generation is not None and linked_trial_current:
+            try:
+                _runtime._get_validation_state().settle_circuit_trial_for_retry(
+                    retry_plan_id, lease_generation=trial_generation,
+                    outcome='deferred', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+                    reason='repair deferred',
+                )
+                _runtime._refresh_status_diagnostics()
+            except _runtime.StateStoreError as exc:
+                print(f'{_runtime.YELLOW}[CIRCUIT] Could not release deferred repair trial: {exc}{_runtime.RESET}')
         _runtime._complete_repair_status(metadata, 'deferred', reason='repair deferred', details={'attempts': result.attempts})
     else:
+        retry_plan_id = metadata.get('retry_plan_id')
+        trial_generation = metadata.get('trial_generation')
+        if retry_plan_id is not None and trial_generation is not None:
+            try:
+                state = _runtime._get_validation_state()
+                state.reschedule_retry_no_progress(
+                    retry_plan_id, completed_cycle=_runtime._completed_cycle,
+                    deferral_class='repair_deferred',
+                    reason=f'repair finished with {result.action}', delay_cycles=1,
+                    lease_generation=trial_generation,
+                )
+                state.settle_circuit_trial_for_retry(
+                    retry_plan_id, lease_generation=trial_generation,
+                    outcome='deferred', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+                    reason=f'repair finished with {result.action}',
+                )
+                _runtime._refresh_status_diagnostics()
+            except _runtime.StateStoreError as exc:
+                print(f'{_runtime.YELLOW}[CIRCUIT] Could not release failed repair trial: {exc}{_runtime.RESET}')
         _runtime._complete_repair_status(metadata, 'failed', reason=f'repair {result.action}', details={'attempts': result.attempts})
     _runtime._scan_child_finished(metadata.get('maintenance_scan_job_id'), 'repaired' if result.action == 'repaired' else result.action if result.action in ('quarantined', 'deleted') else 'failed')
 
 def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, target_lang: str) -> str:
     with _runtime._pending_repairs_lock:
         if not _runtime._repair_futures.reserve(repair_key):
+            coordination = {
+                'retry_plan_id': job_kwargs.get('retry_plan_id'),
+                'expected_source_hash': job_kwargs.get('expected_source_hash'),
+                'trial_owner': job_kwargs.get('trial_owner'),
+                'trial_job_id': job_kwargs.get('trial_job_id'),
+                'trial_plan_id': job_kwargs.get('trial_plan_id'),
+                'trial_generation': job_kwargs.get('trial_generation'),
+            }
+            def persist_adoption(existing: dict) -> bool:
+                durable_job_id = existing.get('durable_job_id')
+                if durable_job_id is None or coordination['retry_plan_id'] is None or coordination['trial_generation'] is None:
+                    return True
+                try:
+                    return _runtime._get_validation_state().update_repair_job_coordination(
+                        durable_job_id, retry_plan_id=coordination['retry_plan_id'],
+                        trial_owner=coordination['trial_owner'], trial_job_id=coordination['trial_job_id'],
+                        trial_plan_id=coordination['trial_plan_id'], trial_generation=coordination['trial_generation'],
+                    )
+                except _runtime.StateStoreError as exc:
+                    print(f'{_runtime.YELLOW}[REPAIR] Could not persist adopted circuit trial: {exc}{_runtime.RESET}')
+                    return False
+            adopted = _runtime._repair_futures.adopt_coordination(
+                repair_key, coordination, persist=persist_adoption,
+            )
+            if adopted is None:
+                _runtime._defer_linked_repair_trial(job_kwargs, 'duplicate repair could not adopt circuit trial')
             print(f"[REPAIR] Duplicate repair suppressed for {label} '{target_lang}'")
             return 'repair-duplicate'
         cue_count = len(getattr(report, 'repairable_cue_indexes', []) or [])
@@ -884,6 +1008,7 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
         status_ref = _runtime._status_create_repair_ref(job_kwargs, label, target_lang, initial_details)
         if not _runtime._repair_capacity.acquire(blocking=False):
             _runtime._repair_futures.release_reservation(repair_key)
+            _runtime._defer_linked_repair_trial(job_kwargs, 'repair queue full')
             print(f"[REPAIR] Queue full; deferred {label} '{target_lang}' to the next scan")
             _runtime._status_ref_complete(status_ref, 'deferred', reason='repair queue full')
             return 'repair-deferred'
@@ -896,6 +1021,7 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             except _runtime.StateStoreError as exc:
                 _runtime._repair_futures.release_reservation(repair_key)
                 _runtime._repair_capacity.release()
+                _runtime._defer_linked_repair_trial(job_kwargs, 'repair persistence unavailable')
                 _runtime._status_ref_complete(status_ref, 'deferred', reason='repair persistence unavailable')
                 print(f'{_runtime.YELLOW}[REPAIR] Could not persist repair before submit: {exc}{_runtime.RESET}')
                 return 'repair-deferred'
@@ -907,6 +1033,7 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             _runtime._repair_futures.release_reservation(repair_key)
             _runtime._shared_capacity.release(capacity_token)
             _runtime._repair_capacity.release()
+            _runtime._defer_linked_repair_trial(job_kwargs, 'repair worker submission failed')
             _runtime._status_ref_complete(status_ref, 'failed', reason='repair worker submission failed')
             raise
         _runtime._repair_futures.register(future, metadata)
@@ -915,6 +1042,31 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
     for index in report.repairable_cue_indexes:
         print(f"[REPAIR] Queued {label} '{target_lang}' cue position {index + 1}")
     return 'repair-queued'
+
+def _defer_linked_repair_trial(job_kwargs: dict, reason: str) -> bool:
+    retry_plan_id = job_kwargs.get('retry_plan_id')
+    trial_generation = job_kwargs.get('trial_generation')
+    if retry_plan_id is None or trial_generation is None:
+        return False
+    try:
+        state = _runtime._get_validation_state()
+        rescheduled = state.reschedule_retry_no_progress(
+            retry_plan_id, completed_cycle=_runtime._completed_cycle,
+            deferral_class='repair_deferred', reason=reason, delay_cycles=1,
+            lease_generation=trial_generation,
+        )
+        if rescheduled is None:
+            return False
+        state.settle_circuit_trial_for_retry(
+            retry_plan_id, lease_generation=trial_generation,
+            outcome='deferred', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+            reason=reason,
+        )
+        _runtime._refresh_status_diagnostics()
+        return True
+    except _runtime.StateStoreError as exc:
+        print(f'{_runtime.YELLOW}[CIRCUIT] Could not release repair trial: {exc}{_runtime.RESET}')
+        return False
 
 def _completed_repair_futures(futures: list[_runtime.Future]):
     """Yield completions while allowing a signal to interrupt phase drainage."""
@@ -1072,19 +1224,24 @@ def _schedule_validation_retry(*, report, action: str, source_path: str, source_
         print(f'{_runtime.YELLOW}[RETRY] Could not persist retry plan: {exc}{_runtime.RESET}')
         return None
 
-def _resolve_retry_success(plan_id: int | None, expected_source_hash: str | None, *, outcome: str='accepted_after_retry') -> None:
+def _resolve_retry_success(plan_id: int | None, expected_source_hash: str | None, *, outcome: str='accepted_after_retry', lease_generation: int | None=None) -> bool:
     if plan_id is None or not expected_source_hash:
-        return
+        return False
     try:
         state = _runtime._get_validation_state()
         if not hasattr(state, 'resolve_retry_plan'):
-            return
-        resolved = state.resolve_retry_plan(plan_id, expected_source_hash, outcome=outcome)
+            return False
+        resolved = state.resolve_retry_plan(
+            plan_id, expected_source_hash, outcome=outcome,
+            lease_generation=lease_generation,
+        )
         if resolved:
             print(f"[RETRY] Accepted retry plan {plan_id}")
             _runtime._refresh_status_diagnostics()
+        return bool(resolved)
     except _runtime.StateStoreError as exc:
         print(f'{_runtime.YELLOW}[RETRY] Could not resolve retry plan: {exc}{_runtime.RESET}')
+        return False
 
 def _validate_translated_file(source_path: str, target_path: str, source_lang: str, target_lang: str, item_id: int | None, title: str='', dry_run: bool=False, *, defer_repair: bool=False, item_type: str | None=None, media_duration: float | None=None, origin: str | None=None, provenance_source_hash: str | None=None, series_key: str | None=None, series_title: str | None=None, maintenance_scan_job_id: str | None=None, retry_plan_id: int | None=None, trial_owner: str | None=None, trial_job_id: int | None=None, trial_plan_id: int | None=None, trial_generation: int | None=None) -> tuple[str, object]:
     validation_identity = {
@@ -1279,11 +1436,10 @@ EXPORTS = {
         '_normalize_managed_output', '_replace_managed_file',
         '_replace_managed_file_if_current', '_perform_repair',
         '_get_repair_executor', '_run_repair_with_capacity',
-        '_publish_repair_status', '_queue_repair',
+        '_publish_repair_status', '_queue_repair', '_defer_linked_repair_trial',
         '_completed_repair_futures', '_drain_pending_repairs',
         '_shutdown_repair_executor', '_regeneration_delay_cycles',
         '_schedule_validation_retry', '_resolve_retry_success',
         '_validate_translated_file',
     )
 }
-

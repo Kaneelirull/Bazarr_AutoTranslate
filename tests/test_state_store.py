@@ -877,6 +877,137 @@ class StateStoreTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_retry_linked_circuit_settlement_is_generation_safe_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(Path(directory))
+            try:
+                plan, _ = store.schedule_retry_plan(
+                    item_type="episodes", item_id=42, target_language="et",
+                    source_hash="source", failure_class="cue_repairable",
+                    rules=["excessive_lines"], eligible_completed_cycle=0,
+                    state="repair_retry_queued", series_key="sonarr:1",
+                    series_title="Top Gear",
+                )
+                store.record_circuit_outcome(
+                    series_key="sonarr:1", series_title="Top Gear",
+                    success=False, reason="invalid", threshold=1,
+                    open_cycles=1, config_fingerprint="config",
+                )
+                store.advance_completed_cycle()
+                trial = store.circuit_permission(
+                    series_key="sonarr:1", series_title="Top Gear",
+                    config_fingerprint="config", trial_owner="attempt:1",
+                )
+                self.assertTrue(store.bind_circuit_trial_job(
+                    "sonarr:1", "attempt:1", 99, trial_plan_id=plan["id"],
+                    lease_generation=trial["leaseGeneration"],
+                ))
+                linked = store.circuit_trial_for_retry_plan(plan["id"])
+                self.assertEqual(linked["leaseGeneration"], trial["leaseGeneration"])
+
+                stale = store.settle_circuit_trial_for_retry(
+                    plan["id"], lease_generation=trial["leaseGeneration"] + 1,
+                    outcome="success", open_cycles=1,
+                )
+                self.assertFalse(stale["settled"])
+                self.assertEqual(store.circuit_breakers()[0]["state"], "half_open")
+
+                settled = store.settle_circuit_trial_for_retry(
+                    plan["id"], lease_generation=trial["leaseGeneration"],
+                    outcome="success", open_cycles=1,
+                )
+                self.assertTrue(settled["settled"])
+                self.assertEqual(store.circuit_breakers(), [])
+                repeated = store.settle_circuit_trial_for_retry(
+                    plan["id"], lease_generation=trial["leaseGeneration"],
+                    outcome="success", open_cycles=1,
+                )
+                self.assertFalse(repeated["settled"])
+            finally:
+                store.close()
+
+    def test_deferred_retry_trial_reopens_without_counting_another_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(Path(directory))
+            try:
+                plan, _ = store.schedule_retry_plan(
+                    item_type="episodes", item_id=42, target_language="et",
+                    source_hash="source", failure_class="cue_repairable",
+                    rules=["excessive_lines"], eligible_completed_cycle=0,
+                    state="repair_retry_queued", series_key="sonarr:1",
+                    series_title="Top Gear",
+                )
+                opened = store.record_circuit_outcome(
+                    series_key="sonarr:1", series_title="Top Gear",
+                    success=False, reason="invalid", threshold=1,
+                    open_cycles=1, config_fingerprint="config",
+                )
+                store.advance_completed_cycle()
+                trial = store.circuit_permission(
+                    series_key="sonarr:1", series_title="Top Gear",
+                    config_fingerprint="config", trial_owner="attempt:1",
+                )
+                store.bind_circuit_trial_job(
+                    "sonarr:1", "attempt:1", 99, trial_plan_id=plan["id"],
+                    lease_generation=trial["leaseGeneration"],
+                )
+                settled = store.settle_circuit_trial_for_retry(
+                    plan["id"], lease_generation=trial["leaseGeneration"],
+                    outcome="deferred", open_cycles=2, reason="repair deferred",
+                )
+                self.assertTrue(settled["settled"])
+                self.assertEqual(settled["failures"], opened["failures"])
+                circuit = store.circuit_breakers()[0]
+                self.assertEqual(circuit["state"], "open")
+                self.assertEqual(circuit["completedCyclesRemaining"], 2)
+            finally:
+                store.close()
+
+    def test_late_retry_reschedule_cannot_revive_superseded_plan_or_stale_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(Path(directory))
+            try:
+                old, _ = store.schedule_retry_plan(
+                    item_type="episodes", item_id=42, target_language="et",
+                    source_hash="old", failure_class="cue_repairable",
+                    rules=["excessive_lines"], eligible_completed_cycle=0,
+                    state="repair_retry_queued", series_key="sonarr:1",
+                    series_title="Top Gear",
+                )
+                store.record_circuit_outcome(
+                    series_key="sonarr:1", series_title="Top Gear",
+                    success=False, reason="invalid", threshold=1,
+                    open_cycles=1, config_fingerprint="config",
+                )
+                store.advance_completed_cycle()
+                trial = store.circuit_permission(
+                    series_key="sonarr:1", series_title="Top Gear",
+                    config_fingerprint="config", trial_owner="attempt:1",
+                )
+                store.bind_circuit_trial_job(
+                    "sonarr:1", "attempt:1", 99, trial_plan_id=old["id"],
+                    lease_generation=trial["leaseGeneration"],
+                )
+                store.schedule_retry_plan(
+                    item_type="episodes", item_id=42, target_language="et",
+                    source_hash="new", failure_class="cue_repairable",
+                    rules=["excessive_lines"], eligible_completed_cycle=1,
+                    state="repair_retry_queued", series_key="sonarr:1",
+                    series_title="Top Gear",
+                )
+
+                self.assertIsNone(store.reschedule_retry_no_progress(
+                    old["id"], completed_cycle=1,
+                    deferral_class="worker_exception", reason="late worker",
+                    lease_generation=trial["leaseGeneration"],
+                ))
+                self.assertFalse(store.resolve_retry_plan(
+                    old["id"], "old", lease_generation=trial["leaseGeneration"],
+                ))
+                self.assertEqual(store.retry_plan(old["id"])["state"], "superseded")
+            finally:
+                store.close()
+
     def test_legacy_open_circuit_migrates_from_persisted_cycle(self):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(Path(directory))

@@ -666,6 +666,8 @@ class StatusDashboardTests(unittest.TestCase):
         )
         self.assertIn('entry.state === "open" || entry.state === "half_open"', script)
         self.assertIn("entry.eligibleAfterCycle", script)
+        self.assertIn('entry.trialState === "validation_pending"', script)
+        self.assertIn("Trial awaiting repair/validation", script)
         self.assertIn("Trial ready", script)
         self.assertIn("Trial in progress", script)
         self.assertIn("Trial in ${remaining.toLocaleString()}", script)

@@ -121,6 +121,52 @@ class RepairsRepositoryMixin:
             for row in rows
         ]
 
+    def has_durable_repair_for_retry(self, retry_plan_id: int) -> bool:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT payload_json FROM repair_jobs
+                WHERE state IN ('queued', 'active', 'persisted_for_restart')
+                """
+            ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if payload.get("retryPlanId") == int(retry_plan_id):
+                return True
+        return False
+
+    def update_repair_job_coordination(
+        self, job_id: int, *, retry_plan_id: int, trial_owner: str | None,
+        trial_job_id: int | None, trial_plan_id: int | None,
+        trial_generation: int,
+    ) -> bool:
+        with self._transaction() as db:
+            row = db.execute(
+                "SELECT payload_json FROM repair_jobs WHERE id=? AND state IN ('queued', 'active')",
+                (int(job_id),),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            payload.update({
+                "retryPlanId": int(retry_plan_id),
+                "trialOwner": trial_owner,
+                "trialJobId": trial_job_id,
+                "trialPlanId": trial_plan_id,
+                "trialGeneration": int(trial_generation),
+            })
+            cursor = db.execute(
+                "UPDATE repair_jobs SET payload_json=?, updated_at=? WHERE id=? AND state IN ('queued', 'active')",
+                (json.dumps(payload, sort_keys=True), time.time(), int(job_id)),
+            )
+            return cursor.rowcount == 1
+
     def recover_repair_jobs(self) -> int:
         with self._transaction() as db:
             cursor = db.execute(

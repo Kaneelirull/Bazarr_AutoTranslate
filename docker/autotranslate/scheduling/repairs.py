@@ -45,6 +45,34 @@ class RepairCoordinator:
         with self.lock:
             self.pending[future] = metadata
 
+    def adopt_coordination(
+        self, key: tuple, values: dict,
+        *, persist: Callable[[dict], bool] | None = None,
+    ) -> dict | None:
+        """Transfer a newer lease for duplicate work to the active callback."""
+        with self.lock:
+            for future, metadata in self.pending.items():
+                if metadata.get("key") != key:
+                    continue
+                current_plan = metadata.get("retry_plan_id")
+                incoming_plan = values.get("retry_plan_id")
+                if current_plan not in (None, incoming_plan):
+                    return None
+                status_lock = metadata.get("status_lock")
+                if status_lock is None:
+                    return None
+                with status_lock:
+                    if metadata.get("status_published"):
+                        return None
+                    if persist is not None and not persist(metadata):
+                        return None
+                    metadata.update({
+                        name: value for name, value in values.items()
+                        if value is not None
+                    })
+                    return dict(metadata)
+        return None
+
     def snapshot(self) -> list[tuple[Future, dict]]:
         with self.lock:
             return list(self.pending.items())
