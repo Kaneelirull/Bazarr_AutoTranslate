@@ -263,6 +263,34 @@ class ArchitectureUpgradeTests(unittest.TestCase):
         self.assertEqual(repairs.keys, set())
         self.assertEqual(events, [("persist", "one")])
 
+    def test_repair_coordination_adoption_rejects_published_or_unpersisted_work(self):
+        repairs = RepairCoordinator()
+        published = Future()
+        published_metadata = {
+            "key": ("published",), "retry_plan_id": 1,
+            "trial_generation": 1, "status_lock": threading.Lock(),
+            "status_published": True,
+        }
+        repairs.register(published, published_metadata)
+        self.assertIsNone(repairs.adopt_coordination(
+            ("published",), {"retry_plan_id": 1, "trial_generation": 2},
+            persist=lambda _metadata: True,
+        ))
+        self.assertEqual(published_metadata["trial_generation"], 1)
+
+        active = Future()
+        active_metadata = {
+            "key": ("active",), "retry_plan_id": 1,
+            "trial_generation": 1, "status_lock": threading.Lock(),
+            "status_published": False, "durable_job_id": 7,
+        }
+        repairs.register(active, active_metadata)
+        self.assertIsNone(repairs.adopt_coordination(
+            ("active",), {"retry_plan_id": 1, "trial_generation": 2},
+            persist=lambda _metadata: False,
+        ))
+        self.assertEqual(active_metadata["trial_generation"], 1)
+
     def test_removed_import_surfaces_are_absent_and_bootstraps_are_executable_only(self):
         docker_root = REPO_ROOT / "docker"
         for name in {"Bazarr_AutoTranslate", "clean_et_subs"}:

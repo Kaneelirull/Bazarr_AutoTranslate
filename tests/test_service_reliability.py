@@ -494,6 +494,304 @@ class ServiceReliabilityTests(unittest.TestCase):
             self.assertEqual(normalize.call_args_list[0], call(source))
             self.assertEqual(len(normalize.call_args_list), 2)
 
+    def _bound_retry_circuit(self, source: Path, target: Path):
+        state = app._validation_state
+        plan, _ = state.schedule_retry_plan(
+            item_type="episodes", item_id=42, target_language="et",
+            source_hash="source", source_path=source, source_language="en",
+            target_path=target, failure_class="cue_repairable",
+            rules=["excessive_lines"], eligible_completed_cycle=0,
+            state="repair_retry_queued", series_key="sonarr:1",
+            series_title="Top Gear", media_title="Top Gear S01E01",
+        )
+        state.record_circuit_outcome(
+            series_key="sonarr:1", series_title="Top Gear", success=False,
+            reason="invalid", threshold=1, open_cycles=1,
+            config_fingerprint=app._CIRCUIT_CONFIG_FINGERPRINT,
+        )
+        completed = state.advance_completed_cycle()
+        trial = state.circuit_permission(
+            series_key="sonarr:1", series_title="Top Gear",
+            config_fingerprint=app._CIRCUIT_CONFIG_FINGERPRINT,
+            trial_owner="attempt:1",
+        )
+        state.bind_circuit_trial_job(
+            "sonarr:1", "attempt:1", 99, trial_plan_id=plan["id"],
+            lease_generation=trial["leaseGeneration"],
+        )
+        return state, plan, completed
+
+    def test_reconciliation_closes_accepted_validation_pending_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "show.en.srt"
+            target = root / "show.et.srt"
+            state, plan, _ = self._bound_retry_circuit(source, target)
+            state.resolve_retry_plan(plan["id"], "source", outcome="accepted_after_retry")
+
+            with patch.object(app, "lingarr_get_job") as get_job:
+                self.assertEqual(app._reconcile_circuit_trial_leases(state), 1)
+
+            get_job.assert_not_called()
+            self.assertEqual(state.circuit_breakers(), [])
+
+    def test_reconciliation_releases_completed_trial_waiting_for_fresh_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, plan, _ = self._bound_retry_circuit(root / "show.en.srt", root / "show.et.srt")
+            state.update_retry_plan(
+                plan["id"], state="regeneration_waiting",
+                eligible_completed_cycle=app._completed_cycle,
+                reason="completed retry output awaiting validation",
+            )
+
+            with patch.object(app, "lingarr_get_job", return_value={"status": "Completed"}):
+                self.assertEqual(app._reconcile_circuit_trial_leases(state), 1)
+
+            retry = state.retry_plan(plan["id"])
+            circuit = state.circuit_breakers()[0]
+            self.assertEqual(retry["state"], "regeneration_waiting")
+            self.assertEqual(circuit["state"], "open")
+            self.assertIsNone(circuit["trialJobId"])
+
+    def test_reconciliation_retains_completed_trial_with_active_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, _plan, _ = self._bound_retry_circuit(root / "show.en.srt", root / "show.et.srt")
+
+            with patch.object(app, "lingarr_get_job", return_value={"status": "Completed"}):
+                self.assertEqual(app._reconcile_circuit_trial_leases(state), 1)
+
+            circuit = state.circuit_breakers()[0]
+            self.assertEqual(circuit["state"], "half_open")
+            self.assertEqual(circuit["trialState"], "validation_pending")
+
+    def test_restart_reconciliation_retains_trial_owned_by_durable_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "show.en.srt"
+            target = root / "show.et.srt"
+            source.write_text("source", encoding="utf-8")
+            target.write_text("target", encoding="utf-8")
+            state, plan, _ = self._bound_retry_circuit(source, target)
+            trial = state.circuit_trial_for_retry_plan(plan["id"])
+            repair_id = state.enqueue_repair_job(
+                dedupe_key="restart-owned", item_type="episodes", item_id=42,
+                target_language="et", source_path=source, target_path=target,
+                source_hash=app._file_hash_or_none(source),
+                target_hash=app._file_hash_or_none(target),
+                payload={
+                    "retryPlanId": plan["id"],
+                    "trialGeneration": trial["leaseGeneration"],
+                },
+            )
+            state.transition_repair_job(repair_id, "persisted_for_restart", expected_states=("queued",))
+            state.update_retry_plan(plan["id"], state="regeneration_waiting")
+
+            with patch.object(app, "lingarr_get_job", return_value={"status": "Completed"}):
+                self.assertEqual(app._reconcile_circuit_trial_leases(state), 1)
+
+            circuit = state.circuit_breakers()[0]
+            self.assertEqual(circuit["state"], "half_open")
+            self.assertEqual(circuit["trialState"], "validation_pending")
+
+    def test_bound_retry_terminal_output_deferrals_release_trial(self):
+        reasons = (
+            "completed output missing",
+            "managed file ownership failed",
+            "completed output provenance persistence failed",
+        )
+        for reason in reasons:
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                app._validation_state.close()
+                app._validation_state = StateStore(
+                    root / "state.sqlite3",
+                    validator_version=cleanup.VALIDATOR_VERSION,
+                )
+                state, plan, _ = self._bound_retry_circuit(root / "show.en.srt", root / "show.et.srt")
+                trial = state.circuit_trial_for_retry_plan(plan["id"])
+
+                app._defer_bound_retry_trial(plan, True, trial["leaseGeneration"], reason)
+
+                retry = state.retry_plan(plan["id"])
+                self.assertEqual(retry["state"], "regeneration_waiting")
+                self.assertEqual(retry["lastDeferralClass"], "output_deferred")
+                self.assertEqual(state.circuit_breakers()[0]["state"], "open")
+
+    def test_end_cycle_repair_success_closes_linked_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "show.en.srt"
+            target = root / "show.et.srt"
+            source.write_text("source", encoding="utf-8")
+            target.write_text("target", encoding="utf-8")
+            state, plan, completed = self._bound_retry_circuit(source, target)
+            with (
+                patch.object(app, "_completed_cycle", completed),
+                patch.object(app, "_validate_translated_file", return_value=("repaired", SimpleNamespace(manual_review=False))),
+                patch.object(app, "_resolve_retry_success", side_effect=lambda plan_id, source_hash, **kwargs: state.resolve_retry_plan(plan_id, source_hash, **kwargs)),
+                patch.object(app, "_refresh_status_diagnostics"),
+            ):
+                app._run_end_cycle_repair_retries({})
+
+            self.assertEqual(state.circuit_breakers(), [])
+            self.assertEqual(state.retry_plan(plan["id"])["state"], "accepted_after_retry")
+
+    def test_end_cycle_transient_defer_remains_retryable_and_releases_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "show.en.srt"
+            target = root / "show.et.srt"
+            source.write_text("source", encoding="utf-8")
+            target.write_text("target", encoding="utf-8")
+            state, plan, completed = self._bound_retry_circuit(source, target)
+            with (
+                patch.object(app, "_completed_cycle", completed),
+                patch.object(app, "_validate_translated_file", return_value=("repair-deferred", SimpleNamespace(manual_review=False))),
+                patch.object(app, "_refresh_status_diagnostics"),
+            ):
+                app._run_end_cycle_repair_retries({})
+
+            retry = state.retry_plan(plan["id"])
+            self.assertEqual(retry["state"], "regeneration_waiting")
+            self.assertEqual(retry["lastDeferralClass"], "repair_deferred")
+            self.assertEqual(state.circuit_breakers()[0]["state"], "open")
+
+    def test_end_cycle_manual_review_remains_excluded_and_releases_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "show.en.srt"
+            target = root / "show.et.srt"
+            source.write_text("source", encoding="utf-8")
+            target.write_text("target", encoding="utf-8")
+            state, plan, completed = self._bound_retry_circuit(source, target)
+            with (
+                patch.object(app, "_completed_cycle", completed),
+                patch.object(app, "_validate_translated_file", return_value=("repair-deferred", SimpleNamespace(manual_review=True))),
+                patch.object(app, "_refresh_status_diagnostics"),
+            ):
+                app._run_end_cycle_repair_retries({})
+
+            retry = state.retry_plan(plan["id"])
+            self.assertEqual(retry["lastDeferralClass"], "manual_review")
+            self.assertEqual(state.circuit_breakers()[0]["state"], "open")
+
+    def test_repair_worker_exception_reschedules_retry_and_releases_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, plan, completed = self._bound_retry_circuit(root / "show.en.srt", root / "show.et.srt")
+            trial = state.circuit_trial_for_retry_plan(plan["id"])
+            future = app.Future()
+            future.set_exception(RuntimeError("worker crashed"))
+            metadata = {
+                "retry_plan_id": plan["id"],
+                "trial_generation": trial["leaseGeneration"],
+                "status_lock": threading.Lock(),
+            }
+            with (
+                patch.object(app, "_completed_cycle", completed),
+                patch.object(app, "_complete_repair_status"),
+                patch.object(app, "_scan_child_finished"),
+                patch.object(app, "_refresh_status_diagnostics"),
+            ):
+                app._publish_repair_status(future, metadata)
+
+            retry = state.retry_plan(plan["id"])
+            self.assertEqual(retry["state"], "regeneration_waiting")
+            self.assertEqual(retry["lastDeferralClass"], "worker_exception")
+            self.assertEqual(state.circuit_breakers()[0]["state"], "open")
+
+    def test_stale_quarantined_repair_cannot_mutate_current_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, plan, _ = self._bound_retry_circuit(root / "show.en.srt", root / "show.et.srt")
+            trial = state.circuit_trial_for_retry_plan(plan["id"])
+            before = state.circuit_breakers()[0]
+            future = app.Future()
+            future.set_result(app.RepairJobResult(
+                "quarantined", SimpleNamespace(issues=[]), "Top Gear", "et",
+                "episodes", 42, target_path=str(root / "show.et.srt"),
+            ))
+            metadata = {
+                "retry_plan_id": plan["id"],
+                "trial_generation": trial["leaseGeneration"] + 1,
+                "series_key": "sonarr:1", "series_title": "Top Gear",
+                "status_lock": threading.Lock(),
+            }
+            with (
+                patch.object(app, "_schedule_validation_retry") as schedule,
+                patch.object(app, "_complete_repair_status"),
+                patch.object(app, "_scan_child_finished"),
+                patch.object(app, "_refresh_status_diagnostics"),
+            ):
+                app._publish_repair_status(future, metadata)
+
+            schedule.assert_not_called()
+            after = state.circuit_breakers()[0]
+            self.assertEqual(after["state"], "half_open")
+            self.assertEqual(after["failures"], before["failures"])
+            self.assertEqual(
+                state.circuit_trial_for_retry_plan(plan["id"])["leaseGeneration"],
+                trial["leaseGeneration"],
+            )
+
+    def test_preworker_repair_queue_deferral_reschedules_and_releases_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, plan, _ = self._bound_retry_circuit(root / "show.en.srt", root / "show.et.srt")
+            trial = state.circuit_trial_for_retry_plan(plan["id"])
+            report = SimpleNamespace(repairable_cue_indexes=[0], issues=[])
+            job_kwargs = {
+                "retry_plan_id": plan["id"],
+                "trial_generation": trial["leaseGeneration"],
+                "expected_source_hash": "source",
+                "target_lang": "et",
+            }
+            with (
+                patch.object(app, "_repair_capacity", threading.BoundedSemaphore(0)),
+                patch.object(app, "_status_create_repair_ref", return_value={}),
+                patch.object(app, "_status_ref_complete"),
+                patch.object(app, "_refresh_status_diagnostics"),
+            ):
+                self.assertEqual(
+                    app._queue_repair(("queue-full",), job_kwargs, report, "Top Gear", "et"),
+                    "repair-deferred",
+                )
+
+            retry = state.retry_plan(plan["id"])
+            self.assertEqual(retry["state"], "regeneration_waiting")
+            self.assertEqual(retry["lastDeferralClass"], "repair_deferred")
+            self.assertEqual(state.circuit_breakers()[0]["state"], "open")
+
+    def test_restart_changed_repair_inputs_reschedule_and_release_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "show.en.srt"
+            target = root / "show.et.srt"
+            source.write_text("changed", encoding="utf-8")
+            target.write_text("target", encoding="utf-8")
+            state, plan, completed = self._bound_retry_circuit(source, target)
+            trial = state.circuit_trial_for_retry_plan(plan["id"])
+            repair_id = state.enqueue_repair_job(
+                dedupe_key="restart:42", item_type="episodes", item_id=42,
+                target_language="et", source_path=source, target_path=target,
+                source_hash="old-source", target_hash=app._file_hash_or_none(target),
+                payload={
+                    "retryPlanId": plan["id"],
+                    "trialGeneration": trial["leaseGeneration"],
+                },
+            )
+            state.transition_repair_job(repair_id, "persisted_for_restart", expected_states=("queued",))
+
+            with patch.object(app, "_completed_cycle", completed):
+                self.assertEqual(app._requeue_persisted_repairs(state), 0)
+
+            retry = state.retry_plan(plan["id"])
+            self.assertEqual(retry["state"], "regeneration_waiting")
+            self.assertEqual(retry["lastDeferralClass"], "repair_inputs_changed")
+            self.assertEqual(state.circuit_breakers()[0]["state"], "open")
+
     def test_regeneration_delay_is_indefinite_and_capped(self):
         with (
             patch.object(app, "REGENERATION_INITIAL_DELAY_CYCLES", 2),

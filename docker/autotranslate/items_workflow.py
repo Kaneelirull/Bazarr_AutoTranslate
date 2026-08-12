@@ -29,6 +29,26 @@ def _record_valid_circuit_outcome(series_key: str, series_title: str) -> None:
     except _runtime.StateStoreError as exc:
         print(f'{_runtime.YELLOW}[CIRCUIT] Could not close validated trial: {exc}{_runtime.RESET}')
 
+def _defer_bound_retry_trial(retry_plan: dict | None, trial_claimed: bool, trial_generation: int | None, reason: str) -> None:
+    if retry_plan is None or not trial_claimed or trial_generation is None:
+        return
+    try:
+        state = _runtime._get_validation_state()
+        rescheduled = state.reschedule_retry_no_progress(
+            retry_plan['id'], completed_cycle=_runtime._completed_cycle,
+            deferral_class='output_deferred', reason=reason, delay_cycles=1,
+            lease_generation=trial_generation,
+        )
+        if rescheduled is not None:
+            state.settle_circuit_trial_for_retry(
+                retry_plan['id'], lease_generation=trial_generation,
+                outcome='deferred', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+                reason=reason,
+            )
+            _runtime._refresh_status_diagnostics()
+    except _runtime.StateStoreError as exc:
+        print(f'{_runtime.YELLOW}[CIRCUIT] Could not release deferred output trial: {exc}{_runtime.RESET}')
+
 def _bazarr_has_repaired_path(result: _runtime.RepairJobResult) -> bool:
     if result.item_id is None or result.item_type not in ('episodes', 'movies'):
         return True
@@ -571,12 +591,14 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
             with stats_lock:
                 stats['timed_out'] += 1
             _runtime._status_transition(item_type, item_id, target_lang, 'timed_out', reason='completed output missing')
+            _defer_bound_retry_trial(retry_plan, trial_claimed, trial_generation, 'completed output missing')
             _runtime._shared_capacity.release(shared_token)
             continue
         if not _runtime._normalize_managed_output(actual_target_path, title):
             with stats_lock:
                 stats['deferred'] = stats.get('deferred', 0) + 1
             _runtime._status_transition(item_type, item_id, target_lang, 'deferred', reason='managed file ownership failed')
+            _defer_bound_retry_trial(retry_plan, trial_claimed, trial_generation, 'managed file ownership failed')
             _runtime._shared_capacity.release(shared_token)
             continue
         actual_suffix = _runtime._target_suffix(actual_target_path, target_lang)
@@ -589,6 +611,7 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
             with stats_lock:
                 stats['deferred'] = stats.get('deferred', 0) + 1
             _runtime._status_transition(item_type, item_id, target_lang, 'deferred', reason='completed output provenance persistence failed')
+            _defer_bound_retry_trial(retry_plan, trial_claimed, trial_generation, 'completed output provenance persistence failed')
             _runtime._shared_capacity.release(shared_token)
             continue
         if retry_plan is not None:
@@ -630,7 +653,8 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
 EXPORTS = {
     name: globals()[name] for name in (
         '_item_title', '_mark_activity', '_record_invalid_circuit_outcome',
-        '_record_valid_circuit_outcome', '_bazarr_has_repaired_path',
+        '_record_valid_circuit_outcome', '_defer_bound_retry_trial',
+        '_bazarr_has_repaired_path',
         '_record_cleanup_stats', '_source_is_usable', 'process_item',
     )
 }

@@ -628,7 +628,9 @@
       const eligible = Number(entry.eligibleAfterCycle);
       const remaining = Math.max(0, number(entry.completedCyclesRemaining));
       let trial = "Trial ready";
-      if (entry.state === "half_open" && entry.trialJobId != null) {
+      if (entry.state === "half_open" && entry.trialState === "validation_pending") {
+        trial = "Trial awaiting repair/validation";
+      } else if (entry.state === "half_open" && entry.trialJobId != null) {
         trial = "Trial in progress";
       } else if (remaining > 0) {
         trial = `Trial in ${remaining.toLocaleString()} ${remaining === 1 ? "cycle" : "cycles"}`;

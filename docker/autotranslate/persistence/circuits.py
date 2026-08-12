@@ -16,6 +16,101 @@ from typing import Iterable, Iterator
 from .common import ACTIVE_RETRY_STATES, SCHEMA_VERSION, StateStoreError, _path_key, _utc_iso
 
 class CircuitsRepositoryMixin:
+    def circuit_trial_for_retry_plan(self, retry_plan_id: int) -> dict | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT series_key, series_title, trial_owner, trial_job_id,
+                       trial_plan_id, lease_generation, trial_lease_state
+                FROM circuit_breakers
+                WHERE state='half_open' AND trial_plan_id=?
+                """,
+                (int(retry_plan_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "seriesKey": row["series_key"],
+            "seriesTitle": row["series_title"],
+            "trialOwner": row["trial_owner"],
+            "trialJobId": row["trial_job_id"],
+            "trialPlanId": row["trial_plan_id"],
+            "leaseGeneration": int(row["lease_generation"] or 0),
+            "trialState": row["trial_lease_state"],
+        }
+
+    def settle_circuit_trial_for_retry(
+        self,
+        retry_plan_id: int,
+        *,
+        lease_generation: int,
+        outcome: str,
+        open_cycles: int,
+        reason: str | None = None,
+        now: float | None = None,
+    ) -> dict:
+        """Atomically close or release the half-open trial linked to a retry."""
+        if outcome not in {"success", "failure", "deferred"}:
+            raise ValueError(f"unsupported circuit trial outcome: {outcome}")
+        timestamp = time.time() if now is None else float(now)
+        with self._transaction() as db:
+            row = db.execute(
+                """
+                SELECT * FROM circuit_breakers
+                WHERE state='half_open' AND trial_plan_id=?
+                """,
+                (int(retry_plan_id),),
+            ).fetchone()
+            if row is None:
+                return {"settled": False, "reason": "no matching half-open trial"}
+            if int(row["lease_generation"] or 0) != int(lease_generation):
+                return {"settled": False, "reason": "stale circuit trial generation"}
+
+            if outcome == "success":
+                state = "closed"
+                failures = 0
+                eligible_after_cycle = None
+            else:
+                state = "open"
+                failures = int(row["consecutive_failures"] or 0)
+                if outcome == "failure":
+                    failures += 1
+                eligible_after_cycle = (
+                    self._completed_cycle_in(db) + max(1, int(open_cycles))
+                )
+            cursor = db.execute(
+                """
+                UPDATE circuit_breakers SET
+                    consecutive_failures=?, state=?, opened_at=?, retry_at=NULL,
+                    eligible_after_cycle=?, half_open_claimed=0,
+                    trial_owner=NULL, trial_claimed_cycle=NULL,
+                    trial_claimed_at=NULL, trial_job_id=NULL,
+                    trial_lease_state=NULL, trial_plan_id=NULL,
+                    lease_expires_at=NULL, last_reason=?, updated_at=?
+                WHERE series_key=? AND state='half_open'
+                  AND trial_plan_id=? AND lease_generation=?
+                """,
+                (
+                    failures,
+                    state,
+                    timestamp if state == "open" else None,
+                    eligible_after_cycle,
+                    None if outcome == "success" else str(reason or outcome)[:500],
+                    timestamp,
+                    row["series_key"],
+                    int(retry_plan_id),
+                    int(lease_generation),
+                ),
+            )
+            if cursor.rowcount != 1:
+                return {"settled": False, "reason": "circuit trial changed"}
+        return {
+            "settled": True,
+            "state": state,
+            "failures": failures,
+            "eligibleAfterCycle": eligible_after_cycle,
+        }
+
     def circuit_permission(
         self,
         *,
@@ -360,7 +455,7 @@ class CircuitsRepositoryMixin:
                 """
                 SELECT series_key, series_title, consecutive_failures, state,
                        eligible_after_cycle, last_reason, trial_job_id,
-                       trial_claimed_at, lease_expires_at
+                       trial_claimed_at, lease_expires_at, trial_lease_state
                 FROM circuit_breakers
                 WHERE state IN ('open', 'half_open')
                   AND trim(series_title) != ''
@@ -390,6 +485,7 @@ class CircuitsRepositoryMixin:
                 ),
                 "reason": row["last_reason"],
                 "trialJobId": row["trial_job_id"],
+                "trialState": row["trial_lease_state"],
                 "trialReady": bool(
                     row["state"] == "open"
                     and max(
