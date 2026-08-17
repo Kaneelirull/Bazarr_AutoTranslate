@@ -6,7 +6,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -639,6 +639,68 @@ class StatusDashboardTests(unittest.TestCase):
                     urllib.request.urlopen(f"http://127.0.0.1:{port}/missing")
                 self.assertEqual(error.exception.code, 404)
                 error.exception.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_http_response_contains_expected_client_disconnects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self.make_tracker(directory)
+            server, thread = start_status_server(tracker, "127.0.0.1", 0)
+            try:
+                for error_type in (
+                    BrokenPipeError,
+                    ConnectionAbortedError,
+                    ConnectionResetError,
+                ):
+                    for failure_point in ("send_response", "end_headers", "write"):
+                        with self.subTest(
+                            error_type=error_type.__name__,
+                            failure_point=failure_point,
+                        ):
+                            handler = object.__new__(server.RequestHandlerClass)
+                            handler.send_response = Mock()
+                            handler.send_header = Mock()
+                            handler.end_headers = Mock()
+                            handler.wfile = Mock()
+                            if failure_point == "write":
+                                handler.wfile.write.side_effect = error_type()
+                            else:
+                                getattr(handler, failure_point).side_effect = error_type()
+                            handler.close_connection = False
+
+                            handler._send(
+                                200,
+                                "application/json; charset=utf-8",
+                                b'{}',
+                            )
+
+                            self.assertTrue(handler.close_connection)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_http_response_propagates_unexpected_write_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self.make_tracker(directory)
+            server, thread = start_status_server(tracker, "127.0.0.1", 0)
+            try:
+                handler = object.__new__(server.RequestHandlerClass)
+                handler.send_response = Mock()
+                handler.send_header = Mock()
+                handler.end_headers = Mock()
+                handler.wfile = Mock()
+                handler.wfile.write.side_effect = OSError("unexpected failure")
+                handler.close_connection = False
+
+                with self.assertRaisesRegex(OSError, "unexpected failure"):
+                    handler._send(
+                        200,
+                        "application/json; charset=utf-8",
+                        b'{}',
+                    )
             finally:
                 server.shutdown()
                 server.server_close()
