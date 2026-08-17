@@ -986,7 +986,7 @@ class StatusTracker:
         ]
         up_next = [
             self._job_public(job) for job in jobs if job.get("state") == "queued"
-        ][:10]
+        ]
         recent = [
             event for event in reversed(self._history) if event.get("kind") == "job"
         ][:self.recent_limit]

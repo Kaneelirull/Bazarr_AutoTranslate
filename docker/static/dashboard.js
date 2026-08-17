@@ -5,6 +5,11 @@
   const IDLE_REFRESH_MS = 20_000;
   const MAX_BACKOFF_MS = 60_000;
   const RETRY_BATCH_SIZE = 20;
+  const UP_NEXT_BATCH_SIZE = 10;
+  const ACTIVE_RETRY_STATES = new Set([
+    "repair_retry_queued", "regeneration_waiting",
+    "regeneration_queued", "retry_in_progress",
+  ]);
   const root = document.getElementById("dashboard");
   const configuredTimeZone = root.dataset.timeZone || "UTC";
   let snapshot = {};
@@ -19,6 +24,9 @@
   let retrySortKey = "nextAction";
   let retrySortDirection = "asc";
   let retryVisibleCount = RETRY_BATCH_SIZE;
+  let upNextVisibleCount = UP_NEXT_BATCH_SIZE;
+  let queueViewMode = "auto";
+  let queueCycleId = null;
   let recoveryDiagnosticsOpen = null;
   let observationSearch = "";
   let observationClassification = "";
@@ -431,10 +439,10 @@
     + `<strong class="metric-value">${escapeHtml(value)}</strong></div>`
   );
 
-  const panelHeader = (title, note = "") => (
+  const panelHeader = (title, note = "", actions = "") => (
     `<div class="panel-header"><div><h2>${escapeHtml(title)}</h2>`
     + (note ? `<p class="section-note">${note}</p>` : "")
-    + "</div></div>"
+    + `</div>${actions}</div>`
   );
 
   const observationClassificationLabel = (value) => ({
@@ -700,21 +708,24 @@
   };
 
   const renderRecoveryAttention = (plans, completedCycle, manualReviewCount) => {
-    const automatic = plans.filter((plan) => !plan.manualReview);
-    const dueNow = automatic.filter((plan) => (
+    const dueNow = plans.filter((plan) => (
       plan.state === "regeneration_waiting"
       && number(plan.eligibleCompletedCycle) <= number(completedCycle)
     )).length;
-    const dueNext = automatic.filter((plan) => (
+    const dueNext = plans.filter((plan) => (
       plan.state === "regeneration_waiting"
       && number(plan.eligibleCompletedCycle) === number(completedCycle) + 1
     )).length;
     return `<nav class="recovery-attention" aria-label="Recovery attention">
-      <a href="#retry-queue"><span>Due now</span><strong>${dueNow.toLocaleString()}</strong></a>
-      <a href="#retry-queue"><span>Next cycle</span><strong>${dueNext.toLocaleString()}</strong></a>
+      <a href="#retry-queue" data-open-retry-queue><span>Due now</span><strong>${dueNow.toLocaleString()}</strong></a>
+      <a href="#retry-queue" data-open-retry-queue><span>Next cycle</span><strong>${dueNext.toLocaleString()}</strong></a>
       <a href="/review"><span>Manual review</span><strong>${number(manualReviewCount).toLocaleString()}</strong></a>
     </nav>`;
   };
+
+  const activeRetryPlans = (plans) => plans.filter((plan) => (
+    !plan.manualReview && ACTIVE_RETRY_STATES.has(plan.state)
+  ));
 
   const retryMedia = (plan) => ({
     title: plan.displayTitle || `${plan.itemType || "media"} ${plan.itemId ?? "?"}`,
@@ -894,10 +905,7 @@
         (job) => [String(job.retryPlanId), job],
       ),
     );
-    const active = plans.filter((plan) => ![
-      "accepted_after_retry", "accepted_after_manual_recheck",
-      "manual_dismissed", "superseded",
-    ].includes(plan.state)).map((plan) => {
+    const active = activeRetryPlans(plans).map((plan) => {
       const job = jobsByPlan.get(retryPlanId(plan));
       if (!job) return plan;
       const runtimeState = ["translating", "validating"].includes(job.state)
@@ -909,11 +917,8 @@
     expandedRetryIds.forEach((id) => {
       if (!activeIds.has(id)) expandedRetryIds.delete(id);
     });
-    const note = `Persistent quarantine recovery · completed cycle ${Number(completedCycle || 0)}`;
     if (!active.length) {
-      return `<section class="panel" id="retry-queue">${panelHeader("Retry queue", note)}
-        <p class="empty-state">No retry work scheduled.</p>
-      </section>`;
+      return '<p class="empty-state">No retry work scheduled.</p>';
     }
     const sorted = [...active].sort((left, right) => (
       compareRetryPlans(left, right, completedCycle)
@@ -958,8 +963,7 @@
       `<option value="${escapeHtml(key)}" ${retrySortKey === key ? "selected" : ""}>${escapeHtml(label)}</option>`
     )).join("");
     const remaining = Math.max(0, active.length - visible.length);
-    return `<section class="panel" id="retry-queue">${panelHeader("Retry queue", note)}
-      <div class="retry-toolbar">
+    return `<div class="retry-toolbar">
         <div class="retry-summary" aria-label="${active.length} active retries, ${dueNow} due now, ${dueNext} due next cycle">
           <span><strong>${active.length.toLocaleString()}</strong> active</span>
           <span><strong>${dueNow.toLocaleString()}</strong> due now</span>
@@ -981,7 +985,53 @@
       <div class="retry-table-footer">
         <span class="retry-showing" aria-live="polite">Showing ${visible.length.toLocaleString()} of ${active.length.toLocaleString()}</span>
         ${remaining ? `<button type="button" class="btn btn-secondary btn-sm retry-show-more" data-retry-focus="show-more">Show ${Math.min(RETRY_BATCH_SIZE, remaining).toLocaleString()} more</button>` : ""}
-      </div></div>
+      </div></div>`;
+  };
+
+  const queueViewControl = () => {
+    const options = [
+      ["auto", "Auto"], ["up-next", "Up next"], ["retry", "Retry queue"],
+    ];
+    return `<div class="queue-view-switch" role="group" aria-label="Queue view">${options.map(([value, label]) => (
+      `<button type="button" data-queue-mode="${value}" data-queue-focus="mode-${value}"
+        aria-pressed="${queueViewMode === value ? "true" : "false"}">${label}</button>`
+    )).join("")}</div>`;
+  };
+
+  const automaticQueueView = (service, activeRetries) => {
+    if (service.phase === "translating") return "up-next";
+    if (["retry_recovery", "repair_drain"].includes(service.phase)) {
+      return activeRetries.length ? "retry" : "up-next";
+    }
+    return activeRetries.length ? "retry" : "up-next";
+  };
+
+  const renderUpNext = (upcoming) => {
+    const visible = upcoming.slice(0, upNextVisibleCount);
+    const remaining = Math.max(0, upcoming.length - visible.length);
+    return `${table(visible, "upcoming", "No queued jobs.")}
+      <div class="queue-table-footer">
+        <span class="queue-showing" aria-live="polite">Showing ${visible.length.toLocaleString()} of ${upcoming.length.toLocaleString()}</span>
+        ${remaining ? `<button type="button" class="btn btn-secondary btn-sm up-next-show-more"
+          data-queue-focus="up-next-more">Show ${Math.min(UP_NEXT_BATCH_SIZE, remaining).toLocaleString()} more</button>` : ""}
+      </div>`;
+  };
+
+  const renderCombinedQueue = (service, upcoming, retryPlans, completedCycle, maxAttempts, cycleJobs) => {
+    const activeRetries = activeRetryPlans(retryPlans);
+    const visibleView = queueViewMode === "auto"
+      ? automaticQueueView(service, activeRetries)
+      : queueViewMode;
+    const retryVisible = visibleView === "retry";
+    const title = retryVisible ? "Retry queue" : "Up next";
+    const note = retryVisible
+      ? `${activeRetries.length.toLocaleString()} active · persistent quarantine recovery · completed cycle ${Number(completedCycle || 0)}`
+      : `${upcoming.length.toLocaleString()} queued job${upcoming.length === 1 ? "" : "s"}`;
+    const content = retryVisible
+      ? renderRetryPlans(retryPlans, completedCycle, maxAttempts, cycleJobs)
+      : renderUpNext(upcoming);
+    return `<section class="panel combined-queue" id="retry-queue" data-queue-view="${visibleView}">
+      ${panelHeader(title, note, queueViewControl())}${content}
     </section>`;
   };
 
@@ -1053,6 +1103,7 @@
   const render = () => {
     const stableFocusKey = document.activeElement?.dataset?.focusKey || "";
     const retryFocusKey = document.activeElement?.dataset?.retryFocus || "";
+    const queueFocusKey = document.activeElement?.dataset?.queueFocus || "";
     const observationFocusKey = document.activeElement?.dataset?.observationFocus || "";
     const observationSelectionStart = document.activeElement?.selectionStart;
     const service = snapshot.service || {};
@@ -1069,24 +1120,29 @@
     tooltipSequence = 0;
     const retryPlans = snapshot.retryPlans || [];
     const manualReviewPlans = retryPlans.filter((plan) => plan.manualReview);
+    const automaticRetryPlans = activeRetryPlans(retryPlans);
+    const nextQueueCycleId = cycle.id ?? null;
+    if (queueCycleId !== null && nextQueueCycleId !== queueCycleId) {
+      upNextVisibleCount = UP_NEXT_BATCH_SIZE;
+    }
+    queueCycleId = nextQueueCycleId;
     root.innerHTML = `<div class="dashboard-shell">
       ${renderHeader(service, cycle, manualReviewPlans.length)}
       ${renderOverview(cycle, service)}
       <section class="panel">${panelHeader("Active now", `${active.length.toLocaleString()} in progress`)}
         ${table(active, "active", "No active translations, repairs, startup, or maintenance.")}
       </section>
-      ${renderRecoveryAttention(retryPlans, snapshot.completedCycle || 0, manualReviewPlans.length)}
-      ${renderRetryPlans(
-        retryPlans.filter((plan) => !plan.manualReview),
+      ${renderRecoveryAttention(automaticRetryPlans, snapshot.completedCycle || 0, manualReviewPlans.length)}
+      ${renderCombinedQueue(
+        service,
+        upcoming,
+        retryPlans,
         snapshot.completedCycle || 0,
         snapshot.retryMaxAttempts ?? 0,
         [...active, ...upcoming],
       )}
       ${renderDiagnostics(snapshot.timing || {}, snapshot.circuits || [])}
       ${renderRecoveryDiagnostics(service.recoveryDiagnostics || {})}
-      <section class="panel">${panelHeader("Up next", "Next 10 queued jobs")}
-        ${table(upcoming, "upcoming", "No queued jobs.")}
-      </section>
       <section class="panel">${panelHeader("Recent outcomes", "Latest completed work")}
         ${table(recent, "recent", "No completed jobs recorded yet.")}
       </section>
@@ -1120,6 +1176,12 @@
         root.querySelectorAll("[data-retry-focus]"),
       ).find((node) => node.dataset.retryFocus === retryFocusKey);
       retryFocusTarget?.focus({ preventScroll: true });
+    }
+    if (queueFocusKey) {
+      const queueFocusTarget = Array.from(
+        root.querySelectorAll("[data-queue-focus]"),
+      ).find((node) => node.dataset.queueFocus === queueFocusKey);
+      queueFocusTarget?.focus({ preventScroll: true });
     }
     if (observationFocusKey) {
       const observationFocusTarget = root.querySelector(
@@ -1228,12 +1290,36 @@
     });
   };
 
+  const bindQueueControls = () => {
+    document.querySelectorAll("[data-queue-mode]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (!["auto", "up-next", "retry"].includes(button.dataset.queueMode)) return;
+        queueViewMode = button.dataset.queueMode;
+        render();
+      });
+    });
+    document.querySelector(".up-next-show-more")?.addEventListener("click", () => {
+      upNextVisibleCount += UP_NEXT_BATCH_SIZE;
+      render();
+    });
+    document.querySelectorAll("[data-open-retry-queue]").forEach((link) => {
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        queueViewMode = "retry";
+        render();
+        document.getElementById("retry-queue")?.scrollIntoView({ block: "start" });
+        document.querySelector('[data-queue-mode="retry"]')?.focus({ preventScroll: true });
+      });
+    });
+  };
+
   const bindControls = () => {
     const theme = document.getElementById("theme-toggle");
     const refresh = document.getElementById("refresh-button");
     theme?.addEventListener("click", toggleTheme);
     refresh?.addEventListener("click", () => refreshStatus(true));
     bindRetryControls();
+    bindQueueControls();
     const observationFilters = document.getElementById("observation-filters");
     const observationSearchInput = observationFilters?.querySelector('input[type="search"]');
     const observationSelects = observationFilters?.querySelectorAll("select") || [];

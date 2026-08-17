@@ -56,6 +56,98 @@ class StateStoreTests(unittest.TestCase):
             )
             reopened.close()
 
+    def test_distinct_repair_output_reenables_end_cycle_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            plan, repeated = store.schedule_retry_plan(
+                item_type="episodes", item_id=42, target_language="et",
+                source_hash="source", failure_class="cue_repairable",
+                rules=["excessive_lines"], state="repair_retry_queued",
+                failed_output_hash="bad-a", eligible_completed_cycle=1,
+            )
+            self.assertFalse(repeated)
+            store.update_retry_plan(
+                plan["id"], state="repair_retry_queued",
+                end_cycle_repair_attempted=True,
+            )
+
+            updated, repeated = store.schedule_retry_plan(
+                item_type="episodes", item_id=42, target_language="et",
+                source_hash="source", failure_class="cue_repairable",
+                rules=["excessive_lines"], state="repair_retry_queued",
+                failed_output_hash="bad-b", eligible_completed_cycle=2,
+            )
+
+            self.assertFalse(repeated)
+            self.assertFalse(updated["endCycleRepairAttempted"])
+
+            store.update_retry_plan(
+                plan["id"], state="repair_retry_queued",
+                end_cycle_repair_attempted=True,
+            )
+            repeated_plan, repeated = store.schedule_retry_plan(
+                item_type="episodes", item_id=42, target_language="et",
+                source_hash="source", failure_class="cue_repairable",
+                rules=["excessive_lines"], state="repair_retry_queued",
+                failed_output_hash="bad-b", eligible_completed_cycle=99,
+            )
+            self.assertTrue(repeated)
+            self.assertTrue(repeated_plan["endCycleRepairAttempted"])
+            store.close()
+
+    def test_startup_recovery_only_reenables_stale_queued_repairs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            queued, _ = store.schedule_retry_plan(
+                item_type="episodes", item_id=1, target_language="et",
+                source_hash="queued", failure_class="cue_repairable",
+                rules=["excessive_lines"], state="repair_retry_queued",
+                eligible_completed_cycle=1,
+            )
+            waiting, _ = store.schedule_retry_plan(
+                item_type="episodes", item_id=2, target_language="et",
+                source_hash="waiting", failure_class="whole_file",
+                rules=["target_structure"], state="regeneration_waiting",
+                eligible_completed_cycle=1,
+            )
+            active, _ = store.schedule_retry_plan(
+                item_type="episodes", item_id=3, target_language="et",
+                source_hash="active", failure_class="whole_file",
+                rules=["target_structure"], state="retry_in_progress",
+                eligible_completed_cycle=1,
+            )
+            durable, _ = store.schedule_retry_plan(
+                item_type="episodes", item_id=4, target_language="et",
+                source_hash="durable", failure_class="cue_repairable",
+                rules=["excessive_lines"], state="repair_retry_queued",
+                eligible_completed_cycle=1,
+            )
+            store.enqueue_repair_job(
+                dedupe_key="durable-repair", target_language="et",
+                payload={"retryPlanId": durable["id"]},
+            )
+            for plan in (queued, waiting, active, durable):
+                store.update_retry_plan(
+                    plan["id"], state=plan["state"],
+                    end_cycle_repair_attempted=True,
+                )
+
+            self.assertEqual(store.recover_stale_end_cycle_repair_attempts(), 1)
+            self.assertFalse(
+                store.retry_plan(queued["id"])["endCycleRepairAttempted"]
+            )
+            self.assertTrue(
+                store.retry_plan(waiting["id"])["endCycleRepairAttempted"]
+            )
+            self.assertTrue(
+                store.retry_plan(active["id"])["endCycleRepairAttempted"]
+            )
+            self.assertTrue(
+                store.retry_plan(durable["id"])["endCycleRepairAttempted"]
+            )
+            self.assertEqual(store.recover_stale_end_cycle_repair_attempts(), 0)
+            store.close()
+
     def test_retry_claims_are_batched_and_limited_per_series(self):
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite3")

@@ -92,6 +92,25 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIsNone(jobs[-1]["episodeCode"])
         self.assertIsNone(jobs[-1]["episodeTitle"])
 
+    def test_up_next_snapshot_returns_complete_ordered_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self.make_tracker(directory)
+            work = [({
+                "radarrId": item_id,
+                "title": f"Movie {item_id:02d}",
+                "missing_subtitles": [{"code2": "et"}],
+            }, "movies", "radarrId") for item_id in range(15)]
+            jobs = build_cycle_jobs(work, ["et"], "cycle-many", title_for)
+            tracker.start_cycle("cycle-many", 1, jobs)
+
+            up_next = tracker.snapshot()["upNext"]
+
+            self.assertEqual(len(up_next), 15)
+            self.assertEqual(
+                [job["title"] for job in up_next],
+                [f"Movie {item_id:02d}" for item_id in range(15)],
+            )
+
     def test_episode_identity_accepts_schema_variants_and_paths(self):
         self.assertEqual(
             episode_identity(
@@ -722,6 +741,20 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("compareRetryPlans", script)
         self.assertIn("expandedRetryIds", script)
         self.assertIn("RETRY_BATCH_SIZE = 20", script)
+        self.assertIn("UP_NEXT_BATCH_SIZE = 10", script)
+        self.assertIn("ACTIVE_RETRY_STATES = new Set", script)
+        self.assertIn('"repair_retry_queued", "regeneration_waiting"', script)
+        self.assertIn('"regeneration_queued", "retry_in_progress"', script)
+        self.assertIn('role="group" aria-label="Queue view"', script)
+        self.assertIn('["auto", "Auto"]', script)
+        self.assertIn('["up-next", "Up next"]', script)
+        self.assertIn('["retry", "Retry queue"]', script)
+        self.assertIn('aria-pressed="${queueViewMode === value ? "true" : "false"}"', script)
+        self.assertIn('service.phase === "translating"', script)
+        self.assertIn('["retry_recovery", "repair_drain"]', script)
+        self.assertIn("upNextVisibleCount += UP_NEXT_BATCH_SIZE", script)
+        self.assertIn("upNextVisibleCount = UP_NEXT_BATCH_SIZE", script)
+        self.assertIn("data-open-retry-queue", script)
         self.assertIn("Showing ${visible.length.toLocaleString()} of", script)
         self.assertIn("Show ${Math.min(RETRY_BATCH_SIZE, remaining)", script)
         self.assertIn('data-retry-sort="${escapeHtml(key)}"', script)
@@ -735,6 +768,10 @@ class StatusDashboardTests(unittest.TestCase):
         self.assertIn("width: min(90%, 2200px)", stylesheet)
         self.assertIn(".retry-table td.cell-details", stylesheet)
         self.assertIn(".time-exact-only", stylesheet)
+        self.assertIn(".queue-view-switch", stylesheet)
+        self.assertIn('.queue-view-switch button[aria-pressed="true"]', stylesheet)
+        self.assertIn(".combined-queue .panel-header", stylesheet)
+        self.assertIn('.retry-table td[data-label="Next action"]', stylesheet)
 
     def test_port_conflict_raises_without_corrupting_tracker(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1000,10 +1037,12 @@ class StatusDashboardTests(unittest.TestCase):
         overview_position = render.index("renderOverview")
         active_position = render.index('panelHeader("Active now"')
         recovery_position = render.index("renderRecoveryAttention")
-        retry_position = render.index("renderRetryPlans")
+        retry_position = render.index("renderCombinedQueue")
         self.assertLess(overview_position, active_position)
         self.assertLess(active_position, recovery_position)
         self.assertLess(active_position, retry_position)
+        self.assertEqual(render.count('id="retry-queue"'), 0)
+        self.assertNotIn('panelHeader("Up next", "Next 10 queued jobs")', render)
         self.assertIn('startup: "Startup"', script)
         self.assertIn('retention: "Retention"', script)
         self.assertIn('retaining: "Applying retention"', script)
