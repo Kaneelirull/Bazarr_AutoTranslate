@@ -166,6 +166,7 @@ def main(config=None) -> int:
     _runtime._register_runtime_resources(state_store=state_store)
     backfilled_source_readiness = state_store.backfill_source_readiness()
     _runtime._completed_cycle = state_store.completed_cycle()
+    recovered_end_cycle_repairs = state_store.recover_stale_end_cycle_repair_attempts()
     recovered_repairs = state_store.recover_repair_jobs()
     reactivated_manual_reviews = state_store.reactivate_changed_manual_reviews(_runtime._VALIDATION_CONFIG_FINGERPRINT)
     recovered_claims = state_store.recover_retry_claims()
@@ -181,7 +182,7 @@ def main(config=None) -> int:
         cue_count = _runtime._count_srt_cues(plan['sourcePath'])
         if cue_count and state_store.set_retry_source_cue_count(plan['id'], cue_count):
             backfilled_retry_sizes += 1
-    print(f'[CYCLE] Restored completed-cycle sequence {_runtime._completed_cycle}; released {recovered_claims} orphaned retry claim(s); persisted {recovered_repairs} repair job(s) for restart; reactivated {reactivated_manual_reviews} changed manual review(s); reconciled {reconciled_retry_claims} submitted retry claim(s); released {recovered_trials} unbound circuit trial(s); reconciled {reconciled_trials} bound circuit trial(s); backfilled {backfilled_retry_sizes} retry size(s); trusted {backfilled_source_readiness} proven source hash(es); dispatched {pending_manual_scans["dispatched"]}/{pending_manual_scans["examined"]} pending manual scan(s)')
+    print(f'[CYCLE] Restored completed-cycle sequence {_runtime._completed_cycle}; released {recovered_claims} orphaned retry claim(s); re-enabled {recovered_end_cycle_repairs} stale end-cycle repair(s); persisted {recovered_repairs} repair job(s) for restart; reactivated {reactivated_manual_reviews} changed manual review(s); reconciled {reconciled_retry_claims} submitted retry claim(s); released {recovered_trials} unbound circuit trial(s); reconciled {reconciled_trials} bound circuit trial(s); backfilled {backfilled_retry_sizes} retry size(s); trusted {backfilled_source_readiness} proven source hash(es); dispatched {pending_manual_scans["dispatched"]}/{pending_manual_scans["examined"]} pending manual scan(s)')
     status_server = None
     if _runtime.STATUS_ENABLED:
         try:

@@ -199,6 +199,9 @@ class RetriesRepositoryMixin:
                         source_cue_count = COALESCE(?, source_cue_count),
                         failure_class = ?, rules_json = ?,
                         state = CASE WHEN ? THEN state ELSE ? END,
+                        end_cycle_repair_attempted = CASE
+                            WHEN NOT ? AND ? = 'repair_retry_queued' THEN 0
+                            ELSE end_cycle_repair_attempted END,
                         last_failure_at = ?,
                         failed_output_hash = COALESCE(?, failed_output_hash),
                         eligible_completed_cycle =
@@ -213,6 +216,7 @@ class RetriesRepositoryMixin:
                         _path_key(source_path), source_language, _path_key(target_path),
                         series_key, series_title, media_title, source_cue_count,
                         failure_class, json.dumps(rule_values), repeated, state,
+                        repeated, state,
                         timestamp, failed_output_hash, repeated,
                         max(0, int(eligible_completed_cycle)),
                         _path_key(artifact_path), _path_key(report_path),
@@ -247,6 +251,44 @@ class RetriesRepositoryMixin:
                 "SELECT * FROM retry_plans WHERE id = ?", (plan_id,)
             ).fetchone()
         return self._retry_plan_dict(row), repeated
+
+    def recover_stale_end_cycle_repair_attempts(self) -> int:
+        """Re-enable repair rows left queued behind a completed attempt marker."""
+        with self._transaction() as db:
+            protected_plan_ids: set[int] = set()
+            durable_repairs = db.execute(
+                """
+                SELECT payload_json FROM repair_jobs
+                WHERE state IN ('queued', 'active', 'persisted_for_restart')
+                """
+            ).fetchall()
+            for repair in durable_repairs:
+                try:
+                    retry_plan_id = json.loads(
+                        repair["payload_json"] or "{}"
+                    ).get("retryPlanId")
+                    if retry_plan_id is not None:
+                        protected_plan_ids.add(int(retry_plan_id))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+            protection = ""
+            parameters: list[object] = [time.time()]
+            if protected_plan_ids:
+                protection = " AND id NOT IN ({})".format(
+                    ",".join("?" for _value in protected_plan_ids)
+                )
+                parameters.extend(sorted(protected_plan_ids))
+            cursor = db.execute(
+                f"""
+                UPDATE retry_plans
+                SET end_cycle_repair_attempted=0, updated_at=?
+                WHERE state='repair_retry_queued'
+                  AND end_cycle_repair_attempted=1
+                  {protection}
+                """,
+                parameters,
+            )
+            return max(0, int(cursor.rowcount))
 
     def register_series_alias(
         self, alias_key: str, canonical_key: str, series_title: str | None = None

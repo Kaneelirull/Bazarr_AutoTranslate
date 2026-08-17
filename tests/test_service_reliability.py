@@ -619,6 +619,109 @@ class ServiceReliabilityTests(unittest.TestCase):
                 self.assertEqual(retry["lastDeferralClass"], "output_deferred")
                 self.assertEqual(state.circuit_breakers()[0]["state"], "open")
 
+    def test_existing_retry_success_resolves_plan_without_bound_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = app._validation_state
+            plan, _ = state.schedule_retry_plan(
+                item_type="episodes", item_id=42, target_language="et",
+                source_hash="source", source_path=root / "show.en.srt",
+                source_language="en", target_path=root / "show.et.srt",
+                failure_class="whole_file", rules=["target_structure"],
+                state="regeneration_waiting", eligible_completed_cycle=0,
+                series_key="sonarr:1", series_title="Top Gear",
+            )
+            state.record_circuit_outcome(
+                series_key="sonarr:1", series_title="Top Gear", success=False,
+                reason="invalid", threshold=1, open_cycles=1,
+                config_fingerprint=app._CIRCUIT_CONFIG_FINGERPRINT,
+            )
+
+            self.assertTrue(app._resolve_existing_retry_success(
+                plan, "sonarr:1", "Top Gear",
+            ))
+
+            self.assertEqual(
+                state.retry_plan(plan["id"])["state"], "accepted_after_retry"
+            )
+            self.assertEqual(state.circuit_breakers(), [])
+
+    def test_existing_retry_success_closes_matching_bound_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, plan, _ = self._bound_retry_circuit(
+                root / "show.en.srt", root / "show.et.srt"
+            )
+
+            self.assertTrue(app._resolve_existing_retry_success(
+                plan, "sonarr:1", "Top Gear",
+            ))
+
+            self.assertEqual(
+                state.retry_plan(plan["id"])["state"], "accepted_after_retry"
+            )
+            self.assertEqual(state.circuit_breakers(), [])
+
+    def test_existing_retry_stale_settlement_reopens_matching_trial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, plan, _ = self._bound_retry_circuit(
+                root / "show.en.srt", root / "show.et.srt"
+            )
+            replacement, _ = state.schedule_retry_plan(
+                item_type="episodes", item_id=42, target_language="et",
+                source_hash="changed", source_path=root / "show.en.srt",
+                source_language="en", target_path=root / "show.et.srt",
+                failure_class="whole_file", rules=["target_structure"],
+                state="regeneration_waiting", eligible_completed_cycle=0,
+                series_key="sonarr:1", series_title="Top Gear",
+            )
+
+            self.assertFalse(app._resolve_existing_retry_success(
+                plan, "sonarr:1", "Top Gear",
+            ))
+
+            self.assertEqual(state.retry_plan(plan["id"])["state"], "superseded")
+            self.assertEqual(
+                state.retry_plan(replacement["id"])["state"],
+                "regeneration_waiting",
+            )
+            self.assertEqual(state.circuit_breakers()[0]["state"], "open")
+
+    def test_existing_retry_stale_unbound_settlement_is_circuit_no_op(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = app._validation_state
+            stale, _ = state.schedule_retry_plan(
+                item_type="episodes", item_id=42, target_language="et",
+                source_hash="old", source_path=root / "show.en.srt",
+                source_language="en", target_path=root / "show.et.srt",
+                failure_class="whole_file", rules=["target_structure"],
+                state="regeneration_waiting", eligible_completed_cycle=0,
+                series_key="sonarr:1", series_title="Top Gear",
+            )
+            state.record_circuit_outcome(
+                series_key="sonarr:1", series_title="Top Gear", success=False,
+                reason="invalid", threshold=1, open_cycles=3,
+                config_fingerprint=app._CIRCUIT_CONFIG_FINGERPRINT,
+            )
+            state.schedule_retry_plan(
+                item_type="episodes", item_id=42, target_language="et",
+                source_hash="new", source_path=root / "show.en.srt",
+                source_language="en", target_path=root / "show.et.srt",
+                failure_class="whole_file", rules=["target_structure"],
+                state="regeneration_waiting", eligible_completed_cycle=0,
+                series_key="sonarr:1", series_title="Top Gear",
+            )
+
+            self.assertFalse(app._resolve_existing_retry_success(
+                stale, "sonarr:1", "Top Gear",
+            ))
+
+            circuit = state.circuit_breakers()[0]
+            self.assertEqual(circuit["state"], "open")
+            self.assertEqual(circuit["failures"], 1)
+
     def test_end_cycle_repair_success_closes_linked_trial(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

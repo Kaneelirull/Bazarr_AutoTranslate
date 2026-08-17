@@ -29,6 +29,38 @@ def _record_valid_circuit_outcome(series_key: str, series_title: str) -> None:
     except _runtime.StateStoreError as exc:
         print(f'{_runtime.YELLOW}[CIRCUIT] Could not close validated trial: {exc}{_runtime.RESET}')
 
+def _resolve_existing_retry_success(
+    retry_plan: dict | None,
+    series_key: str,
+    series_title: str,
+) -> bool:
+    """Accept validated on-disk output and settle any persisted retry trial."""
+    if retry_plan is None:
+        _runtime._record_valid_circuit_outcome(series_key, series_title)
+        return True
+    state = _runtime._get_validation_state()
+    trial = state.circuit_trial_for_retry_plan(retry_plan['id'])
+    generation = trial.get('leaseGeneration') if trial is not None else None
+    resolved = _runtime._resolve_retry_success(
+        retry_plan['id'], retry_plan.get('sourceHash'),
+        lease_generation=generation,
+    )
+    if trial is None:
+        if resolved:
+            _runtime._record_valid_circuit_outcome(series_key, series_title)
+        return resolved
+    try:
+        state.settle_circuit_trial_for_retry(
+            retry_plan['id'], lease_generation=generation,
+            outcome='success' if resolved else 'deferred',
+            open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+            reason=None if resolved else 'retry acceptance was stale or superseded',
+        )
+        _runtime._refresh_status_diagnostics()
+    except _runtime.StateStoreError as exc:
+        print(f'{_runtime.YELLOW}[CIRCUIT] Could not settle validated on-disk retry trial: {exc}{_runtime.RESET}')
+    return resolved
+
 def _defer_bound_retry_trial(retry_plan: dict | None, trial_claimed: bool, trial_generation: int | None, reason: str) -> None:
     if retry_plan is None or not trial_claimed or trial_generation is None:
         return
@@ -263,9 +295,9 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
             _runtime._status_transition(item_type, item_id, target_lang, 'validating')
             validation_action, validation_report = _runtime._validate_translated_file(source_path, existing, source_lang, target_lang, item_id, title=title, defer_repair=True, item_type=item_type, media_duration=media_duration, origin=recovered_origin, provenance_source_hash=submission.get('sourceHash') if recovered_origin else None, series_key=series_key, series_title=series_title)
             if validation_action in ('valid', 'valid-warning', 'formatted', 'repaired'):
-                _runtime._record_valid_circuit_outcome(series_key, series_title)
-                if retry_plan is not None:
-                    _runtime._resolve_retry_success(item_type, item_id, target_lang)
+                _runtime._resolve_existing_retry_success(
+                    retry_plan, series_key, series_title,
+                )
                 with stats_lock:
                     stats['completed'] += 1
                     stats['translations'].append(f'{title}: {source_lang} -> {target_lang} (on disk)')
@@ -391,9 +423,9 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
             _runtime._status_transition(item_type, item_id, target_lang, 'validating')
             validation_action, validation_report = _runtime._validate_translated_file(source_path, appeared, source_lang, target_lang, item_id, title=title, defer_repair=True, item_type=item_type, media_duration=media_duration, origin=appeared_origin, provenance_source_hash=appeared_submission.get('sourceHash') if appeared_origin else None, series_key=series_key, series_title=series_title)
             if validation_action in ('valid', 'valid-warning', 'formatted', 'repaired'):
-                _runtime._record_valid_circuit_outcome(series_key, series_title)
-                if retry_plan is not None:
-                    _runtime._resolve_retry_success(item_type, item_id, target_lang)
+                _runtime._resolve_existing_retry_success(
+                    retry_plan, series_key, series_title,
+                )
                 with stats_lock:
                     stats['completed'] += 1
                     stats['translations'].append(f'{title}: {source_lang} -> {target_lang} (on disk)')
@@ -653,7 +685,8 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
 EXPORTS = {
     name: globals()[name] for name in (
         '_item_title', '_mark_activity', '_record_invalid_circuit_outcome',
-        '_record_valid_circuit_outcome', '_defer_bound_retry_trial',
+        '_record_valid_circuit_outcome', '_resolve_existing_retry_success',
+        '_defer_bound_retry_trial',
         '_bazarr_has_repaired_path',
         '_record_cleanup_stats', '_source_is_usable', 'process_item',
     )
