@@ -71,13 +71,17 @@ def _find_target_sidecars(video_path: str, target_lang: str) -> list[str]:
 def _find_existing_target(video_path: str, target_lang: str) -> str | None:
     return next(iter(_runtime._find_target_sidecars(video_path, target_lang)), None)
 
-def _snapshot_target_sidecars(video_path: str, target_lang: str) -> dict[str, str | None]:
-    return {_runtime.os.path.normcase(_runtime.os.path.abspath(path)): _runtime._file_hash_or_none(path) for path in _runtime._find_target_sidecars(video_path, target_lang)}
+def _snapshot_target_sidecars(video_path: str, target_lang: str, extra_paths=()) -> dict[str, str | None]:
+    paths = list(_runtime._find_target_sidecars(video_path, target_lang))
+    paths.extend((str(path) for path in extra_paths if path and _runtime.os.path.exists(path)))
+    return {_runtime.os.path.normcase(_runtime.os.path.abspath(path)): _runtime._file_hash_or_none(path) for path in paths}
 
-def _discover_completed_target(video_path: str, target_lang: str, expected_target_path: str, before: dict[str, str | None]) -> str | None:
+def _discover_completed_target(video_path: str, target_lang: str, expected_target_path: str, before: dict[str, str | None], extra_paths=()) -> str | None:
     expected = _runtime.os.path.normcase(_runtime.os.path.abspath(expected_target_path))
     changed: list[str] = []
-    for path in _runtime._find_target_sidecars(video_path, target_lang):
+    paths = list(_runtime._find_target_sidecars(video_path, target_lang))
+    paths.extend((str(path) for path in extra_paths if path and _runtime.os.path.exists(path)))
+    for path in dict.fromkeys(paths):
         normalized = _runtime.os.path.normcase(_runtime.os.path.abspath(path))
         current_hash = _runtime._file_hash_or_none(path)
         if normalized not in before or before[normalized] != current_hash:
@@ -109,11 +113,14 @@ def _explicit_non_full_sidecar(video_path: str | _runtime.Path, subtitle_path: s
     return next((token for token in _runtime._sidecar_tokens(video_path, subtitle_path) if token in _runtime._NON_FULL_SUBTITLE_TOKENS), None)
 
 def _classify_sidecar(video_path: str | _runtime.Path, subtitle_path: str | _runtime.Path) -> _runtime.SidecarClassification:
+    from .sources import is_extracted_sidecar
     path = _runtime.Path(subtitle_path)
     tokens = tuple(_runtime._sidecar_tokens(video_path, path))
     language = next((_runtime._ALIAS_TO_LANGUAGE[token] for token in tokens if token in _runtime._ALIAS_TO_LANGUAGE), None)
     managed = {code.casefold() for code in _runtime.LANGUAGES}
-    if language in managed:
+    if is_extracted_sidecar(path, video_path):
+        kind = 'source'
+    elif language in managed:
         kind = 'managed'
     elif language is not None:
         kind = 'nonmanaged'
@@ -547,6 +554,24 @@ def _normalize_managed_output(path: str | _runtime.Path, label: str) -> bool:
     except OSError as exc:
         print(f'{_runtime.RED}[ERROR] Could not set managed ownership for {label}: {exc}{_runtime.RESET}')
         return False
+
+def _publish_canonical_target(source_path: str | _runtime.Path, canonical_path: str | _runtime.Path, label: str) -> str | None:
+    source = _runtime.Path(source_path)
+    canonical = _runtime.Path(canonical_path)
+    if _runtime.os.path.normcase(_runtime.os.path.abspath(source)) == _runtime.os.path.normcase(_runtime.os.path.abspath(canonical)):
+        return str(canonical)
+    from .foundation import normalize_managed_file
+    with _runtime._artifact_access.hold(source, canonical):
+        if canonical.exists():
+            print(f'{_runtime.YELLOW}[TRANSLATE] Deferred canonical publication for {label}: {canonical.name} appeared concurrently{_runtime.RESET}')
+            return None
+        try:
+            normalize_managed_file(source)
+            _runtime.os.replace(source, canonical)
+            return str(canonical)
+        except OSError as exc:
+            print(f'{_runtime.RED}[ERROR] Could not publish canonical target for {label}: {exc}{_runtime.RESET}')
+            return None
 
 def _replace_managed_file(candidate: str | _runtime.Path, target: str | _runtime.Path) -> None:
     from .foundation import normalize_managed_file
@@ -1433,7 +1458,7 @@ EXPORTS = {
         '_submission_matches_source', '_is_variant_aware_adjacent_source',
         '_record_quarantine_event', '_apply_cleanup_action',
         '_target_repair_lock', '_write_recovery_candidate',
-        '_normalize_managed_output', '_replace_managed_file',
+        '_normalize_managed_output', '_publish_canonical_target', '_replace_managed_file',
         '_replace_managed_file_if_current', '_perform_repair',
         '_get_repair_executor', '_run_repair_with_capacity',
         '_publish_repair_status', '_queue_repair', '_defer_linked_repair_trial',

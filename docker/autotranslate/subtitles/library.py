@@ -115,13 +115,14 @@ def discover_target_subtitles(
         rf"\.(?P<lang>{language_pattern})(?P<variant>\.(?:hi|sdh|\d+))?\.srt$",
         re.IGNORECASE,
     )
+    from .sources import is_extracted_sidecar
     discovered: list[DiscoveredSubtitle] = []
     seen: set[Path] = set()
     for root in roots:
         if not root.exists():
             continue
         for path in root.rglob("*.srt"):
-            if not path.is_file() or path in seen:
+            if not path.is_file() or path in seen or is_extracted_sidecar(path):
                 continue
             match = pattern.search(path.name)
             if match:

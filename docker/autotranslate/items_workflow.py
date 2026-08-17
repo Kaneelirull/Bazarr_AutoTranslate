@@ -115,7 +115,7 @@ def _record_cleanup_stats(stats: dict, action: str, report) -> None:
     elif action == 'action-failed':
         stats['cleanup_action_failed'] = stats.get('cleanup_action_failed', 0) + 1
 
-def _source_is_usable(source_path: str, source_lang: str, media_duration: float | None, title: str, item_type: str, stats: dict, stats_lock: _runtime.threading.Lock) -> bool:
+def _source_is_usable(source_path: str, source_lang: str, media_duration: float | None, title: str, item_type: str, stats: dict, stats_lock: _runtime.threading.Lock, *, origin: str='bazarr') -> bool:
     from .subtitles.foundation import validate_srt_structure
     report = validate_srt_structure(source_path)
     completeness = _runtime._evaluate_completeness(source_path, media_duration)
@@ -123,7 +123,7 @@ def _source_is_usable(source_path: str, source_lang: str, media_duration: float 
     if report.valid:
         return True
     print(f"{_runtime.YELLOW}[SOURCE] Rejected {title} '{source_lang}': {report.summary()}{_runtime.RESET}")
-    action = _runtime._apply_cleanup_action(source_path, None, source_lang, report, completeness=completeness, origin='bazarr', lingarr_outcome='not attempted: source is not suitable for full translation')
+    action = _runtime._apply_cleanup_action(source_path, None, source_lang, report, completeness=completeness, origin=origin, lingarr_outcome='not attempted: source is not suitable for full translation')
     with stats_lock:
         stats['cleanup_undersized_sources'] = stats.get('cleanup_undersized_sources', 0) + int(completeness is not None and completeness.undersized)
         _runtime._record_cleanup_stats(stats, action, report)
@@ -178,6 +178,10 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
         if not code or not path:
             continue
         code = str(code).strip().lower()
+        if video_path:
+            from .subtitles.sources import is_extracted_sidecar
+            if is_extracted_sidecar(path, video_path):
+                continue
         if _runtime._truthy(s.get('forced')) or (video_path and _runtime._explicit_non_full_sidecar(video_path, path) is not None):
             with stats_lock:
                 stats['cleanup_forced_sources_skipped'] = stats.get('cleanup_forced_sources_skipped', 0) + 1
@@ -185,40 +189,67 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
         available_by_lang.setdefault(code, []).append(path)
     for code, paths in available_by_lang.items():
         paths.sort(key=lambda path: _runtime._sub_priority(path, code))
+    retry_target = str(retry_plan.get('targetLanguage') or '').lower() if retry_plan is not None else ''
     target_langs = [l for l in _runtime.LANGUAGES if l in missing and l not in available_by_lang]
     if retry_plan is not None:
-        retry_target = str(retry_plan.get('targetLanguage') or '').lower()
         if retry_target in missing and retry_target not in target_langs:
             target_langs.append(retry_target)
-    source_langs = [l for l in _runtime.LANGUAGES if l in available_by_lang]
-    if retry_plan is not None:
-        source_langs = [language for language in source_langs if language != retry_target]
-    for already_available in missing - set(target_langs):
-        _runtime._status_transition(item_type, item_id, already_available, 'deferred', reason='subtitle already reported on disk')
-    if not source_langs:
-        print(f'[SKIP] {title}: no source subtitle available from {_runtime.LANGUAGES}')
-        for target_lang in target_langs:
-            _runtime._status_transition(item_type, item_id, target_lang, 'missing_source', reason='no source subtitle')
-        return
-    if not target_langs:
-        return
     media_duration = _runtime._probe_media_duration(video_path) if video_path and _runtime.CLEANUP_UNDERSIZED_ENABLED else None
     source_lang = ''
     source_path = ''
+    source_origin = 'bazarr'
+    source_variant = ''
     rejected_sources = 0
-    for candidate_lang in source_langs:
-        for candidate_path in available_by_lang[candidate_lang]:
-            if _runtime._source_is_usable(candidate_path, candidate_lang, media_duration, title, item_type, stats, stats_lock):
-                source_lang = candidate_lang
-                source_path = candidate_path
+    if video_path:
+        from .subtitles.foundation import normalize_managed_file
+        from .subtitles.sources import discover_extracted_sources, prepare_extracted_source
+        extracted, receipt_error = discover_extracted_sources(video_path, _runtime._LANGUAGE_ALIASES, _runtime.LANGUAGES)
+        if receipt_error:
+            print(f'{_runtime.YELLOW}[SOURCE] Ignored extracted-subtitle receipt for {title}: {receipt_error}{_runtime.RESET}')
+        for candidate in extracted:
+            if retry_plan is not None and candidate.canonical_language == retry_target:
+                continue
+            prepared = prepare_extracted_source(candidate, artifact_access=_runtime._artifact_access, normalize=normalize_managed_file)
+            if prepared.error:
+                rejected_sources += 1
+                print(f'{_runtime.YELLOW}[SOURCE] Rejected extracted source for {title}: {prepared.error}{_runtime.RESET}')
+                continue
+            if prepared.changed:
+                with stats_lock:
+                    stats['source_duplicate_groups'] = stats.get('source_duplicate_groups', 0) + prepared.duplicate_groups
+                    stats['source_duplicate_cues_removed'] = stats.get('source_duplicate_cues_removed', 0) + prepared.removed_cues
+                print(f'[SOURCE] Deduplicated {candidate.path.name}: groups={prepared.duplicate_groups} removed_cues={prepared.removed_cues}')
+            if _runtime._source_is_usable(str(candidate.path), candidate.canonical_language, media_duration, title, item_type, stats, stats_lock, origin='embedded'):
+                source_lang = candidate.canonical_language
+                source_path = str(candidate.path)
+                source_origin = 'embedded'
+                source_variant = candidate.variant
+                with stats_lock:
+                    stats['embedded_sources_selected'] = stats.get('embedded_sources_selected', 0) + 1
                 break
             rejected_sources += 1
-        if source_path:
-            break
+    source_langs = [l for l in _runtime.LANGUAGES if l in available_by_lang and (retry_plan is None or l != retry_target)]
     if not source_path:
-        print(f'{_runtime.YELLOW}[SKIP] {title}: no complete source subtitle available{_runtime.RESET}')
+        for candidate_lang in source_langs:
+            for candidate_path in available_by_lang[candidate_lang]:
+                if _runtime._source_is_usable(candidate_path, candidate_lang, media_duration, title, item_type, stats, stats_lock):
+                    source_lang = candidate_lang
+                    source_path = candidate_path
+                    break
+                rejected_sources += 1
+            if source_path:
+                break
+    if source_origin == 'embedded' and source_lang in target_langs:
+        target_langs.remove(source_lang)
+        _runtime._status_transition(item_type, item_id, source_lang, 'deferred', reason='embedded subtitle already on disk')
+    for already_available in missing - set(target_langs) - ({source_lang} if source_origin == 'embedded' else set()):
+        _runtime._status_transition(item_type, item_id, already_available, 'deferred', reason='subtitle already reported on disk')
+    if not source_path:
+        print(f'[SKIP] {title}: no source subtitle available from {_runtime.LANGUAGES}')
         for target_lang in target_langs:
             _runtime._status_transition(item_type, item_id, target_lang, 'missing_source', reason='no complete source subtitle')
+        return
+    if not target_langs:
         return
     _runtime._status_set_episode_identity(item_type, item_id, source_path)
     if rejected_sources:
@@ -229,12 +260,16 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
         _se = _runtime._re.search('[Ss](\\d{1,2})[Ee](\\d{1,2})', _runtime.os.path.basename(source_path))
         if _se:
             title = f'{title} S{int(_se.group(1)):02d}E{int(_se.group(2)):02d}'
-    print(f'[INFO] {title}: source={source_lang}, targets={target_langs}')
+    print(f'[INFO] {title}: source={source_lang} ({source_origin}), targets={target_langs}')
     if retry_plan is not None:
         current_source_hash = _runtime._file_hash_or_none(source_path)
         if current_source_hash and current_source_hash != retry_plan.get('sourceHash'):
             retry_target = str(retry_plan['targetLanguage']).lower()
-            replacement_target = _runtime._derive_target_path(source_path, source_lang, retry_target)
+            if source_origin == 'embedded' and video_path:
+                from .subtitles.sources import canonical_target_path
+                replacement_target = str(canonical_target_path(video_path, retry_target, source_variant))
+            else:
+                replacement_target = _runtime._derive_target_path(source_path, source_lang, retry_target)
             _runtime._get_validation_state().schedule_retry_plan(item_type=item_type, item_id=item_id, target_language=retry_target, source_hash=current_source_hash, source_path=source_path, source_language=source_lang, target_path=replacement_target, series_key=series_key, series_title=series_title, media_title=title, source_cue_count=_runtime._count_srt_cues(source_path), failure_class=retry_plan.get('failureClass') or 'whole_file', rules=retry_plan.get('rules') or [], state='regeneration_waiting', eligible_completed_cycle=_runtime._completed_cycle + _runtime.REGENERATION_INITIAL_DELAY_CYCLES, reason='source changed; retry plan superseded')
             _runtime._get_validation_state().reset_circuit(series_key, 'source subtitle fingerprint changed')
             _runtime._status_transition(item_type, item_id, retry_target, 'waiting_retry', reason='source changed; retry plan superseded')
@@ -248,7 +283,11 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
     for target_lang in target_langs:
         if _runtime.shutdown_requested:
             break
-        target_path = _runtime._derive_target_path(source_path, source_lang, target_lang)
+        provider_target_path = _runtime._derive_target_path(source_path, source_lang, target_lang)
+        target_path = provider_target_path
+        if source_origin == 'embedded' and video_path:
+            from .subtitles.sources import canonical_target_path
+            target_path = str(canonical_target_path(video_path, target_lang, source_variant))
         if not target_path and video_path:
             target_path = _runtime.os.path.splitext(video_path)[0] + f'.{target_lang}.srt'
         if not target_path:
@@ -466,7 +505,12 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
                 stats['deferred'] += 1
             _runtime._status_transition(item_type, item_id, target_lang, 'missing_source', reason='source has no dialogue')
             continue
-        target_snapshot = _runtime._snapshot_target_sidecars(video_path, target_lang) if video_path else {}
+        extra_target_paths = (
+            [provider_target_path]
+            if provider_target_path and _runtime.os.path.normcase(_runtime.os.path.abspath(provider_target_path)) != _runtime.os.path.normcase(_runtime.os.path.abspath(target_path))
+            else []
+        )
+        target_snapshot = _runtime._snapshot_target_sidecars(video_path, target_lang, extra_target_paths) if video_path else {}
         source_hash = _runtime._file_hash_or_none(source_path)
         print(f'[TRANSLATE] {title}: {source_lang} -> {target_lang} ({src_lines} lines)')
         try:
@@ -617,7 +661,7 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
                 _runtime._status_transition(item_type, item_id, target_lang, 'failed', reason=f'Lingarr job {status.lower()}', details={'failureDetails': failure_details})
             _runtime._shared_capacity.release(shared_token)
             continue
-        actual_target_path = _runtime._discover_completed_target(video_path, target_lang, target_path, target_snapshot) if video_path else target_path if _runtime.os.path.exists(target_path) else None
+        actual_target_path = _runtime._discover_completed_target(video_path, target_lang, target_path, target_snapshot, extra_target_paths) if video_path else target_path if _runtime.os.path.exists(target_path) else None
         if actual_target_path is None:
             print(f"{_runtime.YELLOW}[WARNING] {title} '{target_lang}': Lingarr completed but no new target-language sidecar was found (expected {target_path}){_runtime.RESET}")
             with stats_lock:
@@ -626,6 +670,15 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
             _defer_bound_retry_trial(retry_plan, trial_claimed, trial_generation, 'completed output missing')
             _runtime._shared_capacity.release(shared_token)
             continue
+        if source_origin == 'embedded' and _runtime.os.path.normcase(_runtime.os.path.abspath(actual_target_path)) != _runtime.os.path.normcase(_runtime.os.path.abspath(target_path)):
+            actual_target_path = _runtime._publish_canonical_target(actual_target_path, target_path, title)
+            if actual_target_path is None:
+                with stats_lock:
+                    stats['deferred'] = stats.get('deferred', 0) + 1
+                _runtime._status_transition(item_type, item_id, target_lang, 'deferred', reason='canonical target appeared concurrently')
+                _defer_bound_retry_trial(retry_plan, trial_claimed, trial_generation, 'canonical target appeared concurrently')
+                _runtime._shared_capacity.release(shared_token)
+                continue
         if not _runtime._normalize_managed_output(actual_target_path, title):
             with stats_lock:
                 stats['deferred'] = stats.get('deferred', 0) + 1
