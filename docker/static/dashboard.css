@@ -710,7 +710,7 @@ h3 {
   padding: var(--space-5) var(--space-6) 0;
 }
 
-.queue-view-switch {
+.work-view-switch {
   display: inline-flex;
   flex: 0 0 auto;
   gap: 2px;
@@ -720,7 +720,7 @@ h3 {
   background: var(--bg-raised);
 }
 
-.queue-view-switch button {
+.work-view-switch button {
   border: 0;
   border-radius: var(--radius-sm);
   padding: 7px 11px;
@@ -733,16 +733,16 @@ h3 {
   white-space: nowrap;
 }
 
-.queue-view-switch button:hover {
+.work-view-switch button:hover {
   color: var(--text-primary);
 }
 
-.queue-view-switch button[aria-pressed="true"] {
+.work-view-switch button[aria-pressed="true"] {
   background: var(--accent-subtle);
   color: var(--accent);
 }
 
-.queue-view-switch button:focus-visible {
+.work-view-switch button:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
@@ -1742,12 +1742,12 @@ progress::-moz-progress-bar {
     padding-left: var(--space-4);
   }
 
-  .combined-queue .panel-header {
+  .work-panel .panel-header {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .queue-view-switch {
+  .work-view-switch {
     align-self: flex-start;
     max-width: 100%;
   }
@@ -2012,6 +2012,16 @@ progress::-moz-progress-bar {
 }
 
 @media (max-width: 440px) {
+  .work-view-switch {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .work-view-switch button {
+    width: 100%;
+  }
+
   .retry-table td[data-label="Retries"],
   .retry-table td[data-label="Next action"] {
     grid-column: 1 / -1;

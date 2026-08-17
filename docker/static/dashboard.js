@@ -25,7 +25,7 @@
   let retrySortDirection = "asc";
   let retryVisibleCount = RETRY_BATCH_SIZE;
   let upNextVisibleCount = UP_NEXT_BATCH_SIZE;
-  let queueViewMode = "auto";
+  let workViewMode = "auto";
   let queueCycleId = null;
   let recoveryDiagnosticsOpen = null;
   let observationSearch = "";
@@ -988,22 +988,21 @@
       </div></div>`;
   };
 
-  const queueViewControl = () => {
+  const workViewControl = () => {
     const options = [
-      ["auto", "Auto"], ["up-next", "Up next"], ["retry", "Retry queue"],
+      ["auto", "Auto"], ["active", "Active now"],
+      ["up-next", "Up next"], ["retry", "Retry queue"],
     ];
-    return `<div class="queue-view-switch" role="group" aria-label="Queue view">${options.map(([value, label]) => (
-      `<button type="button" data-queue-mode="${value}" data-queue-focus="mode-${value}"
-        aria-pressed="${queueViewMode === value ? "true" : "false"}">${label}</button>`
+    return `<div class="work-view-switch" role="group" aria-label="Work view">${options.map(([value, label]) => (
+      `<button type="button" data-work-mode="${value}" data-work-focus="mode-${value}"
+        aria-pressed="${workViewMode === value ? "true" : "false"}">${label}</button>`
     )).join("")}</div>`;
   };
 
-  const automaticQueueView = (service, activeRetries) => {
-    if (service.phase === "translating") return "up-next";
-    if (["retry_recovery", "repair_drain"].includes(service.phase)) {
-      return activeRetries.length ? "retry" : "up-next";
-    }
-    return activeRetries.length ? "retry" : "up-next";
+  const automaticWorkView = (activeJobs, activeRetries) => {
+    if (activeJobs.length) return "active";
+    if (activeRetries.length) return "retry";
+    return "up-next";
   };
 
   const renderUpNext = (upcoming) => {
@@ -1013,25 +1012,38 @@
       <div class="queue-table-footer">
         <span class="queue-showing" aria-live="polite">Showing ${visible.length.toLocaleString()} of ${upcoming.length.toLocaleString()}</span>
         ${remaining ? `<button type="button" class="btn btn-secondary btn-sm up-next-show-more"
-          data-queue-focus="up-next-more">Show ${Math.min(UP_NEXT_BATCH_SIZE, remaining).toLocaleString()} more</button>` : ""}
+          data-work-focus="up-next-more">Show ${Math.min(UP_NEXT_BATCH_SIZE, remaining).toLocaleString()} more</button>` : ""}
       </div>`;
   };
 
-  const renderCombinedQueue = (service, upcoming, retryPlans, completedCycle, maxAttempts, cycleJobs) => {
+  const renderWork = (activeJobs, upcoming, retryPlans, completedCycle, maxAttempts) => {
     const activeRetries = activeRetryPlans(retryPlans);
-    const visibleView = queueViewMode === "auto"
-      ? automaticQueueView(service, activeRetries)
-      : queueViewMode;
-    const retryVisible = visibleView === "retry";
-    const title = retryVisible ? "Retry queue" : "Up next";
-    const note = retryVisible
-      ? `${activeRetries.length.toLocaleString()} active · persistent quarantine recovery · completed cycle ${Number(completedCycle || 0)}`
-      : `${upcoming.length.toLocaleString()} queued job${upcoming.length === 1 ? "" : "s"}`;
-    const content = retryVisible
-      ? renderRetryPlans(retryPlans, completedCycle, maxAttempts, cycleJobs)
-      : renderUpNext(upcoming);
-    return `<section class="panel combined-queue" id="retry-queue" data-queue-view="${visibleView}">
-      ${panelHeader(title, note, queueViewControl())}${content}
+    const visibleView = workViewMode === "auto"
+      ? automaticWorkView(activeJobs, activeRetries)
+      : workViewMode;
+    let note;
+    let content;
+    if (visibleView === "active") {
+      note = `Active now · ${activeJobs.length.toLocaleString()} in progress`;
+      content = table(
+        activeJobs,
+        "active",
+        "No active translations, repairs, startup, or maintenance.",
+      );
+    } else if (visibleView === "retry") {
+      note = `Retry queue · ${activeRetries.length.toLocaleString()} active · persistent quarantine recovery · completed cycle ${Number(completedCycle || 0)}`;
+      content = renderRetryPlans(
+        retryPlans,
+        completedCycle,
+        maxAttempts,
+        [...activeJobs, ...upcoming],
+      );
+    } else {
+      note = `Up next · ${upcoming.length.toLocaleString()} queued job${upcoming.length === 1 ? "" : "s"}`;
+      content = renderUpNext(upcoming);
+    }
+    return `<section class="panel work-panel" id="retry-queue" data-work-view="${visibleView}">
+      ${panelHeader("Work", note, workViewControl())}${content}
     </section>`;
   };
 
@@ -1103,7 +1115,7 @@
   const render = () => {
     const stableFocusKey = document.activeElement?.dataset?.focusKey || "";
     const retryFocusKey = document.activeElement?.dataset?.retryFocus || "";
-    const queueFocusKey = document.activeElement?.dataset?.queueFocus || "";
+    const workFocusKey = document.activeElement?.dataset?.workFocus || "";
     const observationFocusKey = document.activeElement?.dataset?.observationFocus || "";
     const observationSelectionStart = document.activeElement?.selectionStart;
     const service = snapshot.service || {};
@@ -1129,18 +1141,14 @@
     root.innerHTML = `<div class="dashboard-shell">
       ${renderHeader(service, cycle, manualReviewPlans.length)}
       ${renderOverview(cycle, service)}
-      <section class="panel">${panelHeader("Active now", `${active.length.toLocaleString()} in progress`)}
-        ${table(active, "active", "No active translations, repairs, startup, or maintenance.")}
-      </section>
-      ${renderRecoveryAttention(automaticRetryPlans, snapshot.completedCycle || 0, manualReviewPlans.length)}
-      ${renderCombinedQueue(
-        service,
+      ${renderWork(
+        active,
         upcoming,
         retryPlans,
         snapshot.completedCycle || 0,
         snapshot.retryMaxAttempts ?? 0,
-        [...active, ...upcoming],
       )}
+      ${renderRecoveryAttention(automaticRetryPlans, snapshot.completedCycle || 0, manualReviewPlans.length)}
       ${renderDiagnostics(snapshot.timing || {}, snapshot.circuits || [])}
       ${renderRecoveryDiagnostics(service.recoveryDiagnostics || {})}
       <section class="panel">${panelHeader("Recent outcomes", "Latest completed work")}
@@ -1177,11 +1185,11 @@
       ).find((node) => node.dataset.retryFocus === retryFocusKey);
       retryFocusTarget?.focus({ preventScroll: true });
     }
-    if (queueFocusKey) {
-      const queueFocusTarget = Array.from(
-        root.querySelectorAll("[data-queue-focus]"),
-      ).find((node) => node.dataset.queueFocus === queueFocusKey);
-      queueFocusTarget?.focus({ preventScroll: true });
+    if (workFocusKey) {
+      const workFocusTarget = Array.from(
+        root.querySelectorAll("[data-work-focus]"),
+      ).find((node) => node.dataset.workFocus === workFocusKey);
+      workFocusTarget?.focus({ preventScroll: true });
     }
     if (observationFocusKey) {
       const observationFocusTarget = root.querySelector(
@@ -1290,11 +1298,11 @@
     });
   };
 
-  const bindQueueControls = () => {
-    document.querySelectorAll("[data-queue-mode]").forEach((button) => {
+  const bindWorkControls = () => {
+    document.querySelectorAll("[data-work-mode]").forEach((button) => {
       button.addEventListener("click", () => {
-        if (!["auto", "up-next", "retry"].includes(button.dataset.queueMode)) return;
-        queueViewMode = button.dataset.queueMode;
+        if (!["auto", "active", "up-next", "retry"].includes(button.dataset.workMode)) return;
+        workViewMode = button.dataset.workMode;
         render();
       });
     });
@@ -1305,10 +1313,10 @@
     document.querySelectorAll("[data-open-retry-queue]").forEach((link) => {
       link.addEventListener("click", (event) => {
         event.preventDefault();
-        queueViewMode = "retry";
+        workViewMode = "retry";
         render();
         document.getElementById("retry-queue")?.scrollIntoView({ block: "start" });
-        document.querySelector('[data-queue-mode="retry"]')?.focus({ preventScroll: true });
+        document.querySelector('[data-work-mode="retry"]')?.focus({ preventScroll: true });
       });
     });
   };
@@ -1319,7 +1327,7 @@
     theme?.addEventListener("click", toggleTheme);
     refresh?.addEventListener("click", () => refreshStatus(true));
     bindRetryControls();
-    bindQueueControls();
+    bindWorkControls();
     const observationFilters = document.getElementById("observation-filters");
     const observationSearchInput = observationFilters?.querySelector('input[type="search"]');
     const observationSelects = observationFilters?.querySelectorAll("select") || [];
