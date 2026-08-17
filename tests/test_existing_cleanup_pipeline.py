@@ -659,6 +659,18 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertNotIn(long_extra, app._video_sidecars(short_video))
             self.assertIn(long_extra, app._video_sidecars(long_video))
 
+    def test_extracted_sidecar_is_preserved_as_source_not_managed_readiness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            extracted = root / "movie.extracted.eng.srt"
+            video.write_bytes(b"video")
+            extracted.write_text(make_srt("English"), encoding="utf-8")
+            with patch.object(app, "LANGUAGES", ["en", "et"]):
+                classification = app._classify_sidecar(video, extracted)
+            self.assertEqual(classification.kind, "source")
+            self.assertEqual(classification.language, "en")
+
     def test_dry_run_prune_reports_without_moving(self):
         with tempfile.TemporaryDirectory() as directory:
             root, video = self._prune_fixture(directory)
@@ -906,6 +918,107 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             states = [state for state, _ in recorder.states]
             self.assertEqual(states, ["translating", "validating", "accepted"])
             self.assertEqual(stats["completed"], 1)
+
+    def test_process_item_prefers_deduplicated_extracted_source_and_publishes_canonical_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            bazarr_source = root / "movie.en.srt"
+            extracted_source = root / "movie.extracted.eng.srt"
+            provider_target = root / "movie.extracted.et.srt"
+            canonical_target = root / "movie.et.srt"
+            video.write_bytes(b"video")
+            bazarr_source.write_text(make_srt("Bazarr dialogue"), encoding="utf-8")
+            extracted_source.write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\nEmbedded dialogue\n\n"
+                "2\n00:00:02,000 --> 00:00:03,000\nEmbedded dialogue\n",
+                encoding="utf-8",
+            )
+            video_stat = video.stat()
+            receipt = root / "movie.extracted.json"
+            receipt.write_text(
+                json.dumps({
+                    "schemaVersion": 1,
+                    "generator": "SubExtractorr",
+                    "video": {
+                        "path": str(video),
+                        "name": video.name,
+                        "size": video_stat.st_size,
+                        "mtimeNs": video_stat.st_mtime_ns,
+                    },
+                    "tracks": [{
+                        "path": extracted_source.name,
+                        "sha256": subtitle_foundation.file_sha256(extracted_source),
+                        "language": "eng",
+                        "trackId": 2,
+                        "default": True,
+                        "forced": False,
+                        "hearingImpaired": False,
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            item = {
+                "radarrId": 7,
+                "title": "Movie",
+                "missing_subtitles": [{"code2": "et"}],
+            }
+            subtitles = [{"code2": "en", "path": str(bazarr_source), "forced": False}]
+            submitted = []
+            stats = defaultdict(int)
+            stats["translations"] = []
+
+            def submit(*args):
+                submitted.append(args)
+                return 123
+
+            def completed(*_args):
+                provider_target.write_text(make_srt("Tere"), encoding="utf-8")
+                return "Completed"
+
+            report = SimpleNamespace(issues=[])
+            with patch.multiple(
+                app,
+                LANGUAGES=["en", "et"],
+                CLEANUP_UNDERSIZED_ENABLED=False,
+                fetch_subtitles=lambda *_args: (str(video), subtitles),
+                lingarr_resolve_media_id=lambda *_args: 99,
+                lingarr_get_active_translations=lambda: [],
+                lingarr_submit_file=submit,
+                lingarr_poll_job=completed,
+                _count_dialogue_lines=lambda path: 1 if Path(path).exists() else None,
+                _estimate_timeout=lambda _path: 60,
+                _record_submission=lambda *_args, **_kwargs: 1,
+                _mark_submission_submitted=lambda *_args, **_kwargs: None,
+                _mark_submission_failed=lambda *_args, **_kwargs: None,
+                _update_submission_actual_path=lambda *_args, **_kwargs: None,
+                _record_pending_lingarr_output=lambda *_args, **_kwargs: True,
+                _validate_translated_file=lambda *_args, **_kwargs: ("valid", report),
+            ):
+                app.process_item(item, "movies", "radarrId", stats, threading.Lock())
+
+            self.assertEqual(Path(submitted[0][1]), extracted_source)
+            self.assertTrue(canonical_target.exists())
+            self.assertFalse(provider_target.exists())
+            self.assertIn("00:00:01,000 --> 00:00:03,000", extracted_source.read_text(encoding="utf-8"))
+            self.assertEqual(stats["source_duplicate_groups"], 1)
+            self.assertEqual(stats["source_duplicate_cues_removed"], 1)
+            self.assertEqual(stats["embedded_sources_selected"], 1)
+            self.assertEqual(bazarr_source.read_text(encoding="utf-8"), make_srt("Bazarr dialogue"))
+
+    def test_canonical_publication_does_not_overwrite_concurrent_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            provider_target = root / "movie.extracted.et.srt"
+            canonical_target = root / "movie.et.srt"
+            provider_target.write_text(make_srt("Lingarr"), encoding="utf-8")
+            canonical_target.write_text(make_srt("Concurrent"), encoding="utf-8")
+
+            published = app._publish_canonical_target(provider_target, canonical_target, "Movie")
+
+            self.assertIsNone(published)
+            self.assertEqual(provider_target.read_text(encoding="utf-8"), make_srt("Lingarr"))
+            self.assertEqual(canonical_target.read_text(encoding="utf-8"), make_srt("Concurrent"))
 
     def test_process_item_accepts_actual_hi_output_and_persists_provenance(self):
         with tempfile.TemporaryDirectory() as directory:

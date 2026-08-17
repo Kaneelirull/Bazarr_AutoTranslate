@@ -121,8 +121,8 @@ class SubtitleValidationTests(unittest.TestCase):
         )
 
     def test_supplied_example_detects_prompt_leak_at_cue_1049(self):
-        source = next((REPO_ROOT / "examples").glob("*.eng.srt"))
-        target = next((REPO_ROOT / "examples").glob("*.et.srt"))
+        source = next((REPO_ROOT / "examples" / "Good").glob("*.eng.srt"))
+        target = next((REPO_ROOT / "examples" / "Good").glob("*.et.srt"))
 
         report = self.validate_pair(source, target)
 

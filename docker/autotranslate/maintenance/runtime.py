@@ -6,6 +6,7 @@ def _scan_undersized_sidecars(stats: dict) -> bool:
     if not _runtime.CLEANUP_UNDERSIZED_ENABLED:
         return False
     from ..subtitles.foundation import file_sha256, validate_srt_structure
+    from ..subtitles.sources import is_extracted_sidecar
     changed = False
     seen: set[_runtime.Path] = set()
     for root in _runtime.CLEANUP_ROOTS:
@@ -19,6 +20,8 @@ def _scan_undersized_sidecars(stats: dict) -> bool:
             seen.add(subtitle)
             video = _runtime._find_sidecar_video(subtitle)
             if video is None:
+                continue
+            if is_extracted_sidecar(subtitle, video):
                 continue
             exempt_token = _runtime._explicit_non_full_sidecar(video, subtitle)
             if exempt_token is not None:
@@ -346,7 +349,35 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 print(f'{_runtime.YELLOW}[SCAN] Unsupported target language for {candidate.path}{_runtime.RESET}')
                 _runtime._publish_scan_progress(maintenance_scan_job_id)
                 continue
-            source_path, source_lang = find_preferred_source(candidate)
+            source_path = None
+            source_lang = None
+            candidate_video = _runtime._find_sidecar_video(candidate.path)
+            if candidate_video is not None:
+                from ..subtitles.foundation import normalize_managed_file
+                from ..subtitles.sources import discover_extracted_sources, prepare_extracted_source
+                extracted, receipt_error = discover_extracted_sources(candidate_video, _runtime._LANGUAGE_ALIASES, _runtime.LANGUAGES)
+                if receipt_error:
+                    _runtime.dbg(f'Ignored extracted-subtitle receipt for {candidate.path.name}: {receipt_error}')
+                preferred_variants = (candidate.variant, '') if candidate.variant else ('',)
+                for variant in preferred_variants:
+                    for extracted_candidate in extracted:
+                        if extracted_candidate.canonical_language == candidate.target_lang or extracted_candidate.variant != variant:
+                            continue
+                        prepared = prepare_extracted_source(extracted_candidate, artifact_access=_runtime._artifact_access, normalize=normalize_managed_file)
+                        if prepared.error:
+                            print(f'{_runtime.YELLOW}[SCAN] Rejected extracted source for {candidate.path.name}: {prepared.error}{_runtime.RESET}')
+                            continue
+                        source_path = extracted_candidate.path
+                        source_lang = extracted_candidate.canonical_language
+                        if prepared.changed:
+                            stats['source_duplicate_groups'] = stats.get('source_duplicate_groups', 0) + prepared.duplicate_groups
+                            stats['source_duplicate_cues_removed'] = stats.get('source_duplicate_cues_removed', 0) + prepared.removed_cues
+                            print(f'[SCAN] Deduplicated {source_path.name}: groups={prepared.duplicate_groups} removed_cues={prepared.removed_cues}')
+                        break
+                    if source_path is not None:
+                        break
+            if source_path is None:
+                source_path, source_lang = find_preferred_source(candidate)
             if source_path is not None and candidate.variant:
                 print(f'[SCAN] Paired {candidate.path.name} with variant-aware source {source_path.name}')
             try:
@@ -387,7 +418,6 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 continue
             stats['files_checked'] += 1
             if source_path is not None and source_lang is not None:
-                candidate_video = _runtime._find_sidecar_video(candidate.path)
                 action, report = _runtime._validate_translated_file(str(source_path), str(candidate.path), source_lang, candidate.target_lang, None, title=candidate.path.name, dry_run=_runtime.CLEANUP_SCAN_DRY_RUN, defer_repair=not _runtime.CLEANUP_SCAN_DRY_RUN, media_duration=_runtime._probe_media_duration(candidate_video) if candidate_video is not None else None, origin=validation_origin, provenance_source_hash=validation_source_hash, maintenance_scan_job_id=maintenance_scan_job_id)
             else:
                 stats['without_source'] += 1

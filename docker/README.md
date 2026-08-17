@@ -9,15 +9,44 @@ The container includes a read-only status dashboard at `http://<docker-host>:876
 1. Synchronizes Bazarr's subtitle inventory.
 2. Scans every regular sidecar SRT for media-duration completeness, then scans configured target languages, at startup and every `CLEANUP_SCAN_INTERVAL`.
 3. Uses `ffprobe` plus cue, text, byte, and timeline density to quarantine high-confidence forced/truncated fragments that are mislabeled as full subtitles.
-4. Rejects incomplete or explicitly forced sources and falls back through `LANGUAGES` before submitting a translation.
-5. Uses source cue anchors to repair safe SRT formatting damage before validation.
-6. Validates translated cues against the source, including structure, language, writing system, prompt leakage, character expansion, and physical line count.
-7. Sends only remaining invalid cues through a dedicated Lingarr line-repair worker. The first attempt uses bounded context; the second uses no context.
-8. Once every managed language is valid, quarantines recognized extra-language and unmanaged special-purpose SRT sidecars.
-9. Normalizes managed subtitle artifacts to UID/GID `568:568` with mode `0664`.
-10. Quarantines translations that remain invalid and triggers Bazarr subtitle rescans after repair, quarantine, or pruning.
+4. Prefers valid receipt-backed `.extracted.<language>.srt` sources, then falls back through Bazarr subtitles in `LANGUAGES` order.
+5. Collapses consecutive rolling-caption duplicates in extracted sources into one full-span cue before hashing or translation.
+6. Rejects incomplete or explicitly forced sources before submitting a translation.
+7. Uses source cue anchors to repair safe SRT formatting damage before validation.
+8. Validates translated cues against the source, including structure, language, writing system, prompt leakage, character expansion, and physical line count.
+9. Sends only remaining invalid cues through a dedicated Lingarr line-repair worker. The first attempt uses bounded context; the second uses no context.
+10. Once every managed language is valid, quarantines recognized extra-language and unmanaged special-purpose SRT sidecars.
+11. Normalizes managed subtitle artifacts to UID/GID `568:568` with mode `0664`.
+12. Quarantines translations that remain invalid and triggers Bazarr subtitle rescans after repair, quarantine, or pruning.
 
 Translation timeout is calculated dynamically from the source subtitle's dialogue line count.
+
+### Extracted embedded sources
+
+For a video such as `Movie.mkv`, SubExtractorr may publish
+`Movie.extracted.eng.srt` plus `Movie.extracted.json`. AutoTranslate accepts
+schema version 1 receipts whose video name, size, and modification time match
+the current media file. Track paths must be basenames beside that video, their
+hashes must match the receipt, and forced tracks are ignored. Host-only absolute
+paths in the receipt are never used because every container must resolve the
+shared `/media` mount independently.
+
+Valid extracted tracks are tried before every Bazarr source. Non-HI tracks are
+preferred over HI tracks, then default and plain variants are preferred. A
+missing, stale, malformed, unreadable, or incomplete extracted source fails
+closed and the normal Bazarr fallback remains available.
+
+Before first use, adjacent cues with identical line payloads are merged when
+their timing overlaps or the next cue begins within 100 ms. The merged cue uses
+the first start and final end time, and all cues are renumbered. The extracted
+file and receipt are updated with same-directory temporary files, managed
+ownership, atomic replacement, hashes, and crash-recoverable preparation
+metadata. Bazarr-owned source subtitles are never rewritten.
+
+Lingarr may initially write `Movie.extracted.et.srt`; AutoTranslate publishes
+that result as the canonical `Movie.et.srt` (preserving HI or numeric variants)
+before provenance recording and validation. Extracted source artifacts do not
+count as translated-language readiness and are excluded from pruning.
 
 ## Requirements
 

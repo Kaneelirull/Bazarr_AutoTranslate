@@ -350,6 +350,17 @@ class ArchitectureUpgradeTests(unittest.TestCase):
             package_root / "subtitles" / "validation.py",
         ):
             self.assertFalse(removed.exists(), removed)
+
+    def test_embedded_source_preparation_is_wired_into_production_item_workflow(self):
+        package_root = REPO_ROOT / "docker" / "autotranslate"
+        production_source = (package_root / "production.py").read_text(encoding="utf-8")
+        item_source = (package_root / "items_workflow.py").read_text(encoding="utf-8")
+        source_module = package_root / "subtitles" / "sources.py"
+        self.assertTrue(source_module.is_file())
+        self.assertIn("from . import items_workflow", production_source)
+        self.assertIn("discover_extracted_sources", item_source)
+        self.assertIn("prepare_extracted_source", item_source)
+        self.assertIn("_publish_canonical_target", item_source)
         for path in package_root.rglob("*.py"):
             source = path.read_text(encoding="utf-8")
             self.assertNotRegex(source, r"(?m)^_runtime\.[A-Za-z_]\w*\s*=", str(path))
