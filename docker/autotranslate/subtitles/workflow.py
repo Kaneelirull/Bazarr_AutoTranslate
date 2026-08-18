@@ -76,7 +76,7 @@ def _snapshot_target_sidecars(video_path: str, target_lang: str, extra_paths=())
     paths.extend((str(path) for path in extra_paths if path and _runtime.os.path.exists(path)))
     return {_runtime.os.path.normcase(_runtime.os.path.abspath(path)): _runtime._file_hash_or_none(path) for path in paths}
 
-def _discover_completed_target(video_path: str, target_lang: str, expected_target_path: str, before: dict[str, str | None], extra_paths=()) -> str | None:
+def _discover_completed_target(video_path: str, target_lang: str, expected_target_path: str, before: dict[str, str | None], extra_paths=(), *, require_changed: bool=False) -> str | None:
     expected = _runtime.os.path.normcase(_runtime.os.path.abspath(expected_target_path))
     changed: list[str] = []
     paths = list(_runtime._find_target_sidecars(video_path, target_lang))
@@ -90,7 +90,7 @@ def _discover_completed_target(video_path: str, target_lang: str, expected_targe
         selected = next((path for path in changed if _runtime.os.path.normcase(_runtime.os.path.abspath(path)) == expected), changed[0])
         print(f'[TRANSLATE] Discovered Lingarr output {_runtime.os.path.basename(selected)} (expected {_runtime.os.path.basename(expected_target_path)})')
         return selected
-    if _runtime.os.path.exists(expected_target_path):
+    if (not require_changed) and _runtime.os.path.exists(expected_target_path):
         return expected_target_path
     return None
 
@@ -361,7 +361,7 @@ def _record_validation_result(target_path: str | _runtime.Path, source_hash: str
         print(f'{_runtime.YELLOW}[WARNING] Could not persist validation state: {e}{_runtime.RESET}')
         return False
 
-def _record_pending_lingarr_output(source_path: str, target_path: str, source_lang: str, target_lang: str, item_type: str, item_id: int) -> bool:
+def _record_pending_lingarr_output(source_path: str, target_path: str, source_lang: str, target_lang: str, item_type: str, item_id: int, *, attempt_id: int | None=None, lingarr_job_id: int | None=None, terminal_status: str | None=None) -> bool:
     source_hash = _runtime._file_hash_or_none(source_path)
     target_hash = _runtime._file_hash_or_none(target_path)
     if target_hash is None:
@@ -370,7 +370,7 @@ def _record_pending_lingarr_output(source_path: str, target_path: str, source_la
         identity = _runtime._target_identity_from_sidecar(target_path, target_lang)
         suffix = _runtime._target_suffix(target_path, target_lang)
         submission = _runtime._get_validation_state().find_submission(identity, target_lang) if identity is not None else None
-        _runtime._get_validation_state().record(target_path, source_hash=source_hash, target_hash=target_hash, result='pending_validation', origin='lingarr', details={'sourcePath': source_path, 'sourceLanguage': source_lang, 'targetLanguage': target_lang, 'itemType': item_type, 'itemId': item_id}, source_path=source_path, source_language=source_lang, target_language=target_lang, target_identity=identity, target_variant=suffix[1] if suffix is not None else '', operation='translation', attempt_id=submission.get('attemptId') if submission is not None else None, validation_mode='source-aware')
+        _runtime._get_validation_state().record(target_path, source_hash=source_hash, target_hash=target_hash, result='pending_validation', origin='lingarr', details={'sourcePath': source_path, 'sourceLanguage': source_lang, 'targetLanguage': target_lang, 'itemType': item_type, 'itemId': item_id, 'lingarrJobId': lingarr_job_id, 'terminalStatus': terminal_status}, source_path=source_path, source_language=source_lang, target_language=target_lang, target_identity=identity, target_variant=suffix[1] if suffix is not None else '', operation='translation', attempt_id=attempt_id if attempt_id is not None else submission.get('attemptId') if submission is not None else None, validation_mode='source-aware')
         return True
     except (OSError, _runtime.StateStoreError) as exc:
         print(f'{_runtime.YELLOW}[WARNING] Could not persist pending Lingarr provenance: {exc}{_runtime.RESET}')

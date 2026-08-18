@@ -628,6 +628,8 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
         translation_elapsed = _runtime.time.monotonic() - translation_started
         terminal_job = _runtime.lingarr_get_job(job_id) if status != 'Completed' and job_id is not None else None
         failure_details = _runtime._safe_failure_details(job_id, terminal_job=terminal_job, elapsed_seconds=translation_elapsed)
+        failed_job_candidate = False
+        terminal_candidate_path = None
         if status != 'Completed':
             safe_to_recover = status is not None
             if status is None and job_id is not None:
@@ -636,6 +638,16 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
             if recovery.get('recovered'):
                 status = 'Completed'
                 translation_elapsed += float(recovery.get('repairElapsedSeconds', 0))
+            elif safe_to_recover and (not _runtime.shutdown_requested):
+                terminal_candidate_path = _runtime._discover_completed_target(video_path, target_lang, target_path, target_snapshot, extra_target_paths, require_changed=True) if video_path else target_path if _runtime.os.path.exists(target_path) and target_snapshot.get(_runtime.os.path.normcase(_runtime.os.path.abspath(target_path))) != _runtime._file_hash_or_none(target_path) else None
+                if terminal_candidate_path is not None:
+                    failed_job_candidate = True
+                    status = 'Completed'
+                    try:
+                        _runtime._mark_submission_failed(attempt_id, failure_category=failure_details.get('category'), failure_details=failure_details)
+                    except _runtime.StateStoreError as exc:
+                        print(f'{_runtime.YELLOW}[FAIL] Could not persist failed-job output provenance: {exc}{_runtime.RESET}')
+                    print(f"[RECOVERY] Lingarr job {job_id} ended {failure_details.get('status') or 'unsuccessfully'} but created a changed sidecar; validating it against the submitted source")
         if status != 'Completed':
             failure_reason = 'Lingarr timeout' if status is None else f'Lingarr job {status.lower()}'
             try:
@@ -661,7 +673,7 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
                 _runtime._status_transition(item_type, item_id, target_lang, 'failed', reason=f'Lingarr job {status.lower()}', details={'failureDetails': failure_details})
             _runtime._shared_capacity.release(shared_token)
             continue
-        actual_target_path = _runtime._discover_completed_target(video_path, target_lang, target_path, target_snapshot, extra_target_paths) if video_path else target_path if _runtime.os.path.exists(target_path) else None
+        actual_target_path = terminal_candidate_path or (_runtime._discover_completed_target(video_path, target_lang, target_path, target_snapshot, extra_target_paths) if video_path else target_path if _runtime.os.path.exists(target_path) else None)
         if actual_target_path is None:
             print(f"{_runtime.YELLOW}[WARNING] {title} '{target_lang}': Lingarr completed but no new target-language sidecar was found (expected {target_path}){_runtime.RESET}")
             with stats_lock:
@@ -692,7 +704,7 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
         if _runtime.os.path.normcase(_runtime.os.path.abspath(actual_target_path)) != _runtime.os.path.normcase(_runtime.os.path.abspath(target_path)):
             with stats_lock:
                 stats['variant_outputs_discovered'] = stats.get('variant_outputs_discovered', 0) + 1
-        if not _runtime._record_pending_lingarr_output(source_path, actual_target_path, source_lang, target_lang, item_type, item_id):
+        if not _runtime._record_pending_lingarr_output(source_path, actual_target_path, source_lang, target_lang, item_type, item_id, attempt_id=attempt_id, lingarr_job_id=job_id, terminal_status=failure_details.get('status') if failed_job_candidate else None):
             with stats_lock:
                 stats['deferred'] = stats.get('deferred', 0) + 1
             _runtime._status_transition(item_type, item_id, target_lang, 'deferred', reason='completed output provenance persistence failed')
@@ -701,7 +713,7 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
             continue
         if retry_plan is not None:
             try:
-                retry_plan = _runtime._get_validation_state().update_retry_plan(retry_plan['id'], state='retry_in_progress', completed_cycle=_runtime._completed_cycle, increment_attempt=True, reason='fresh Lingarr output received')
+                retry_plan = _runtime._get_validation_state().update_retry_plan(retry_plan['id'], state='retry_in_progress', completed_cycle=_runtime._completed_cycle, increment_attempt=True, reason='failed-job output candidate received' if failed_job_candidate else 'fresh Lingarr output received')
             except _runtime.StateStoreError as exc:
                 print(f'{_runtime.YELLOW}[RETRY] Could not record retry attempt: {exc}{_runtime.RESET}')
         _runtime._status_transition(item_type, item_id, target_lang, 'validating')
@@ -714,7 +726,8 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
             except _runtime.StateStoreError as exc:
                 print(f'{_runtime.YELLOW}[TIMING] Could not persist successful sample: {exc}{_runtime.RESET}')
             _runtime._refresh_status_diagnostics()
-            print(f"{_runtime.GREEN}[OK] {title} '{target_lang}' translated to {_runtime.os.path.basename(actual_target_path)}{_runtime.RESET}")
+            outcome_label = 'recovered from terminal Lingarr output' if failed_job_candidate else 'translated'
+            print(f"{_runtime.GREEN}[OK] {title} '{target_lang}' {outcome_label} to {_runtime.os.path.basename(actual_target_path)}{_runtime.RESET}")
             with stats_lock:
                 stats['completed'] += 1
                 stats['translations'].append(f'{title}: {source_lang} -> {target_lang}')

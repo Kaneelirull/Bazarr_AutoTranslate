@@ -22,6 +22,7 @@ def repair_subtitle_file(
     artifact_access=None,
     exhausted_strategies: Optional[dict[str, set[str]]] = None,
     cancellation_requested: Optional[Callable[[], bool]] = None,
+    provider_enabled: bool = True,
     **validation_kwargs,
 ) -> RepairResult:
     """Repair only invalid aligned cues, then atomically replace the target after full validation."""
@@ -123,7 +124,7 @@ def repair_subtitle_file(
         failed_fingerprints: set[str] = set()
 
         provider_attempted = False
-        for attempt in range(max(1, max_attempts)):
+        for attempt in (range(max(1, max_attempts)) if provider_enabled else range(0)):
             if cancellation_requested is not None and cancellation_requested():
                 return interrupted_result()
             attempt_before = before if attempt == 0 else []
@@ -483,7 +484,7 @@ def repair_subtitle_file(
             currentCueNumber=source_cue.number,
             currentCuePosition=cue_index + 1,
             currentCueOrdinal=cue_ordinal,
-            currentAttempt=min(max(1, max_attempts), attempt + 1),
+            currentAttempt=(min(max(1, max_attempts), attempt + 1) if provider_attempted else 0),
             maxAttempts=max(1, max_attempts),
             contextEnabled=False,
         )

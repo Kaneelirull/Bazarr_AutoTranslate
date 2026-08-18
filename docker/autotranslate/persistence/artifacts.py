@@ -336,6 +336,28 @@ class ArtifactsRepositoryMixin:
                 for row in self._connection.execute(query).fetchall():
                     if row["path"]:
                         protected.add(Path(row["path"]))
+            rows = self._connection.execute(
+                """
+                SELECT payload_json FROM repair_jobs
+                WHERE state IN ('queued', 'active', 'persisted_for_restart')
+                """
+            ).fetchall()
+            attempt_ids: set[int] = set()
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload_json"] or "{}")
+                    attempt_ids.update(int(value) for value in payload.get("quarantineAttemptIds", []))
+                except (TypeError, ValueError):
+                    continue
+            if attempt_ids:
+                placeholders = ",".join("?" for _value in attempt_ids)
+                for row in self._connection.execute(
+                    f"SELECT artifact_path, report_path FROM quarantine_attempts WHERE id IN ({placeholders})",
+                    tuple(sorted(attempt_ids)),
+                ).fetchall():
+                    for key in ("artifact_path", "report_path"):
+                        if row[key]:
+                            protected.add(Path(row[key]))
         return protected
 
     def record_artifact_version(
