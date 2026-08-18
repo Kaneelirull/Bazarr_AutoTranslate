@@ -9,7 +9,7 @@ const variants = [
 
 export default defineConfig({
   testDir: "./tests/visual",
-  snapshotPathTemplate: "{testDir}/__screenshots__/{testFileName}/{projectName}/{arg}{ext}",
+  snapshotPathTemplate: "{testDir}/__screenshots__/{testFileName}/{platform}/{projectName}/{arg}{ext}",
   fullyParallel: false,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? "github" : "list",
