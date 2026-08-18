@@ -22,10 +22,10 @@ def render_review_page(display_timezone: str = "UTC") -> str:
 <meta name="color-scheme" content="dark light">
 <title>Bazarr AutoTranslate Manual review</title>
 <link rel="stylesheet" href="/assets/dashboard.css">
-<script src="/assets/review.js" defer></script>
+<script type="module" src="/assets/app/review.js"></script>
 </head>
 <body>
-<main id="manual-review" class="dashboard-shell review-shell" data-time-zone="{timezone}" aria-busy="true">
+<main id="review-root" data-time-zone="{timezone}" aria-busy="true">
   <h1>Manual review</h1>
   <p class="loading">Loading manual reviews&hellip;</p>
 </main>

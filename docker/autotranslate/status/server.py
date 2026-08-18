@@ -19,13 +19,29 @@ from ..manual_review import (
 )
 
 STATIC_DIR = Path(__file__).parents[2] / "static"
+FRONTEND_DIR = STATIC_DIR / "app"
 STATIC_ASSETS = {
     "/assets/dashboard.css": ("text/css; charset=utf-8", STATIC_DIR / "dashboard.css"),
-    "/assets/dashboard.js": ("text/javascript; charset=utf-8", STATIC_DIR / "dashboard.js"),
-    "/assets/logs.js": ("text/javascript; charset=utf-8", STATIC_DIR / "logs.js"),
-    "/assets/review.js": ("text/javascript; charset=utf-8", STATIC_DIR / "review.js"),
     "/assets/plus-jakarta-sans.ttf": ("font/ttf", STATIC_DIR / "plus-jakarta-sans.ttf"),
 }
+
+
+def _frontend_asset(path: str) -> tuple[str, Path] | None:
+    prefix = "/assets/app/"
+    if not path.startswith(prefix):
+        return None
+    relative = path.removeprefix(prefix)
+    if not relative:
+        return None
+    root = FRONTEND_DIR.resolve()
+    candidate = (root / relative).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    if candidate.suffix != ".js" or not candidate.is_file():
+        return None
+    return "text/javascript; charset=utf-8", candidate
 
 def render_dashboard(snapshot: dict, display_timezone: str = "UTC") -> str:
     """Render the CSP-safe shell; the same-origin script owns live updates."""
@@ -48,10 +64,10 @@ def render_dashboard(snapshot: dict, display_timezone: str = "UTC") -> str:
 <meta name="color-scheme" content="dark light">
 <title>Bazarr AutoTranslate Status</title>
 <link rel="stylesheet" href="/assets/dashboard.css">
-<script src="/assets/dashboard.js" defer></script>
+<script type="module" src="/assets/app/dashboard.js"></script>
 </head>
 <body>
-<main id="dashboard" data-snapshot="{bootstrap}" data-time-zone="{display_timezone}" aria-busy="true">
+<main id="dashboard-root" data-snapshot="{bootstrap}" data-time-zone="{display_timezone}" aria-busy="true">
   <h1>Translation status</h1>
   <p class="loading">Loading translation status…</p>
 </main>
@@ -71,32 +87,11 @@ def render_logs_page() -> str:
 <meta name="color-scheme" content="dark light">
 <title>Bazarr AutoTranslate Logs</title>
 <link rel="stylesheet" href="/assets/dashboard.css">
-<script src="/assets/logs.js" defer></script>
+<script type="module" src="/assets/app/logs.js"></script>
 </head>
 <body>
-<main class="dashboard-shell log-shell">
-  <header class="topbar"><div><div class="eyebrow">Diagnostics</div>
-  <h1>Service logs</h1><p class="header-meta">Sanitized, read-only operational output · New records use UTC timestamps</p></div>
-  <div class="header-actions">
-    <a class="btn btn-secondary" href="/">Status</a>
-    <a class="btn btn-secondary" href="/review">Manual review</a>
-    <a class="btn btn-secondary" href="/logs" aria-current="page">Logs</a>
-    <button class="btn btn-secondary" id="theme-toggle" type="button" aria-label="Switch color theme">Theme</button>
-    <button class="btn btn-primary" id="refresh-button" type="button">Refresh now</button>
-  </div></header>
-  <section class="panel">
-    <form id="log-filters" class="log-filters">
-      <label>Level <select name="level"><option value="">All</option><option>ERROR</option>
-      <option>WARNING</option><option>FAIL</option><option>TIMEOUT</option></select></label>
-      <label>Show or job <input name="job" maxlength="100" placeholder="Top Gear or job ID"></label>
-      <label>Search text <input name="q" maxlength="100" placeholder="Message contains…"></label>
-      <button class="btn btn-primary" type="submit">Filter</button>
-    </form>
-    <p id="log-status" class="section-note" role="status">Loading logs...</p>
-    <pre id="log-output" class="log-output" tabindex="0"></pre>
-    <button id="load-more" class="btn btn-secondary" type="button">Load older</button>
-  </section>
-</main>
+<main id="logs-root" aria-busy="true"><h1>Service logs</h1><p class="loading">Loading logs…</p></main>
+<noscript><p class="noscript">JavaScript is required to view service logs.</p></noscript>
 </body>
 </html>"""
 
@@ -225,8 +220,10 @@ def start_status_server(
                     "generatedAt": snapshot["generatedAt"],
                 }).encode("utf-8")
                 self._send(200, "application/json; charset=utf-8", body)
-            elif parsed.path in STATIC_ASSETS:
-                content_type, asset_path = STATIC_ASSETS[parsed.path]
+            elif parsed.path in STATIC_ASSETS or _frontend_asset(parsed.path):
+                content_type, asset_path = (
+                    STATIC_ASSETS.get(parsed.path) or _frontend_asset(parsed.path)
+                )
                 try:
                     body = asset_path.read_bytes()
                 except OSError:
@@ -307,7 +304,7 @@ def start_status_server(
 
         def do_HEAD(self) -> None:
             path = urlsplit(self.path).path
-            if path in ("/", "/review", "/logs", "/api/status", "/api/logs", "/api/manual-reviews", "/healthz") or path in STATIC_ASSETS:
+            if path in ("/", "/review", "/logs", "/api/status", "/api/logs", "/api/manual-reviews", "/healthz") or path in STATIC_ASSETS or _frontend_asset(path):
                 self._send(200, "text/plain; charset=utf-8", b"", include_body=False)
             else:
                 self._send(404, "text/plain; charset=utf-8", b"", include_body=False)

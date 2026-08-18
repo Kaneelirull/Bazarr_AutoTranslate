@@ -361,6 +361,12 @@ h3 {
   gap: var(--space-2);
 }
 
+.page-navigation {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .btn {
   display: inline-flex;
   min-height: 42px;
@@ -1734,6 +1740,12 @@ progress::-moz-progress-bar {
   .header-actions {
     display: grid;
     grid-template-columns: 1fr 1fr;
+  }
+
+  .page-navigation {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .overview,
