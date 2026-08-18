@@ -32,4 +32,12 @@ describe("LogsApp", () => {
     render(<LogsApp />);
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("logs unavailable"));
   });
+
+  it("keeps secondary filters in a progressive disclosure group", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ lines: [], nextCursor: null }), { status: 200 })));
+    render(<LogsApp />);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("No matching"));
+    expect(screen.getByRole("button", { name: "More filters" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByLabelText("Search text")).toBeInTheDocument();
+  });
 });
