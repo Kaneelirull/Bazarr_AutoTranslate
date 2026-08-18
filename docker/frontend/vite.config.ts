@@ -24,6 +24,7 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    exclude: ["tests/visual/**", "node_modules/**"],
     setupFiles: "./tests/setup.ts",
     restoreMocks: true,
     clearMocks: true,

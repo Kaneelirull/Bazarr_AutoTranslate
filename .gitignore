@@ -28,6 +28,8 @@ docker/frontend/node_modules/
 docker/frontend/dist/
 docker/static/app/
 docker/frontend/*.tsbuildinfo
+docker/frontend/test-results/
+docker/frontend/playwright-report/
 venv/
 env/
 build/

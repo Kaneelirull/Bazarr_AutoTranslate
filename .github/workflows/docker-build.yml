@@ -51,6 +51,14 @@ jobs:
           npm test
           npm run build
 
+      - name: Install Chromium for visual tests
+        working-directory: docker/frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Verify responsive UI snapshots
+        working-directory: docker/frontend
+        run: npx playwright test
+
       - name: Compile Python sources
         run: python -m compileall docker tests
 
