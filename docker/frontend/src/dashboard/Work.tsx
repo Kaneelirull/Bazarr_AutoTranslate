@@ -10,6 +10,13 @@ const RETRY_BATCH = 20;
 const QUEUE_BATCH = 10;
 
 export const activeRetryPlans = (plans: DataRow[]) => plans.filter((plan) => !plan.manualReview && ACTIVE_RETRY_STATES.has(plan.state));
+export const mergeRecentOutcomes = (recent: DataRow[], maintenanceRecent: DataRow[]): DataRow[] => [
+  ...recent.map((row) => ({ ...row, workKind: row.workKind || "cycle" })),
+  ...maintenanceRecent.map((row) => ({ ...row, workKind: "maintenance" })),
+].sort((left, right) => {
+  const time = (row: DataRow) => new Date(row.timestamp || row.finishedAt || 0).getTime() || 0;
+  return time(right) - time(left);
+});
 const planId = (plan: DataRow) => String(plan.id ?? `${plan.itemType || "media"}-${plan.itemId ?? "unknown"}-${plan.targetLanguage || "unknown"}`);
 const media = (plan: DataRow) => ({ title: plan.displayTitle || `${plan.itemType || "media"} ${plan.itemId ?? "?"}`, detail: [plan.episodeCode, plan.episodeTitle].filter(Boolean).join(" - ") });
 
@@ -78,20 +85,24 @@ function RetryQueue({ plans, completedCycle, maxAttempts, cycleJobs }: { plans: 
   </tbody></table><div className="retry-table-footer"><span className="retry-showing" aria-live="polite">Showing {visible.length} of {active.length}</span>{visible.length < active.length && <button type="button" className="btn btn-secondary btn-sm retry-show-more" onClick={() => setVisibleCount((value) => value + RETRY_BATCH)}>Show {Math.min(RETRY_BATCH, active.length - visible.length)} more</button>}</div></div></>;
 }
 
-export function RecoveryAttention({ plans, completedCycle, manualReviewCount, onRetry }: { plans: DataRow[]; completedCycle: number; manualReviewCount: number; onRetry: () => void }) {
-  const active = activeRetryPlans(plans), dueNow = active.filter((plan) => plan.state === "regeneration_waiting" && numberValue(plan.eligibleCompletedCycle) <= completedCycle).length, dueNext = active.filter((plan) => plan.state === "regeneration_waiting" && numberValue(plan.eligibleCompletedCycle) === completedCycle + 1).length;
-  return <nav className="recovery-attention" aria-label="Recovery attention"><a href="#retry-queue" onClick={(event) => { event.preventDefault(); onRetry(); }}><span>Due now</span><strong>{dueNow}</strong></a><a href="#retry-queue" onClick={(event) => { event.preventDefault(); onRetry(); }}><span>Next cycle</span><strong>{dueNext}</strong></a><a href="/review"><span>Manual review</span><strong>{manualReviewCount}</strong></a></nav>;
-}
-
-export function Work({ activeJobs, upcoming, retryPlans, completedCycle, maxAttempts, timeZone, now, requestedView, onView }: { activeJobs: DataRow[]; upcoming: DataRow[]; retryPlans: DataRow[]; completedCycle: number; maxAttempts: number; timeZone: string; now: number; requestedView: WorkView; onView: (view: WorkView) => void }) {
+export function Work({ activeJobs, upcoming, retryPlans, recent, completedCycle, maxAttempts, timeZone, now, requestedView, onView }: { activeJobs: DataRow[]; upcoming: DataRow[]; retryPlans: DataRow[]; recent: DataRow[]; completedCycle: number; maxAttempts: number; timeZone: string; now: number; requestedView: WorkView; onView: (view: WorkView) => void }) {
   const [upcomingCount, setUpcomingCount] = useState(QUEUE_BATCH);
   const retries = activeRetryPlans(retryPlans);
-  const visibleView = requestedView === "auto" ? activeJobs.length ? "active" : retries.length ? "retry" : "up-next" : requestedView;
-  const notes = { active: `Active now · ${activeJobs.length.toLocaleString()} in progress`, retry: `Retry queue · ${retries.length.toLocaleString()} active · persistent quarantine recovery · completed cycle ${completedCycle}`, "up-next": `Up next · ${upcoming.length.toLocaleString()} queued job${upcoming.length === 1 ? "" : "s"}` };
-  const controls = <div className="work-view-switch" role="group" aria-label="Work view">{(["auto", "active", "up-next", "retry"] as WorkView[]).map((view) => <button type="button" aria-pressed={requestedView === view} onClick={() => onView(view)} key={view}>{({ auto: "Auto", active: "Active now", "up-next": "Up next", retry: "Retry queue" })[view]}</button>)}</div>;
-  return <section className="panel work-panel" id="retry-queue" data-work-view={visibleView}><PanelHeader title="Work" note={notes[visibleView]} actions={controls} />
+  const visibleView = requestedView === "auto" ? activeJobs.length ? "active" : retries.length ? "retry" : upcoming.length ? "up-next" : "recent" : requestedView;
+  const dueNow = retries.filter((plan) => plan.state === "regeneration_waiting" && numberValue(plan.eligibleCompletedCycle) <= completedCycle).length;
+  const dueNext = retries.filter((plan) => plan.state === "regeneration_waiting" && numberValue(plan.eligibleCompletedCycle) === completedCycle + 1).length;
+  const notes: Record<Exclude<WorkView, "auto">, string> = {
+    active: `Active now · ${activeJobs.length.toLocaleString()} in progress`,
+    retry: `Retry queue · ${retries.length.toLocaleString()} active · ${dueNow.toLocaleString()} due now · ${dueNext.toLocaleString()} next cycle`,
+    "up-next": `Up next · ${upcoming.length.toLocaleString()} queued job${upcoming.length === 1 ? "" : "s"}`,
+    recent: `Recent · ${recent.length.toLocaleString()} completed translation and maintenance outcome${recent.length === 1 ? "" : "s"}`,
+  };
+  const labels: Record<WorkView, string> = { auto: "Auto", active: "Active now", "up-next": "Up next", retry: `Retries ${retries.length}`, recent: "Recent" };
+  const controls = <div className="work-view-switch" role="group" aria-label="Work view">{(["auto", "active", "up-next", "retry", "recent"] as WorkView[]).map((view) => <button type="button" aria-pressed={requestedView === view} onClick={() => onView(view)} key={view}>{labels[view]}</button>)}</div>;
+  return <section className="panel work-panel" id="work" data-work-view={visibleView}><PanelHeader title="Work" note={notes[visibleView]} actions={controls} />
     {visibleView === "active" && <DataTable rows={activeJobs} kind="active" emptyMessage="No active translations, repairs, startup, or maintenance." timeZone={timeZone} now={now} />}
     {visibleView === "retry" && <RetryQueue plans={retryPlans} completedCycle={completedCycle} maxAttempts={maxAttempts} cycleJobs={[...activeJobs, ...upcoming]} />}
     {visibleView === "up-next" && <><DataTable rows={upcoming.slice(0, upcomingCount)} kind="upcoming" emptyMessage="No queued jobs." timeZone={timeZone} now={now} /><div className="queue-table-footer"><span className="queue-showing" aria-live="polite">Showing {Math.min(upcomingCount, upcoming.length)} of {upcoming.length}</span>{upcomingCount < upcoming.length && <button type="button" className="btn btn-secondary btn-sm up-next-show-more" onClick={() => setUpcomingCount((value) => value + QUEUE_BATCH)}>Show {Math.min(QUEUE_BATCH, upcoming.length - upcomingCount)} more</button>}</div></>}
+    {visibleView === "recent" && <DataTable rows={recent} kind="recent" emptyMessage="No completed work recorded yet." timeZone={timeZone} now={now} />}
   </section>;
 }

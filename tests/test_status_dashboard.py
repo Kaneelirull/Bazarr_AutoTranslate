@@ -946,11 +946,11 @@ class StatusDashboardTests(unittest.TestCase):
     def test_dashboard_assets_render_maintenance_and_adaptive_refresh(self):
         source_root = REPO_ROOT / "docker" / "frontend" / "src" / "dashboard"
         script = "\n".join(path.read_text(encoding="utf-8") for path in source_root.glob("*.tsx"))
-        for text in ("maintenance.activeJobs", "Recent maintenance", "Rolling maintenance", "Waiting for capacity", "Calling Lingarr", "Validating returned cue", "ACTIVE_REFRESH_MS = 3_000", "IDLE_REFRESH_MS = 20_000", "MAX_BACKOFF_MS = 60_000", "/api/status", "RecoveryAttention", "retry-queue", "retryMaxAttempts", "Unlimited", "eligibleCompletedCycle"):
+        for text in ("maintenance.activeJobs", "Latest maintenance scan", "Health & history", "Waiting for capacity", "Calling Lingarr", "Validating returned cue", "ACTIVE_REFRESH_MS = 3_000", "IDLE_REFRESH_MS = 20_000", "MAX_BACKOFF_MS = 60_000", "/api/status", "mergeRecentOutcomes", "Retry queue", "retryMaxAttempts", "Unlimited", "eligibleCompletedCycle"):
             self.assertIn(text, script)
         app = (source_root / "App.tsx").read_text(encoding="utf-8")
         self.assertLess(app.index("\n      <Overview"), app.index("\n      <Work"))
-        self.assertLess(app.index("\n      <Work"), app.index("\n      <RecoveryAttention"))
+        self.assertLess(app.index("\n      <Work"), app.index("\n      <HealthHistory"))
 
     def test_dashboard_assets_render_accessible_validation_observations(self):
         script = (REPO_ROOT / "docker" / "frontend" / "src" / "dashboard" / "Observations.tsx").read_text(encoding="utf-8")

@@ -17,5 +17,5 @@ export type StatusSnapshot = {
   maintenance?: DataRow;
 };
 
-export type WorkView = "auto" | "active" | "up-next" | "retry";
+export type WorkView = "auto" | "active" | "up-next" | "retry" | "recent";
 export type RetrySort = "media" | "language" | "status" | "attempts" | "nextAction";
