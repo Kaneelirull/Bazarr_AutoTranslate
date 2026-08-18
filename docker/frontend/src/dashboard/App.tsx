@@ -3,10 +3,10 @@ import { requestJson } from "../shared/api";
 import { AppHeader } from "../shared/components";
 import { parseTime, relativeTime } from "../shared/time";
 import { labelForState } from "./format";
-import { Observations } from "./Observations";
-import { Diagnostics, LatestMaintenance, Overview, RecentPanels, RecoveryDiagnostics, RollingMaintenance, RollingOutcomes } from "./Sections";
+import { HealthHistory } from "./HealthHistory";
+import { Overview } from "./Sections";
 import type { StatusSnapshot, WorkView } from "./types";
-import { RecoveryAttention, Work, activeRetryPlans } from "./Work";
+import { Work, mergeRecentOutcomes } from "./Work";
 
 const ACTIVE_REFRESH_MS = 3_000;
 const IDLE_REFRESH_MS = 20_000;
@@ -88,12 +88,11 @@ export function DashboardApp({ initialSnapshot, timeZone = "UTC" }: { initialSna
   const upcoming = snapshot.upNext || [];
   const retryPlans = snapshot.retryPlans || [];
   const manualPlans = retryPlans.filter((plan) => plan.manualReview);
-  const automaticRetries = activeRetryPlans(retryPlans);
   const completedCycle = Number(snapshot.completedCycle || 0);
+  const recent = mergeRecentOutcomes(snapshot.recentOutcomes || [], maintenance.recentOutcomes || []);
   const generated = parseTime(snapshot.generatedAt);
   const stale = !generated || now - generated.getTime() > 30_000;
   const countdown = nextRefreshAt ? Math.max(0, Math.ceil((nextRefreshAt - now) / 1000)) : 0;
-  const showRetry = () => { setWorkView("retry"); window.setTimeout(() => document.getElementById("retry-queue")?.scrollIntoView({ block: "start" })); };
 
   return <main id="dashboard-react">
     <div className="dashboard-shell">
@@ -106,15 +105,8 @@ export function DashboardApp({ initialSnapshot, timeZone = "UTC" }: { initialSna
         action={<button className="btn btn-primary" type="button" disabled={loading} onClick={refresh}>{loading ? "Refreshing…" : "Refresh now"}</button>}
       />
       <Overview cycle={cycle} service={service} />
-      <Work activeJobs={active} upcoming={upcoming} retryPlans={retryPlans} completedCycle={completedCycle} maxAttempts={Number(snapshot.retryMaxAttempts || 0)} timeZone={timeZone} now={now} requestedView={workView} onView={setWorkView} />
-      <RecoveryAttention plans={automaticRetries} completedCycle={completedCycle} manualReviewCount={manualPlans.length} onRetry={showRetry} />
-      <Diagnostics timing={snapshot.timing} circuits={snapshot.circuits} />
-      <RecoveryDiagnostics diagnostics={service.recoveryDiagnostics} />
-      <RecentPanels recent={snapshot.recentOutcomes || []} maintenance={maintenance} timeZone={timeZone} now={now} />
-      <Observations observations={snapshot.validationObservations} timeZone={timeZone} />
-      <RollingOutcomes history={snapshot.history} />
-      <RollingMaintenance history={maintenance.history} />
-      <LatestMaintenance maintenance={maintenance} />
+      <Work activeJobs={active} upcoming={upcoming} retryPlans={retryPlans} recent={recent} completedCycle={completedCycle} maxAttempts={Number(snapshot.retryMaxAttempts || 0)} timeZone={timeZone} now={now} requestedView={workView} onView={setWorkView} />
+      <HealthHistory cycle={cycle} timing={snapshot.timing} circuits={snapshot.circuits} diagnostics={service.recoveryDiagnostics} observations={snapshot.validationObservations} history={snapshot.history} maintenance={maintenance} timeZone={timeZone} />
       <p className="footer-note">Auto-refreshes every 3 seconds while active and 20 seconds while idle · trusted LAN endpoint · no subtitle text or filesystem paths exposed</p>
     </div>
   </main>;

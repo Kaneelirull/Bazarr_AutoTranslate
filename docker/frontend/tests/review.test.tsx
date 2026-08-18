@@ -60,4 +60,44 @@ describe("ReviewApp", () => {
     expect(await screen.findByRole("button", { name: "Dismiss" })).toBeDisabled();
     expect(screen.getByText(/Manual actions are disabled/)).toBeInTheDocument();
   });
+
+  it("keeps filters and actions interactive during background polling", async () => {
+    const pending = new Promise<Response>(() => undefined);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(listing), { status: 200 }))
+      .mockReturnValueOnce(pending);
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ReviewApp pollInterval={5} />);
+
+    expect(await screen.findByText("Example Show")).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByLabelText("Search")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Queue manual retry" })).toBeEnabled();
+    expect(screen.getByText("Refreshing review records in the background")).toBeInTheDocument();
+  });
+
+  it("keeps mutations single-flight until their protected refresh completes", async () => {
+    let finishRefresh!: (response: Response) => void;
+    const protectedRefresh = new Promise<Response>((resolve) => { finishRefresh = resolve; });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(listing), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ outcome: "resolved" }), { status: 200 }))
+      .mockReturnValueOnce(protectedRefresh);
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ReviewApp pollInterval={60_000} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Recheck restored file" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(screen.getByRole("button", { name: "Recheck restored file" })).toBeDisabled();
+    finishRefresh(new Response(JSON.stringify(listing), { status: 200 }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Recheck restored file" })).toBeEnabled());
+  });
+
+  it("groups secondary controls under More filters", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(listing), { status: 200 })));
+    render(<ReviewApp pollInterval={60_000} />);
+    await screen.findByText("Example Show");
+    expect(screen.getByRole("button", { name: "More filters" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByLabelText("Status")).toBeInTheDocument();
+  });
 });

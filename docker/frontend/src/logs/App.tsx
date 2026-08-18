@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { requestJson } from "../shared/api";
-import { AppHeader, Panel } from "../shared/components";
+import { AdvancedFilters, AppHeader, Panel, PanelBody } from "../shared/components";
 
 type LogPayload = { lines?: string[]; nextCursor?: number | null; sanitized?: boolean };
 type Filters = { level: string; job: string; q: string };
@@ -63,17 +63,17 @@ export function LogsApp() {
       </button>}
     />
     <Panel>
-      <form className="log-filters" onSubmit={submit}>
-        <label>Level <select value={filters.level} onChange={(event) => setFilters({ ...filters, level: event.target.value })}>
-          <option value="">All</option><option>ERROR</option><option>WARNING</option><option>FAIL</option><option>TIMEOUT</option>
-        </select></label>
-        <label>Show or job <input value={filters.job} maxLength={100} placeholder="Top Gear or job ID" onChange={(event) => setFilters({ ...filters, job: event.target.value })} /></label>
-        <label>Search text <input value={filters.q} maxLength={100} placeholder="Message contains…" onChange={(event) => setFilters({ ...filters, q: event.target.value })} /></label>
+      <PanelBody className="log-panel-body"><form className="log-filters" onSubmit={submit}>
+        <label className="filter-search">Search text <input value={filters.q} maxLength={100} placeholder="Message contains…" onChange={(event) => setFilters({ ...filters, q: event.target.value })} /></label>
+        <AdvancedFilters><label>Level <select value={filters.level} onChange={(event) => setFilters({ ...filters, level: event.target.value })}>
+            <option value="">All</option><option>ERROR</option><option>WARNING</option><option>FAIL</option><option>TIMEOUT</option>
+          </select></label>
+          <label>Show or job <input value={filters.job} maxLength={100} placeholder="Top Gear or job ID" onChange={(event) => setFilters({ ...filters, job: event.target.value })} /></label></AdvancedFilters>
         <button className="btn btn-primary" type="submit" disabled={loading}>Filter</button>
       </form>
       <p className="section-note" role="status">{message}</p>
       <pre className="log-output" tabIndex={0} aria-busy={loading}>{lines.join("\n")}</pre>
-      {cursor !== null && <button className="btn btn-secondary" type="button" disabled={loading} onClick={() => void load(true)}>Load older</button>}
+      {cursor !== null && <button className="btn btn-secondary" type="button" disabled={loading} onClick={() => void load(true)}>Load older</button>}</PanelBody>
     </Panel>
   </main>;
 }
