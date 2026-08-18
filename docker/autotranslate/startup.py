@@ -117,6 +117,10 @@ def _requeue_persisted_repairs(state_store: _runtime.StateStore) -> int:
         source_path = job.get('sourcePath')
         target_path = job.get('targetPath')
         payload = job.get('payload') or {}
+        if payload.get('operation') == 'quarantine_ensemble':
+            if _runtime._run_quarantine_recovery_job(job, {}):
+                queued += 1
+            continue
         retry_plan_id = payload.get('retryPlanId')
         trial_generation = payload.get('trialGeneration')
         if not source_path or not target_path or _runtime._file_hash_or_none(source_path) != job.get('sourceHash') or (_runtime._file_hash_or_none(target_path) != job.get('targetHash')):

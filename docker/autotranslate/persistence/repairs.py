@@ -95,6 +95,15 @@ class RepairsRepositoryMixin:
             )
             return cursor.rowcount == 1
 
+    def repair_job_attempted(self, dedupe_key: str) -> bool:
+        """Return whether this exact durable recovery input set was admitted."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM repair_jobs WHERE dedupe_key=? LIMIT 1",
+                (str(dedupe_key),),
+            ).fetchone()
+        return row is not None
+
     def repair_jobs_for_restart(self) -> list[dict]:
         with self._lock:
             rows = self._connection.execute(

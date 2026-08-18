@@ -12,7 +12,7 @@ from concurrent.futures import Future
 from types import SimpleNamespace
 from pathlib import Path
 from contextlib import redirect_stdout
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -386,6 +386,24 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             )
 
             self.assertEqual(discovered, str(hi_target))
+
+    def test_failed_job_discovery_rejects_unchanged_preexisting_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "show.mkv"
+            target = root / "show.et.srt"
+            video.write_bytes(b"video")
+            target.write_text(make_srt("Existing"), encoding="utf-8")
+            before = app._snapshot_target_sidecars(str(video), "et")
+
+            self.assertIsNone(app._discover_completed_target(
+                str(video), "et", str(target), before, require_changed=True,
+            ))
+
+            target.write_text(make_srt("Changed"), encoding="utf-8")
+            self.assertEqual(app._discover_completed_target(
+                str(video), "et", str(target), before, require_changed=True,
+            ), str(target))
 
     def test_variant_quarantine_clears_logical_plain_cooldown(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -918,6 +936,52 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             states = [state for state, _ in recorder.states]
             self.assertEqual(states, ["translating", "validating", "accepted"])
             self.assertEqual(stats["completed"], 1)
+
+    def test_failed_lingarr_changed_sidecar_is_provenanced_and_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            source = root / "movie.en.srt"
+            target = root / "movie.et.srt"
+            video.write_bytes(b"video")
+            source.write_text(make_srt("English dialogue"), encoding="utf-8")
+            item = {"radarrId": 7, "title": "Movie", "missing_subtitles": [{"code2": "et"}]}
+            stats = defaultdict(int)
+            stats.update({"translations": [], "episode_activity": False, "movie_activity": False})
+
+            def failed_with_output(*_args, **_kwargs):
+                target.write_text(make_srt("Tere, see on tõlgitud dialoog"), encoding="utf-8")
+                return "Failed"
+
+            pending = Mock(return_value=True)
+            validate = Mock(return_value=("valid", SimpleNamespace(issues=[])))
+            with patch.multiple(
+                app,
+                LANGUAGES=["en", "et"], CLEANUP_UNDERSIZED_ENABLED=False,
+                fetch_subtitles=lambda *_args: (str(video), [{"code2": "en", "path": str(source), "forced": False}]),
+                lingarr_resolve_media_id=lambda *_args: 99,
+                lingarr_get_active_translations=lambda: [],
+                lingarr_submit_file=lambda *_args: 123,
+                lingarr_poll_job=failed_with_output,
+                lingarr_get_job=lambda *_args: {"id": 123, "status": "Failed"},
+                _safe_failure_details=lambda *_args, **_kwargs: {"status": "Failed", "category": "provider"},
+                _recover_failed_lingarr_job=lambda *_args, **_kwargs: {"recovered": False},
+                _count_dialogue_lines=lambda _path: 1,
+                _estimate_timeout=lambda _path: 60,
+                _record_submission=lambda *_args, **_kwargs: 41,
+                _mark_submission_submitted=lambda *_args, **_kwargs: None,
+                _mark_submission_failed=lambda *_args, **_kwargs: None,
+                _update_submission_actual_path=lambda *_args, **_kwargs: None,
+                _record_pending_lingarr_output=pending,
+                _validate_translated_file=validate,
+            ):
+                app.process_item(item, "movies", "radarrId", stats, threading.Lock())
+
+            self.assertEqual(stats["completed"], 1)
+            validate.assert_called_once()
+            self.assertEqual(pending.call_args.kwargs["attempt_id"], 41)
+            self.assertEqual(pending.call_args.kwargs["lingarr_job_id"], 123)
+            self.assertEqual(pending.call_args.kwargs["terminal_status"], "Failed")
 
     def test_process_item_prefers_deduplicated_extracted_source_and_publishes_canonical_target(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1229,6 +1229,42 @@ class StateStoreTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_ensemble_job_dedupes_exact_attempt_set_and_protects_donors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = StateStore(root / "state.sqlite3")
+            try:
+                donor = root / "quarantine" / "attempt.srt"
+                report = root / "quarantine" / "attempt.srt.validation.json"
+                donor.parent.mkdir()
+                donor.write_text("candidate", encoding="utf-8")
+                report.write_text("{}", encoding="utf-8")
+                attempt = store.record_quarantine_attempt(
+                    item_type="episodes", item_id=9, target_language="et",
+                    source_hash="source", target_hash="target", attempt_number=1,
+                    artifact_path=donor, report_path=report, failure_rules=["invalid"],
+                    cue_signatures=[],
+                )
+                key = "quarantine-ensemble:exact-set"
+                store.enqueue_repair_job(
+                    dedupe_key=key, item_type="episodes", item_id=9,
+                    target_language="et", payload={
+                        "operation": "quarantine_ensemble",
+                        "retryPlanId": 3,
+                        "quarantineAttemptIds": [attempt["id"]],
+                    },
+                )
+
+                self.assertTrue(store.repair_job_attempted(key))
+                protected = {
+                    os.path.normcase(os.path.abspath(path))
+                    for path in store.protected_artifact_paths()
+                }
+                self.assertIn(os.path.normcase(os.path.abspath(donor)), protected)
+                self.assertIn(os.path.normcase(os.path.abspath(report)), protected)
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

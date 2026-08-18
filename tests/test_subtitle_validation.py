@@ -1140,6 +1140,31 @@ class SubtitleValidationTests(unittest.TestCase):
             self.assertEqual(result.donor_history[0]["sourceAttempt"], 1)
             self.assertIn("See on tavaline", target.read_text(encoding="utf-8"))
 
+    def test_donor_only_pass_never_calls_provider(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "episode.eng.srt"
+            target = root / "episode.et.srt"
+            donor = root / "attempt.et.srt"
+            source.write_text(make_srt("This is a normal dialogue sentence"), encoding="utf-8")
+            target.write_text(make_srt("This is a normal dialogue sentence"), encoding="utf-8")
+            donor.write_text(make_srt("See on tavaline dialoogilause"), encoding="utf-8")
+            provider = unittest.mock.Mock(side_effect=AssertionError("provider called"))
+
+            result = repair_subtitle_file(
+                source, target, self.detector, self.estonian, provider,
+                target_lang="et", provider_enabled=False,
+                donor_attempts=[{
+                    "id": 1, "attemptNumber": 1,
+                    "artifactPath": str(donor), "targetHash": file_sha256(donor),
+                    "cueSignatures": cleanup.source_cue_signatures(source),
+                    "createdAt": 1,
+                }],
+            )
+
+            self.assertTrue(result.success, result.reason)
+            provider.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

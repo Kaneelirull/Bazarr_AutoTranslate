@@ -26,6 +26,8 @@ os.environ.setdefault(
 from autotranslate.config import Config  # noqa: E402
 from autotranslate.production import load_runtime  # noqa: E402
 import autotranslate.subtitles.library as cleanup  # noqa: E402
+import autotranslate.subtitles.foundation as subtitle_foundation  # noqa: E402
+import autotranslate.subtitles.repair as subtitle_repair  # noqa: E402
 from autotranslate.persistence.state_store import StateStore  # noqa: E402
 from autotranslate.persistence.state_store import StateStoreError  # noqa: E402
 
@@ -60,6 +62,59 @@ class ServiceReliabilityTests(unittest.TestCase):
         app._validation_state.close()
         app._validation_state = None
         self._state_directory.cleanup()
+
+    def test_complementary_quarantine_attempts_recover_before_regeneration(self):
+        root = Path(self._state_directory.name)
+        source = root / "show.eng.srt"
+        target = root / "show.et.srt"
+        video = root / "show.mkv"
+        first = root / "quarantine-1.et.srt"
+        second = root / "quarantine-2.et.srt"
+        source.write_text(cleanup.render_srt_cues([
+            cleanup.SubtitleCue(1, "00:00:01,000 --> 00:00:01,900", ["This is the first ordinary dialogue sentence"]),
+            cleanup.SubtitleCue(2, "00:00:02,000 --> 00:00:02,900", ["This is the second ordinary dialogue sentence"]),
+        ]), encoding="utf-8")
+        first.write_text(cleanup.render_srt_cues([
+            cleanup.SubtitleCue(1, "00:00:01,000 --> 00:00:01,900", ["See on esimene tavaline dialoogilause"]),
+            cleanup.SubtitleCue(2, "00:00:02,000 --> 00:00:02,900", ["This is the second ordinary dialogue sentence"]),
+        ]), encoding="utf-8")
+        second.write_text(cleanup.render_srt_cues([
+            cleanup.SubtitleCue(1, "00:00:01,000 --> 00:00:01,900", ["This is the first ordinary dialogue sentence"]),
+            cleanup.SubtitleCue(2, "00:00:02,000 --> 00:00:02,900", ["See on teine tavaline dialoogilause"]),
+        ]), encoding="utf-8")
+        video.write_bytes(b"video")
+        source_hash = cleanup.file_sha256(source)
+        plan, _ = app._validation_state.schedule_retry_plan(
+            item_type="episodes", item_id=22, target_language="et",
+            source_hash=source_hash, source_path=source, source_language="en",
+            target_path=target, series_key="sonarr:1", series_title="Show",
+            media_title="Show S01E01", failure_class="whole_file",
+            rules=["target_structure"], state="regeneration_waiting",
+            eligible_completed_cycle=0,
+        )
+        signatures = cleanup.source_cue_signatures(source)
+        for number, artifact in enumerate((first, second), start=1):
+            app._validation_state.record_quarantine_attempt(
+                item_type="episodes", item_id=22, target_language="et",
+                source_hash=source_hash, target_hash=cleanup.file_sha256(artifact),
+                attempt_number=number, artifact_path=artifact, report_path=None,
+                failure_rules=["copied_source"], cue_signatures=signatures,
+            )
+        stats = {}
+        with (
+            patch.object(subtitle_foundation, "normalize_managed_file", lambda _path: None),
+            patch.object(subtitle_repair, "normalize_managed_file", lambda _path: None),
+            patch.object(app, "lingarr_translate_line", side_effect=AssertionError("provider called")) as provider,
+        ):
+            app._run_quarantine_recoveries(stats)
+
+        self.assertTrue(target.exists())
+        recovered = target.read_text(encoding="utf-8")
+        self.assertIn("See on esimene tavaline dialoogilause", recovered)
+        self.assertIn("See on teine tavaline dialoogilause", recovered)
+        provider.assert_not_called()
+        self.assertEqual(app._validation_state.retry_plan(plan["id"])["state"], "accepted_after_donor_recovery")
+        self.assertEqual(stats["ensemble_recovered"], 1)
 
     def test_tracked_bazarr_sync_closes_status_on_success_and_exception(self):
         with (

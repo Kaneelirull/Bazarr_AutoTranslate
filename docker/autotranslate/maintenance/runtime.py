@@ -388,8 +388,10 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 continue
             validation_origin = None
             validation_source_hash = None
+            validation_item_type = None
+            validation_item_id = None
             submission = _runtime._find_submission_for_target(candidate.path, candidate.target_lang)
-            if source_path is None and submission is not None:
+            if submission is not None:
                 pending_source = submission.get('sourcePath')
                 pending_language = submission.get('sourceLanguage')
                 if isinstance(pending_source, str) and pending_source and _runtime.os.path.exists(pending_source) and isinstance(pending_language, str) and pending_language:
@@ -398,11 +400,15 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                     except OSError as e:
                         print(f'{_runtime.YELLOW}[SCAN] Could not hash pending source {pending_source}: {e}{_runtime.RESET}')
                         pending_hash = None
-                    if pending_hash is not None and submission.get('sourceHash') == pending_hash and _runtime._submission_matches_source(submission, pending_source, pending_language, candidate.path, candidate.target_lang):
-                        source_path = _runtime.Path(pending_source)
-                        source_lang = pending_language
+                    candidate_source_matches = source_path is not None and source_lang is not None and _runtime._submission_matches_source(submission, str(source_path), source_lang, candidate.path, candidate.target_lang)
+                    if pending_hash is not None and submission.get('sourceHash') == pending_hash and (_runtime._submission_matches_source(submission, pending_source, pending_language, candidate.path, candidate.target_lang) if source_path is None else candidate_source_matches):
+                        if source_path is None:
+                            source_path = _runtime.Path(pending_source)
+                            source_lang = pending_language
                         validation_origin = 'lingarr'
                         validation_source_hash = pending_hash
+                        validation_item_type = submission.get('itemType')
+                        validation_item_id = submission.get('itemId')
                         stats['recovered_pending_outputs'] += 1
                         print(f'[SCAN] Recovered pending Lingarr output {candidate.path.name} with source {source_path.name}')
             try:
@@ -412,13 +418,19 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 source_path = None
                 source_lang = None
                 source_hash = None
+            if validation_item_id is None and source_hash is not None and hasattr(state, 'retry_plans'):
+                normalized_target = _runtime.os.path.normcase(_runtime.os.path.abspath(candidate.path))
+                plan = next((entry for entry in state.retry_plans(include_terminal=False) if entry.get('targetLanguage') == candidate.target_lang and entry.get('sourceHash') == source_hash and _runtime.os.path.normcase(_runtime.os.path.abspath(entry.get('targetPath') or '')) == normalized_target), None)
+                if plan is not None:
+                    validation_item_type = plan['itemType']
+                    validation_item_id = plan['itemId']
             if state.is_unchanged_valid(candidate.path, source_hash, target_hash):
                 stats['skipped_unchanged'] += 1
                 _runtime._publish_scan_progress(maintenance_scan_job_id)
                 continue
             stats['files_checked'] += 1
             if source_path is not None and source_lang is not None:
-                action, report = _runtime._validate_translated_file(str(source_path), str(candidate.path), source_lang, candidate.target_lang, None, title=candidate.path.name, dry_run=_runtime.CLEANUP_SCAN_DRY_RUN, defer_repair=not _runtime.CLEANUP_SCAN_DRY_RUN, media_duration=_runtime._probe_media_duration(candidate_video) if candidate_video is not None else None, origin=validation_origin, provenance_source_hash=validation_source_hash, maintenance_scan_job_id=maintenance_scan_job_id)
+                action, report = _runtime._validate_translated_file(str(source_path), str(candidate.path), source_lang, candidate.target_lang, validation_item_id, title=candidate.path.name, dry_run=_runtime.CLEANUP_SCAN_DRY_RUN, defer_repair=not _runtime.CLEANUP_SCAN_DRY_RUN, item_type=validation_item_type, media_duration=_runtime._probe_media_duration(candidate_video) if candidate_video is not None else None, origin=validation_origin, provenance_source_hash=validation_source_hash, maintenance_scan_job_id=maintenance_scan_job_id)
             else:
                 stats['without_source'] += 1
                 report = validate_subtitle_without_source(candidate.path, detector, target_language, target_lang=candidate.target_lang, **_runtime._validation_kwargs())
