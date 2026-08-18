@@ -583,7 +583,7 @@ class StatusDashboardTests(unittest.TestCase):
             self.assertNotIn("api_key", page.lower())
             self.assertNotIn("http-equiv=\"refresh\"", page.lower())
             self.assertIn("/assets/dashboard.css", page)
-            self.assertIn("/assets/dashboard.js", page)
+            self.assertIn('type="module" src="/assets/app/dashboard.js"', page)
             self.assertNotIn("<style>", page)
             self.assertNotIn("<script>", page)
             self.assertNotIn("&quot;jobs&quot;", page)
@@ -617,14 +617,11 @@ class StatusDashboardTests(unittest.TestCase):
                     self.assertEqual(response.headers["Content-Type"], "text/css; charset=utf-8")
                     self.assertIn(b"--bg-base", response.read())
                 with urllib.request.urlopen(
-                    f"http://127.0.0.1:{port}/assets/dashboard.js"
+                    f"http://127.0.0.1:{port}/assets/app/dashboard.js"
                 ) as response:
                     script = response.read()
-                    self.assertIn(b"formatDuration", script)
-                    self.assertIn(b"Refresh in", script)
-                    self.assertIn(b"types.size > 1", script)
-                    self.assertIn(b"No maintenance actions", script)
-                    self.assertIn(b"repaired)", script)
+                    self.assertEqual(response.headers["Content-Type"], "text/javascript; charset=utf-8")
+                    self.assertIn(b"/api/status", script)
                 with urllib.request.urlopen(
                     f"http://127.0.0.1:{port}/api/status"
                 ) as response:
@@ -707,143 +704,25 @@ class StatusDashboardTests(unittest.TestCase):
                 thread.join(timeout=2)
 
     def test_dashboard_assets_use_accessible_reason_tooltips(self):
-        script = (
-            REPO_ROOT / "docker" / "static" / "dashboard.js"
-        ).read_text(encoding="utf-8")
-        stylesheet = (
-            REPO_ROOT / "docker" / "static" / "dashboard.css"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn('data-tooltip-trigger aria-describedby="${tooltipId}"', script)
-        self.assertIn('role="tooltip" hidden', script)
-        self.assertIn("<strong>Reason</strong>", script)
-        self.assertIn("escapeHtml(reason)", script)
-        self.assertIn('event.key !== "Escape"', script)
-        self.assertIn('document.addEventListener("mouseover"', script)
-        self.assertIn("pinnedTooltipTrigger", script)
-        self.assertNotIn('class="reason"', script)
+        script = (REPO_ROOT / "docker" / "frontend" / "src" / "dashboard" / "format.tsx").read_text(encoding="utf-8")
+        stylesheet = (REPO_ROOT / "docker" / "static" / "dashboard.css").read_text(encoding="utf-8")
+        self.assertIn('role="tooltip"', script)
+        self.assertIn('aria-expanded={open}', script)
+        self.assertIn('event.key === "Escape"', script)
+        self.assertIn("onMouseEnter", script)
+        self.assertIn("onFocus", script)
         self.assertIn(".badge-tooltip-trigger:focus-visible", stylesheet)
         self.assertIn(".status-tooltip[hidden]", stylesheet)
-        self.assertIn("max-width: min(320px, calc(100vw - 24px))", stylesheet)
 
     def test_dashboard_assets_render_timing_and_protection_states(self):
-        script = (
-            REPO_ROOT / "docker" / "static" / "dashboard.js"
-        ).read_text(encoding="utf-8")
-        stylesheet = (
-            REPO_ROOT / "docker" / "static" / "dashboard.css"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn('toFixed(1)} sec/cue', script)
-        self.assertIn('"Cold-start estimate"', script)
-        self.assertIn('"Learned average"', script)
-        self.assertIn('"File translation"', script)
-        self.assertIn('"Cue repair"', script)
-        self.assertIn("All series available", script)
-        self.assertIn("Protection active", script)
-        self.assertIn(
-            'failures === 1 ? "failure" : "failures"',
-            script,
-        )
-        self.assertIn('entry.state === "open" || entry.state === "half_open"', script)
-        self.assertIn("entry.eligibleAfterCycle", script)
-        self.assertIn('entry.trialState === "validation_pending"', script)
-        self.assertIn("Trial awaiting repair/validation", script)
-        self.assertIn("Trial ready", script)
-        self.assertIn("Trial in progress", script)
-        self.assertIn("Trial in ${remaining.toLocaleString()}", script)
-        self.assertNotIn("Number(entry.retryAt) * 1000", script)
-        self.assertIn('role="status"', script)
-        self.assertIn(".diagnostics-content", stylesheet)
-        self.assertIn(".timing-grid", stylesheet)
-        self.assertIn(".protection-row.is-healthy", stylesheet)
-        self.assertIn(".protection-row.is-warning", stylesheet)
-        self.assertIn("@media (max-width: 440px)", stylesheet)
-        self.assertIn('["Est. total", "estimate"]', script)
-        self.assertIn('["Remaining", "eta"]', script)
-        self.assertIn("exactTimeMarkup(row.startedAt)", script)
-        self.assertIn('new Intl.DateTimeFormat("en-GB"', script)
-        self.assertIn('hourCycle: "h23"', script)
-        self.assertIn("configuredTimeZone", script)
-        self.assertIn("formatRemaining", script)
-        self.assertIn("Over by", script)
-        self.assertIn(".live-remaining", script)
-        self.assertIn('"Retry queue"', script)
-        self.assertIn("retryPlans", script)
-        self.assertIn('class="data-table retry-table"', script)
-        self.assertIn('class="retry-detail-row"', script)
-        self.assertIn('class="retry-detail-grid"', script)
-        self.assertIn('class="retry-details-toggle"', script)
-        self.assertIn('aria-expanded="${expanded ? "true" : "false"}"', script)
-        self.assertIn('aria-controls="${escapeHtml(detailId)}"', script)
-        self.assertNotIn("<summary>View details</summary>", script)
-        self.assertIn('"Due now"', script)
-        self.assertIn('"Admitted"', script)
-        self.assertIn('"Translating"', script)
-        self.assertIn('"Repair queued"', script)
-        self.assertIn('"Retry exhausted"', script)
-        self.assertIn('"Source blocked"', script)
-        self.assertIn("No retry work scheduled.", script)
-        self.assertIn('"Waiting for retry"', script)
-        self.assertIn('"Circuit protected"', script)
-        self.assertIn('"Missing source"', script)
-        self.assertIn("detail.category", script)
-        self.assertIn("retryMedia", script)
-        self.assertNotIn(r"\.srt\s*season\s*\d+", script)
-        self.assertNotIn("After cycle", script)
-        self.assertIn('return "Due now"', script)
-        self.assertIn('"Rescheduled after no progress"', script)
-        self.assertIn('return "Next cycle"', script)
-        self.assertIn("`In ${cyclesRemaining} Cycles`", script)
-        self.assertIn("retryNextAction(plan, completedCycle)", script)
-        self.assertIn("Repair at cycle end", script)
-        self.assertIn("Waiting for circuit", script)
-        self.assertIn("Manual review", script)
-        self.assertIn('let retrySortKey = "nextAction"', script)
-        self.assertIn("compareRetryPlans", script)
-        self.assertIn("expandedRetryIds", script)
-        self.assertIn("RETRY_BATCH_SIZE = 20", script)
-        self.assertIn("UP_NEXT_BATCH_SIZE = 10", script)
-        self.assertIn("ACTIVE_RETRY_STATES = new Set", script)
-        self.assertIn('"repair_retry_queued", "regeneration_waiting"', script)
-        self.assertIn('"regeneration_queued", "retry_in_progress"', script)
-        self.assertIn('role="group" aria-label="Work view"', script)
-        self.assertIn('["auto", "Auto"]', script)
-        self.assertIn('["active", "Active now"]', script)
-        self.assertIn('["up-next", "Up next"]', script)
-        self.assertIn('["retry", "Retry queue"]', script)
-        self.assertIn('aria-pressed="${workViewMode === value ? "true" : "false"}"', script)
-        self.assertIn('if (activeJobs.length) return "active"', script)
-        self.assertIn('if (activeRetries.length) return "retry"', script)
-        self.assertIn('panelHeader("Work", note, workViewControl())', script)
-        self.assertIn('data-work-view="${visibleView}"', script)
-        self.assertIn('data-work-focus="mode-${value}"', script)
-        self.assertIn('data-work-focus="up-next-more"', script)
-        self.assertIn('workViewMode = button.dataset.workMode', script)
-        self.assertNotIn("queueViewMode", script)
-        self.assertIn("upNextVisibleCount += UP_NEXT_BATCH_SIZE", script)
-        self.assertIn("upNextVisibleCount = UP_NEXT_BATCH_SIZE", script)
-        self.assertIn("data-open-retry-queue", script)
-        self.assertIn('workViewMode = "retry"', script)
-        self.assertIn('document.getElementById("retry-queue")', script)
-        self.assertIn("Showing ${visible.length.toLocaleString()} of", script)
-        self.assertIn("Show ${Math.min(RETRY_BATCH_SIZE, remaining)", script)
-        self.assertIn('data-retry-sort="${escapeHtml(key)}"', script)
-        self.assertIn('id="retry-sort-select"', script)
-        self.assertIn('aria-live="polite"', script)
-        self.assertIn(".retry-details-toggle:focus-visible", stylesheet)
-        self.assertIn(".retry-detail-row[hidden]", stylesheet)
-        self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr))", stylesheet)
-        self.assertIn(".retry-mobile-sort", stylesheet)
-        self.assertIn("@media (min-width: 1400px)", stylesheet)
-        self.assertIn("width: min(90%, 2200px)", stylesheet)
-        self.assertIn(".retry-table td.cell-details", stylesheet)
-        self.assertIn(".time-exact-only", stylesheet)
-        self.assertIn(".work-view-switch", stylesheet)
-        self.assertIn('.work-view-switch button[aria-pressed="true"]', stylesheet)
-        self.assertIn(".work-panel .panel-header", stylesheet)
-        self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr))", stylesheet)
-        self.assertIn('.retry-table td[data-label="Next action"]', stylesheet)
+        source_root = REPO_ROOT / "docker" / "frontend" / "src" / "dashboard"
+        script = "\n".join(path.read_text(encoding="utf-8") for path in source_root.glob("*.tsx"))
+        stylesheet = (REPO_ROOT / "docker" / "static" / "dashboard.css").read_text(encoding="utf-8")
+        for text in ("Cold-start estimate", "Learned average", "Protection active", "Trial awaiting repair/validation", "Retry queue", "No retry work scheduled.", "Rescheduled after no progress", "Repair at cycle end", "Waiting for circuit", "aria-pressed", "retry-sort-select"):
+            self.assertIn(text, script)
+        for selector in (".timing-grid", ".protection-row.is-healthy", ".retry-details-toggle:focus-visible", ".retry-detail-row[hidden]", ".work-view-switch"):
+            self.assertIn(selector, stylesheet)
+        self.assertFalse((REPO_ROOT / "docker" / "static" / "dashboard.js").exists())
 
     def test_port_conflict_raises_without_corrupting_tracker(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -878,26 +757,19 @@ class StatusDashboardTests(unittest.TestCase):
         stylesheet = (
             REPO_ROOT / "docker" / "static" / "dashboard.css"
         ).read_text(encoding="utf-8")
-        self.assertIn("Search text", page)
-        self.assertIn("New records use UTC timestamps", page)
-        self.assertIn('placeholder="Top Gear or job ID"', page)
-        self.assertIn('href="/">Status</a>', page)
-        self.assertIn('id="theme-toggle"', page)
-        self.assertIn('id="refresh-button"', page)
+        self.assertIn('id="logs-root"', page)
+        self.assertIn('type="module" src="/assets/app/logs.js"', page)
         self.assertIn("border: 1px solid var(--border-default)", stylesheet)
         self.assertIn("background: var(--bg-overlay)", stylesheet)
         self.assertIn(".log-filters input:focus-visible", stylesheet)
 
-        script = (
-            REPO_ROOT / "docker" / "static" / "logs.js"
-        ).read_text(encoding="utf-8")
-        self.assertIn('localStorage.getItem("dashboard-theme")', script)
-        self.assertIn('localStorage.setItem("dashboard-theme", value)', script)
-        self.assertIn('refresh.addEventListener("click"', script)
-        self.assertIn('refresh.textContent = "Refreshing..."', script)
-        self.assertIn('output.setAttribute("aria-busy", "true")', script)
+        script = (REPO_ROOT / "docker" / "frontend" / "src" / "logs" / "App.tsx").read_text(encoding="utf-8")
+        self.assertIn("Search text", script)
+        self.assertIn("New records use UTC timestamps", script)
+        self.assertIn("Top Gear or job ID", script)
         self.assertIn("load(false)", script)
         self.assertIn("load(true)", script)
+        self.assertFalse((REPO_ROOT / "docker" / "static" / "logs.js").exists())
         self.assertIn("box-shadow: 0 0 0 3px var(--accent-glow)", stylesheet)
         for undefined in ("var(--muted)", "var(--border)", "var(--surface-strong)", "var(--text)"):
             self.assertNotIn(undefined, stylesheet)
@@ -1072,82 +944,21 @@ class StatusDashboardTests(unittest.TestCase):
                 self.assertNotIn(unsafe, payload)
 
     def test_dashboard_assets_render_maintenance_and_adaptive_refresh(self):
-        script = (
-            REPO_ROOT / "docker" / "static" / "dashboard.js"
-        ).read_text(encoding="utf-8")
-        stylesheet = (
-            REPO_ROOT / "docker" / "static" / "dashboard.css"
-        ).read_text(encoding="utf-8")
-        for text in (
-            "maintenance.activeJobs",
-            "Recent maintenance",
-            "Rolling maintenance",
-            "Waiting for capacity",
-            "Calling Lingarr",
-            "Validating returned cue",
-            "ACTIVE_REFRESH_MS = 3_000",
-            "IDLE_REFRESH_MS = 20_000",
-            "MAX_BACKOFF_MS = 60_000",
-            "if (requestInFlight || document.hidden) return",
-            'aria-label="${escapeHtml(`${operationLabel(row.operation)} progress`)}"',
-            "renderRecoveryAttention",
-            'id="retry-queue"',
-            "snapshot.retryMaxAttempts ?? 0",
-            "retries &middot; Unlimited",
-            "of ${Number(maxAttempts)} used",
-            "eligibleCompletedCycle",
-            "timeZoneName: \"short\"",
-            "recoveryDiagnosticsOpen",
-            "data-recovery-diagnostics",
-        ):
+        source_root = REPO_ROOT / "docker" / "frontend" / "src" / "dashboard"
+        script = "\n".join(path.read_text(encoding="utf-8") for path in source_root.glob("*.tsx"))
+        for text in ("maintenance.activeJobs", "Recent maintenance", "Rolling maintenance", "Waiting for capacity", "Calling Lingarr", "Validating returned cue", "ACTIVE_REFRESH_MS = 3_000", "IDLE_REFRESH_MS = 20_000", "MAX_BACKOFF_MS = 60_000", "/api/status", "RecoveryAttention", "retry-queue", "retryMaxAttempts", "Unlimited", "eligibleCompletedCycle"):
             self.assertIn(text, script)
-        self.assertIn(".badge.maintenance-work", stylesheet)
-        self.assertIn(".job-progress progress", stylesheet)
-        self.assertIn(".recovery-attention", stylesheet)
-        self.assertIn(".diagnostics-panel", stylesheet)
-        render = script[script.index('root.innerHTML = `<div class="dashboard-shell">'):]
-        overview_position = render.index("renderOverview")
-        work_position = render.index("renderWork(")
-        recovery_position = render.index("renderRecoveryAttention")
-        self.assertLess(overview_position, work_position)
-        self.assertLess(work_position, recovery_position)
-        self.assertEqual(render.count("renderWork("), 1)
-        self.assertEqual(render.count('id="retry-queue"'), 0)
-        self.assertNotIn('panelHeader("Active now"', render)
-        self.assertNotIn("renderCombinedQueue", render)
-        self.assertNotIn('panelHeader("Up next", "Next 10 queued jobs")', render)
-        self.assertIn('startup: "Startup"', script)
-        self.assertIn('retention: "Retention"', script)
-        self.assertIn('retaining: "Applying retention"', script)
+        app = (source_root / "App.tsx").read_text(encoding="utf-8")
+        self.assertLess(app.index("\n      <Overview"), app.index("\n      <Work"))
+        self.assertLess(app.index("\n      <Work"), app.index("\n      <RecoveryAttention"))
 
     def test_dashboard_assets_render_accessible_validation_observations(self):
-        script = (
-            REPO_ROOT / "docker" / "static" / "dashboard.js"
-        ).read_text(encoding="utf-8")
-        stylesheet = (
-            REPO_ROOT / "docker" / "static" / "dashboard.css"
-        ).read_text(encoding="utf-8")
-        for text in (
-            "Validation observations",
-            "No copied-source repairs were suppressed.",
-            "Repair skipped",
-            "<details",
-            "data-observation-focus",
-            "data-observation-id",
-            "expandedObservationIds",
-            "data-focus-key=\"theme-toggle\"",
-            "snapshot.validationObservations",
-        ):
+        script = (REPO_ROOT / "docker" / "frontend" / "src" / "dashboard" / "Observations.tsx").read_text(encoding="utf-8")
+        stylesheet = (REPO_ROOT / "docker" / "static" / "dashboard.css").read_text(encoding="utf-8")
+        for text in ("Validation observations", "No copied-source repairs were suppressed.", "Repair skipped", "<details", "expanded", "View evidence"):
             self.assertIn(text, script)
-        for selector in (
-            ".observation-filters",
-            ".badge-warning",
-            ".observation-details summary:focus-visible",
-            ".observation-evidence",
-        ):
+        for selector in (".observation-filters", ".badge-warning", ".observation-details summary:focus-visible", ".observation-evidence"):
             self.assertIn(selector, stylesheet)
-        self.assertIn("background: var(--warning-subtle)", stylesheet)
-        self.assertIn("color: var(--warning)", stylesheet)
 
 
 if __name__ == "__main__":

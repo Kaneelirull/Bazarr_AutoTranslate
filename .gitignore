@@ -24,6 +24,10 @@ coverage.xml
 htmlcov/
 .python-version
 .venv/
+docker/frontend/node_modules/
+docker/frontend/dist/
+docker/static/app/
+docker/frontend/*.tsbuildinfo
 venv/
 env/
 build/
@@ -42,6 +46,7 @@ Desktop.ini
 *.swp
 
 # Logs and temporary files
+.test-logs/
 *.log
 *.tmp
 *.temp

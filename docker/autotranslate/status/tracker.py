@@ -101,27 +101,6 @@ CYCLE_METRIC_KEYS = (
     "cooldown_deferrals",
     "circuit_deferrals",
 )
-STATIC_DIR = Path(__file__).parents[2] / "static"
-STATIC_ASSETS = {
-    "/assets/dashboard.css": (
-        "text/css; charset=utf-8",
-        STATIC_DIR / "dashboard.css",
-    ),
-    "/assets/dashboard.js": (
-        "text/javascript; charset=utf-8",
-        STATIC_DIR / "dashboard.js",
-    ),
-    "/assets/logs.js": (
-        "text/javascript; charset=utf-8",
-        STATIC_DIR / "logs.js",
-    ),
-    "/assets/plus-jakarta-sans.ttf": (
-        "font/ttf",
-        STATIC_DIR / "plus-jakarta-sans.ttf",
-    ),
-}
-
-
 def _utc_iso(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, timezone.utc).isoformat().replace("+00:00", "Z")
 

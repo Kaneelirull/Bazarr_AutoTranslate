@@ -8,3 +8,7 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+static/app/
