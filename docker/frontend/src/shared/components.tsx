@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { useTheme } from "./theme";
 
 type Page = "status" | "review" | "logs";
@@ -52,6 +52,25 @@ export function AppHeader({
 
 export function Panel({ children, className = "" }: { children: ReactNode; className?: string }) {
   return <section className={`panel ${className}`.trim()}>{children}</section>;
+}
+
+export function PanelBody({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return <div className={`panel-body ${className}`.trim()}>{children}</div>;
+}
+
+export function AdvancedFilters({ children, label = "More filters" }: { children: ReactNode; label?: string }) {
+  const [open, setOpen] = useState(false);
+  const contentId = useId();
+  return <div className={`advanced-filters ${open ? "is-open" : ""}`}>
+    <button
+      className="advanced-filters-toggle"
+      type="button"
+      aria-expanded={open}
+      aria-controls={contentId}
+      onClick={() => setOpen((current) => !current)}
+    >{label}</button>
+    <div className="advanced-filter-grid" id={contentId}>{children}</div>
+  </div>;
 }
 
 export function PageFooter() {
