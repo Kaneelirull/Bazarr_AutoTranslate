@@ -26,6 +26,8 @@ os.environ.setdefault(
 from autotranslate.config import Config  # noqa: E402
 from autotranslate.production import load_runtime  # noqa: E402
 import autotranslate.subtitles.library as cleanup  # noqa: E402
+import autotranslate.subtitles.foundation as subtitle_foundation  # noqa: E402
+import autotranslate.subtitles.repair as subtitle_repair  # noqa: E402
 from autotranslate.persistence.state_store import StateStore  # noqa: E402
 from autotranslate.persistence.state_store import StateStoreError  # noqa: E402
 
@@ -99,11 +101,9 @@ class ServiceReliabilityTests(unittest.TestCase):
                 failure_rules=["copied_source"], cue_signatures=signatures,
             )
         stats = {}
-        detector = Mock()
-        detector.detect_language_of.return_value = cleanup.Language.ESTONIAN
-        detector.compute_language_confidence.return_value = 1.0
         with (
-            patch.object(app, "_get_cleanup_detector", return_value=detector),
+            patch.object(subtitle_foundation, "normalize_managed_file", lambda _path: None),
+            patch.object(subtitle_repair, "normalize_managed_file", lambda _path: None),
             patch.object(app, "lingarr_translate_line", side_effect=AssertionError("provider called")) as provider,
         ):
             app._run_quarantine_recoveries(stats)
