@@ -99,10 +99,19 @@ class ServiceReliabilityTests(unittest.TestCase):
                 failure_rules=["copied_source"], cue_signatures=signatures,
             )
         stats = {}
-        with patch.object(app, "lingarr_translate_line", side_effect=AssertionError("provider called")) as provider:
+        detector = Mock()
+        detector.detect_language_of.return_value = cleanup.Language.ESTONIAN
+        detector.compute_language_confidence.return_value = 1.0
+        with (
+            patch.object(app, "_get_cleanup_detector", return_value=detector),
+            patch.object(app, "lingarr_translate_line", side_effect=AssertionError("provider called")) as provider,
+        ):
             app._run_quarantine_recoveries(stats)
 
         self.assertTrue(target.exists())
+        recovered = target.read_text(encoding="utf-8")
+        self.assertIn("See on esimene tavaline dialoogilause", recovered)
+        self.assertIn("See on teine tavaline dialoogilause", recovered)
         provider.assert_not_called()
         self.assertEqual(app._validation_state.retry_plan(plan["id"])["state"], "accepted_after_donor_recovery")
         self.assertEqual(stats["ensemble_recovered"], 1)
