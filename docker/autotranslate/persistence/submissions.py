@@ -252,6 +252,118 @@ class SubmissionsRepositoryMixin:
             return None
         return self._submission_dict(row)
 
+    def find_recoverable_submission(
+        self,
+        *,
+        item_type: str,
+        item_id: int,
+        target_language: str,
+        source_path: str | Path,
+        source_hash: str,
+        candidate_mtime: float,
+    ) -> dict | None:
+        """Find durable proof that an exact provider output belongs to this source."""
+        row = self._fetchone(
+            """
+            SELECT * FROM translation_attempts
+            WHERE item_type = ? AND item_id = ? AND target_language = ?
+              AND source_path = ? AND source_hash = ?
+              AND status IN ('reserved', 'submitted')
+              AND submitted_at <= ?
+            ORDER BY submitted_at DESC LIMIT 1
+            """,
+            (
+                item_type, int(item_id), target_language,
+                _path_key(source_path), source_hash, float(candidate_mtime),
+            ),
+        )
+        return self._submission_dict(row) if row else None
+
+    def terminalize_missing_output_and_schedule_retry(
+        self,
+        attempt_id: int,
+        *,
+        item_type: str,
+        item_id: int,
+        target_language: str,
+        source_hash: str,
+        eligible_completed_cycle: int,
+        source_path: str | Path | None = None,
+        source_language: str | None = None,
+        target_path: str | Path | None = None,
+        series_key: str | None = None,
+        series_title: str | None = None,
+        media_title: str | None = None,
+        source_cue_count: int | None = None,
+        now: float | None = None,
+    ) -> dict:
+        """Atomically fail a completed-without-output attempt and queue regeneration."""
+        timestamp = time.time() if now is None else float(now)
+        with self._transaction() as db:
+            attempt = db.execute(
+                """
+                SELECT item_type, item_id, target_language, source_path,
+                       source_hash, status
+                FROM translation_attempts WHERE id = ?
+                """,
+                (int(attempt_id),),
+            ).fetchone()
+            if attempt is None or attempt["status"] not in ("reserved", "submitted"):
+                raise StateStoreError(
+                    f"submission attempt {attempt_id} is not recoverable"
+                )
+            expected_identity = (
+                str(item_type), int(item_id), str(target_language),
+                _path_key(source_path), str(source_hash),
+            )
+            actual_identity = (
+                attempt["item_type"], int(attempt["item_id"]),
+                attempt["target_language"], attempt["source_path"],
+                attempt["source_hash"],
+            )
+            if actual_identity != expected_identity:
+                raise StateStoreError(
+                    f"submission attempt {attempt_id} does not match retry identity"
+                )
+            plan, _ = self.schedule_retry_plan(
+                item_type=item_type,
+                item_id=item_id,
+                target_language=target_language,
+                source_hash=source_hash,
+                source_path=source_path,
+                source_language=source_language,
+                target_path=target_path,
+                series_key=series_key,
+                series_title=series_title,
+                media_title=media_title,
+                source_cue_count=source_cue_count,
+                failure_class="whole_file",
+                rules=("completed_output_missing",),
+                state="regeneration_waiting",
+                eligible_completed_cycle=eligible_completed_cycle,
+                reason="completed output missing",
+                now=timestamp,
+            )
+            cursor = db.execute(
+                """
+                UPDATE translation_attempts
+                SET status = 'failed', cooldown_until = 0,
+                    failure_category = 'completed_output_missing',
+                    failure_details_json = ?, updated_at = ?
+                WHERE id = ? AND status IN ('reserved', 'submitted')
+                """,
+                (
+                    json.dumps({"reason": "completed output missing"}),
+                    timestamp,
+                    int(attempt_id),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StateStoreError(
+                    f"submission attempt {attempt_id} changed during retry scheduling"
+                )
+            return plan
+
     @staticmethod
     def _submission_dict(row: sqlite3.Row) -> dict:
         return {

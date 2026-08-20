@@ -8,6 +8,7 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,94 @@ from autotranslate.persistence.state_store import StateStore, StateStoreError  #
 
 
 class StateStoreTests(unittest.TestCase):
+    def test_recoverable_submission_requires_exact_source_and_timestamp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "movie.extracted.eng.2.srt"
+            source.write_text("source", encoding="utf-8")
+            store = StateStore(root / "state.sqlite3")
+            attempt = store.record_submission(
+                "movies", 7, "et", cooldown_seconds=60,
+                source_path=str(source), source_hash="source-hash",
+                status="submitted", submitted_at=100.0,
+            )
+
+            match = store.find_recoverable_submission(
+                item_type="movies", item_id=7, target_language="et",
+                source_path=source, source_hash="source-hash",
+                candidate_mtime=101.0,
+            )
+            self.assertEqual(match["attemptId"], attempt)
+            self.assertIsNone(store.find_recoverable_submission(
+                item_type="movies", item_id=7, target_language="et",
+                source_path=source, source_hash="wrong",
+                candidate_mtime=101.0,
+            ))
+            self.assertIsNone(store.find_recoverable_submission(
+                item_type="movies", item_id=7, target_language="et",
+                source_path=source, source_hash="source-hash",
+                candidate_mtime=99.0,
+            ))
+            store.close()
+
+    def test_missing_output_transition_is_atomic_and_schedules_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            attempt = store.record_submission(
+                "episodes", 42, "et", cooldown_seconds=300,
+                source_path="show.extracted.eng.2.srt", source_hash="source-hash",
+                status="submitted", submitted_at=100.0,
+            )
+            plan = store.terminalize_missing_output_and_schedule_retry(
+                attempt, item_type="episodes", item_id=42,
+                target_language="et", source_hash="source-hash",
+                source_path="show.extracted.eng.2.srt", source_language="en",
+                target_path="show.et.srt", eligible_completed_cycle=4,
+                now=110.0,
+            )
+            self.assertEqual(plan["failureClass"], "whole_file")
+            self.assertEqual(plan["rules"], ["completed_output_missing"])
+            self.assertEqual(plan["state"], "regeneration_waiting")
+            self.assertEqual(plan["eligibleCompletedCycle"], 4)
+            row = store._fetchone(
+                "SELECT status, failure_category FROM translation_attempts WHERE id=?",
+                (attempt,),
+            )
+            self.assertEqual((row["status"], row["failure_category"]), ("failed", "completed_output_missing"))
+            self.assertIsNotNone(store.active_retry_plan("episodes", 42, "et"))
+            store.close()
+
+    def test_missing_output_transition_rolls_back_retry_and_retains_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            attempt = store.record_submission(
+                "episodes", 42, "et", cooldown_seconds=300,
+                source_path="show.extracted.eng.2.srt", source_hash="source-hash",
+                status="submitted", submitted_at=time.time(),
+            )
+            real_schedule = store.schedule_retry_plan
+
+            def schedule_then_fail(**kwargs):
+                real_schedule(**kwargs)
+                raise StateStoreError("simulated persistence failure")
+
+            with patch.object(store, "schedule_retry_plan", side_effect=schedule_then_fail):
+                with self.assertRaises(StateStoreError):
+                    store.terminalize_missing_output_and_schedule_retry(
+                        attempt, item_type="episodes", item_id=42,
+                        target_language="et", source_hash="source-hash",
+                        source_path="show.extracted.eng.2.srt",
+                        target_path="show.et.srt", eligible_completed_cycle=4,
+                    )
+            row = store._fetchone(
+                "SELECT status, cooldown_until FROM translation_attempts WHERE id=?",
+                (attempt,),
+            )
+            self.assertEqual(row["status"], "submitted")
+            self.assertGreater(row["cooldown_until"], time.time())
+            self.assertIsNone(store.active_retry_plan("episodes", 42, "et"))
+            store.close()
+
     def test_retry_plan_deduplicates_hash_and_survives_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "state.sqlite3"

@@ -69,6 +69,25 @@ def extracted_receipt_path(video_path: str | Path) -> Path:
     return video.with_name(f"{video.stem}.extracted.json")
 
 
+def extracted_receipt_owned_paths(video_path: str | Path) -> set[Path]:
+    """Return every safe sidecar path named by the extraction receipt."""
+    video = Path(video_path)
+    receipt = extracted_receipt_path(video)
+    try:
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return set()
+    tracks = payload.get("tracks") if isinstance(payload, dict) else None
+    if not isinstance(tracks, list):
+        return set()
+    owned: set[Path] = set()
+    for track in tracks:
+        relative_name = track.get("path") if isinstance(track, dict) else None
+        if isinstance(relative_name, str) and Path(relative_name).name == relative_name:
+            owned.add(video.parent / relative_name)
+    return owned
+
+
 def is_extracted_sidecar(path: str | Path, video_path: str | Path | None = None) -> bool:
     candidate = Path(path)
     folded = candidate.name.casefold()
@@ -416,7 +435,29 @@ def canonical_target_path(
 ) -> Path:
     video = Path(video_path)
     normalized_variant = variant if not variant or variant.startswith(".") else f".{variant}"
+    if normalized_variant.lower() not in (".hi", ".sdh"):
+        normalized_variant = ""
     return video.with_name(f"{video.stem}.{target_language}{normalized_variant}.srt")
+
+
+def lingarr_output_candidates(
+    provider_target_path: str | Path,
+    target_language: str,
+    variant: str = "",
+) -> tuple[Path, ...]:
+    """Return exact Lingarr names seen for an extracted-track translation."""
+    replacement = Path(provider_target_path)
+    normalized_variant = variant if not variant or variant.startswith(".") else f".{variant}"
+    if not normalized_variant:
+        return (replacement,)
+    expected_suffix = f".{target_language}{normalized_variant}.srt"
+    if not replacement.name.lower().endswith(expected_suffix.lower()):
+        return (replacement,)
+    prefix = replacement.name[:-len(expected_suffix)]
+    appended = replacement.with_name(
+        f"{prefix}{normalized_variant}.{target_language}.srt"
+    )
+    return tuple(dict.fromkeys((replacement, appended)))
 
 
 __all__ = [
@@ -425,9 +466,11 @@ __all__ = [
     "ExtractedSource",
     "PreparedSource",
     "canonical_target_path",
+    "lingarr_output_candidates",
     "deduplicate_rolling_cues",
     "discover_extracted_sources",
     "extracted_receipt_path",
+    "extracted_receipt_owned_paths",
     "is_extracted_sidecar",
     "prepare_extracted_source",
 ]

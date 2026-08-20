@@ -19,6 +19,8 @@ from autotranslate.subtitles.sources import (  # noqa: E402
     canonical_target_path,
     deduplicate_rolling_cues,
     discover_extracted_sources,
+    extracted_receipt_owned_paths,
+    lingarr_output_candidates,
     prepare_extracted_source,
 )
 
@@ -230,11 +232,53 @@ class ExtractedSourceTests(unittest.TestCase):
             discovered = discover_target_subtitles((root,), ("et",))
             self.assertEqual([item.path for item in discovered], [canonical])
 
-    def test_canonical_target_path_preserves_variant(self):
-        self.assertEqual(
-            canonical_target_path(Path("/media/Movie.mkv"), "et", ".hi"),
-            Path("/media/Movie.et.hi.srt"),
-        )
+    def test_receipt_ownership_includes_tracks_rejected_for_translation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "Movie.mkv"
+            video.write_bytes(b"video")
+            receipt = root / "Movie.extracted.json"
+            receipt.write_text(json.dumps({
+                "tracks": [
+                    {"path": "Movie.extracted.eng.2.srt"},
+                    {"path": "Movie.extracted.2.et.srt", "sha256": "stale"},
+                    {"path": "../outside.srt"},
+                ],
+            }), encoding="utf-8")
+            self.assertEqual(
+                {path.name for path in extracted_receipt_owned_paths(video)},
+                {"Movie.extracted.eng.2.srt", "Movie.extracted.2.et.srt"},
+            )
+
+    def test_canonical_target_path_preserves_only_semantic_variants(self):
+        expected = {
+            "": Path("/media/Movie.et.srt"),
+            ".2": Path("/media/Movie.et.srt"),
+            "2": Path("/media/Movie.et.srt"),
+            ".hi": Path("/media/Movie.et.hi.srt"),
+            "sdh": Path("/media/Movie.et.sdh.srt"),
+        }
+        for variant, target in expected.items():
+            with self.subTest(variant=variant):
+                self.assertEqual(
+                    canonical_target_path(Path("/media/Movie.mkv"), "et", variant),
+                    target,
+                )
+
+    def test_lingarr_output_candidates_cover_replacement_and_append_layouts(self):
+        cases = {
+            "": ("Movie.extracted.et.srt",),
+            ".2": ("Movie.extracted.et.2.srt", "Movie.extracted.2.et.srt"),
+            ".hi": ("Movie.extracted.et.hi.srt", "Movie.extracted.hi.et.srt"),
+            ".sdh": ("Movie.extracted.et.sdh.srt", "Movie.extracted.sdh.et.srt"),
+        }
+        for variant, names in cases.items():
+            with self.subTest(variant=variant):
+                replacement = Path("/media") / names[0]
+                self.assertEqual(
+                    tuple(path.name for path in lingarr_output_candidates(replacement, "et", variant)),
+                    names,
+                )
 
     def test_large_duplicate_examples_have_expected_reductions(self):
         expected = {
