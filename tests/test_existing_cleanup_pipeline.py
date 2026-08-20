@@ -30,6 +30,7 @@ import autotranslate.subtitles.library as cleanup  # noqa: E402
 import autotranslate.subtitles.foundation as subtitle_foundation  # noqa: E402
 import autotranslate.subtitles.repair as subtitle_repair  # noqa: E402
 import autotranslate.composition as composition  # noqa: E402
+import autotranslate.items_workflow as items_workflow  # noqa: E402
 import autotranslate.maintenance.runtime as maintenance_runtime  # noqa: E402
 from autotranslate.subtitles.library import ValidationStateStore  # noqa: E402
 from autotranslate.persistence.state_store import StateStore  # noqa: E402
@@ -983,13 +984,52 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(pending.call_args.kwargs["lingarr_job_id"], 123)
             self.assertEqual(pending.call_args.kwargs["terminal_status"], "Failed")
 
+    def test_completed_job_without_output_uses_atomic_retry_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            source = root / "movie.en.srt"
+            video.write_bytes(b"video")
+            source.write_text(make_srt("English dialogue"), encoding="utf-8")
+            item = {"radarrId": 7, "title": "Movie", "missing_subtitles": [{"code2": "et"}]}
+            stats = defaultdict(int)
+            stats.update({"translations": [], "episode_activity": False, "movie_activity": False})
+            transition = Mock(return_value={"id": 11})
+            circuit_outcome = Mock()
+            with (
+                patch.object(app._validation_state, "terminalize_missing_output_and_schedule_retry", transition),
+                patch.object(app._validation_state, "record_circuit_outcome", circuit_outcome),
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et"], CLEANUP_UNDERSIZED_ENABLED=False,
+                    fetch_subtitles=lambda *_args: (str(video), [{"code2": "en", "path": str(source), "forced": False}]),
+                    lingarr_resolve_media_id=lambda *_args: 99,
+                    lingarr_get_active_translations=lambda: [],
+                    lingarr_submit_file=lambda *_args: 123,
+                    lingarr_poll_job=lambda *_args, **_kwargs: "Completed",
+                    _count_dialogue_lines=lambda _path: 1,
+                    _estimate_timeout=lambda _path: 60,
+                    _record_submission=lambda *_args, **_kwargs: 41,
+                    _mark_submission_submitted=lambda *_args, **_kwargs: None,
+                ),
+            ):
+                app.process_item(item, "movies", "radarrId", stats, threading.Lock())
+
+            transition.assert_called_once()
+            self.assertEqual(transition.call_args.args[0], 41)
+            self.assertEqual(transition.call_args.kwargs["source_hash"], subtitle_foundation.file_sha256(source))
+            self.assertEqual(transition.call_args.kwargs["target_path"], str(root / "movie.et.srt"))
+            circuit_outcome.assert_called_once()
+            self.assertFalse((root / "movie.et.srt").exists())
+            self.assertEqual(stats["timed_out"], 1)
+
     def test_process_item_prefers_deduplicated_extracted_source_and_publishes_canonical_target(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             video = root / "movie.mkv"
             bazarr_source = root / "movie.en.srt"
-            extracted_source = root / "movie.extracted.eng.srt"
-            provider_target = root / "movie.extracted.et.srt"
+            extracted_source = root / "movie.extracted.eng.2.srt"
+            provider_target = root / "movie.extracted.2.et.srt"
             canonical_target = root / "movie.et.srt"
             video.write_bytes(b"video")
             bazarr_source.write_text(make_srt("Bazarr dialogue"), encoding="utf-8")
@@ -1014,6 +1054,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                         "path": extracted_source.name,
                         "sha256": subtitle_foundation.file_sha256(extracted_source),
                         "language": "eng",
+                        "variant": "2",
                         "trackId": 2,
                         "default": True,
                         "forced": False,
@@ -1041,6 +1082,8 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 return "Completed"
 
             report = SimpleNamespace(issues=[])
+            pending = Mock(return_value=True)
+            validate = Mock(return_value=("valid", report))
             with patch.multiple(
                 app,
                 LANGUAGES=["en", "et"],
@@ -1056,14 +1099,20 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 _mark_submission_submitted=lambda *_args, **_kwargs: None,
                 _mark_submission_failed=lambda *_args, **_kwargs: None,
                 _update_submission_actual_path=lambda *_args, **_kwargs: None,
-                _record_pending_lingarr_output=lambda *_args, **_kwargs: True,
-                _validate_translated_file=lambda *_args, **_kwargs: ("valid", report),
+                _record_pending_lingarr_output=pending,
+                _validate_translated_file=validate,
             ):
                 app.process_item(item, "movies", "radarrId", stats, threading.Lock())
 
             self.assertEqual(Path(submitted[0][1]), extracted_source)
             self.assertTrue(canonical_target.exists())
             self.assertFalse(provider_target.exists())
+            self.assertFalse((root / "movie.extracted.et.2.srt").exists())
+            self.assertEqual(pending.call_args.kwargs["attempt_id"], 1)
+            self.assertEqual(Path(pending.call_args.args[1]), canonical_target)
+            validate.assert_called_once()
+            self.assertEqual(Path(validate.call_args.args[1]), canonical_target)
+            self.assertTrue(stats["movie_activity"])
             self.assertIn("00:00:01,000 --> 00:00:03,000", extracted_source.read_text(encoding="utf-8"))
             self.assertEqual(stats["source_duplicate_groups"], 1)
             self.assertEqual(stats["source_duplicate_cues_removed"], 1)
@@ -1084,26 +1133,146 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(provider_target.read_text(encoding="utf-8"), make_srt("Lingarr"))
             self.assertEqual(canonical_target.read_text(encoding="utf-8"), make_srt("Concurrent"))
 
+    def test_submission_backed_embedded_orphan_self_heals_without_submission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            source = root / "movie.extracted.eng.2.srt"
+            orphan = root / "movie.extracted.2.et.srt"
+            canonical = root / "movie.et.srt"
+            video.write_bytes(b"video")
+            source.write_text(make_srt("Source"), encoding="utf-8")
+            video_stat = video.stat()
+            (root / "movie.extracted.json").write_text(json.dumps({
+                "schemaVersion": 1,
+                "generator": "SubExtractorr",
+                "video": {
+                    "path": str(video), "name": video.name,
+                    "size": video_stat.st_size, "mtimeNs": video_stat.st_mtime_ns,
+                },
+                "tracks": [{
+                    "path": source.name,
+                    "sha256": subtitle_foundation.file_sha256(source),
+                    "language": "eng", "variant": "2", "trackId": 2,
+                    "default": True, "forced": False, "hearingImpaired": False,
+                }],
+            }), encoding="utf-8")
+            source_hash = subtitle_foundation.file_sha256(source)
+            store = StateStore(root / "state.sqlite3")
+            attempt = store.record_submission(
+                "movies", 7, "et", cooldown_seconds=3600,
+                source_path=str(source), source_hash=source_hash,
+                source_language="en", status="submitted",
+            )
+            orphan.write_text(make_srt("Translated"), encoding="utf-8")
+            pending = Mock(return_value=True)
+            submit = Mock()
+            validate = Mock(return_value=("valid", SimpleNamespace(issues=[])))
+            stats = defaultdict(int)
+            stats["translations"] = []
+            with patch.multiple(
+                app,
+                LANGUAGES=["en", "et"], CLEANUP_UNDERSIZED_ENABLED=False,
+                _validation_state=store,
+                fetch_subtitles=lambda *_args: (str(video), []),
+                lingarr_resolve_media_id=lambda *_args: 99,
+                lingarr_get_active_translations=lambda: [],
+                lingarr_submit_file=submit,
+                _record_pending_lingarr_output=pending,
+                _validate_translated_file=validate,
+            ):
+                app.process_item(
+                    {"radarrId": 7, "title": "Movie", "missing_subtitles": [{"code2": "et"}]},
+                    "movies", "radarrId", stats, threading.Lock(),
+                )
+
+            self.assertTrue(canonical.exists())
+            self.assertFalse(orphan.exists())
+            pending.assert_called_once()
+            self.assertEqual(pending.call_args.kwargs["attempt_id"], attempt)
+            validate.assert_called_once()
+            submit.assert_not_called()
+            self.assertEqual(stats["completed"], 1)
+            store.close()
+
+    def test_embedded_orphan_recovery_rejects_wrong_source_and_receipt_owned_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "movie.extracted.eng.2.srt"
+            orphan = root / "movie.extracted.2.et.srt"
+            canonical = root / "movie.et.srt"
+            source.write_text(make_srt("Source"), encoding="utf-8")
+            orphan.write_text(make_srt("Translated"), encoding="utf-8")
+            store = StateStore(root / "state.sqlite3")
+            store.record_submission(
+                "movies", 7, "et", cooldown_seconds=3600,
+                source_path=str(source), source_hash="different-source",
+                source_language="en", status="submitted",
+            )
+            pending = Mock(return_value=True)
+            with patch.multiple(
+                app,
+                _get_validation_state=lambda: store,
+                _record_pending_lingarr_output=pending,
+            ):
+                wrong_source = items_workflow._recover_embedded_provider_output(
+                    item_type="movies", item_id=7, target_language="et",
+                    source_path=str(source),
+                    source_hash=subtitle_foundation.file_sha256(source),
+                    target_path=str(canonical), candidates=[str(orphan)],
+                    receipt_owned_paths=set(), title="Movie",
+                )
+                receipt_owned = items_workflow._recover_embedded_provider_output(
+                    item_type="movies", item_id=7, target_language="et",
+                    source_path=str(source), source_hash="different-source",
+                    target_path=str(canonical), candidates=[str(orphan)],
+                    receipt_owned_paths={os.path.normcase(os.path.abspath(orphan))},
+                    title="Movie",
+                )
+
+            self.assertIsNone(wrong_source)
+            self.assertIsNone(receipt_owned)
+            self.assertTrue(orphan.exists())
+            self.assertFalse(canonical.exists())
+            pending.assert_not_called()
+            store.close()
+
     def test_process_item_accepts_actual_hi_output_and_persists_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             video = root / "movie.mkv"
-            source = root / "movie.en.hi.srt"
+            source = root / "movie.extracted.eng.hi.srt"
+            provider_target = root / "movie.extracted.hi.et.srt"
             target = root / "movie.et.hi.srt"
             video.write_bytes(b"video")
             source.write_text(make_srt("English dialogue"), encoding="utf-8")
+            video_stat = video.stat()
+            (root / "movie.extracted.json").write_text(json.dumps({
+                "schemaVersion": 1,
+                "generator": "SubExtractorr",
+                "video": {
+                    "path": str(video), "name": video.name,
+                    "size": video_stat.st_size, "mtimeNs": video_stat.st_mtime_ns,
+                },
+                "tracks": [{
+                    "path": source.name,
+                    "sha256": subtitle_foundation.file_sha256(source),
+                    "language": "eng", "variant": "hi", "trackId": 2,
+                    "default": True, "forced": False, "hearingImpaired": True,
+                }],
+            }), encoding="utf-8")
             item = {
                 "radarrId": 7,
                 "title": "Movie",
                 "missing_subtitles": [{"code2": "et"}],
             }
-            subtitles = [{"code2": "en", "path": str(source), "forced": False}]
+            subtitles = []
             state = app._validation_state
             stats = defaultdict(int)
             stats["translations"] = []
 
             def completed(*_args):
-                target.write_text(make_srt("Tere"), encoding="utf-8")
+                provider_target.write_text(make_srt("Tere"), encoding="utf-8")
                 return "Completed"
 
             report = SimpleNamespace(issues=[])
@@ -1132,6 +1301,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
 
             self.assertEqual(stats["completed"], 1)
             self.assertEqual(stats["variant_outputs_discovered"], 0)
+            self.assertFalse(provider_target.exists())
             self.assertEqual(
                 os.path.normcase(metadata["expectedTargetPath"]),
                 os.path.normcase(str(target)),

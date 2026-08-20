@@ -115,6 +115,52 @@ def _record_cleanup_stats(stats: dict, action: str, report) -> None:
     elif action == 'action-failed':
         stats['cleanup_action_failed'] = stats.get('cleanup_action_failed', 0) + 1
 
+def _recover_embedded_provider_output(
+    *, item_type: str, item_id: int, target_language: str,
+    source_path: str, source_hash: str, target_path: str,
+    candidates: list[str], receipt_owned_paths: set[str], title: str,
+) -> dict | None:
+    """Publish one exact, submission-backed Lingarr orphan without resubmitting."""
+    state = _runtime._get_validation_state()
+    canonical_key = _runtime.os.path.normcase(_runtime.os.path.abspath(target_path))
+    if _runtime.os.path.exists(target_path):
+        return None
+    for candidate in candidates:
+        candidate_key = _runtime.os.path.normcase(_runtime.os.path.abspath(candidate))
+        if candidate_key == canonical_key or candidate_key in receipt_owned_paths:
+            continue
+        try:
+            candidate_mtime = _runtime.os.path.getmtime(candidate)
+        except OSError:
+            continue
+        try:
+            submission = state.find_recoverable_submission(
+                item_type=item_type, item_id=item_id,
+                target_language=target_language, source_path=source_path,
+                source_hash=source_hash, candidate_mtime=candidate_mtime,
+            )
+        except _runtime.StateStoreError as exc:
+            print(f'{_runtime.YELLOW}[RECOVERY] Could not verify orphan ownership for {title}: {exc}{_runtime.RESET}')
+            return None
+        if submission is None:
+            print(f"[RECOVERY] Left unverified extracted output untouched: {_runtime.os.path.basename(candidate)}")
+            continue
+        published = _runtime._publish_canonical_target(candidate, target_path, title)
+        if published is None:
+            return None
+        if not _runtime._record_pending_lingarr_output(
+            source_path, published, submission.get('sourceLanguage') or '',
+            target_language, item_type, item_id,
+            attempt_id=submission['attemptId'],
+            lingarr_job_id=submission.get('lingarrJobId'),
+        ):
+            print(f'{_runtime.YELLOW}[RECOVERY] Published {published} but could not persist provenance; cooldown remains authoritative{_runtime.RESET}')
+            return None
+        submission['actualTargetPath'] = published
+        print(f"[RECOVERY] Published submission-backed Lingarr output as {_runtime.os.path.basename(published)}")
+        return submission
+    return None
+
 def _source_is_usable(source_path: str, source_lang: str, media_duration: float | None, title: str, item_type: str, stats: dict, stats_lock: _runtime.threading.Lock, *, origin: str='bazarr') -> bool:
     from .subtitles.foundation import validate_srt_structure
     report = validate_srt_structure(source_path)
@@ -199,11 +245,20 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
     source_path = ''
     source_origin = 'bazarr'
     source_variant = ''
+    receipt_owned_paths: set[str] = set()
     rejected_sources = 0
     if video_path:
         from .subtitles.foundation import normalize_managed_file
-        from .subtitles.sources import discover_extracted_sources, prepare_extracted_source
+        from .subtitles.sources import (
+            discover_extracted_sources,
+            extracted_receipt_owned_paths,
+            prepare_extracted_source,
+        )
         extracted, receipt_error = discover_extracted_sources(video_path, _runtime._LANGUAGE_ALIASES, _runtime.LANGUAGES)
+        receipt_owned_paths = {
+            _runtime.os.path.normcase(_runtime.os.path.abspath(str(path)))
+            for path in extracted_receipt_owned_paths(video_path)
+        }
         if receipt_error:
             print(f'{_runtime.YELLOW}[SOURCE] Ignored extracted-subtitle receipt for {title}: {receipt_error}{_runtime.RESET}')
         for candidate in extracted:
@@ -294,6 +349,13 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
             print(f"{_runtime.YELLOW}[SKIP] {title} '{target_lang}': could not derive target path{_runtime.RESET}")
             _runtime._status_transition(item_type, item_id, target_lang, 'deferred', reason='target path unavailable')
             continue
+        from .subtitles.sources import lingarr_output_candidates
+        provider_candidates = [
+            str(path) for path in lingarr_output_candidates(
+                provider_target_path, target_lang, source_variant,
+            )
+        ] if source_origin == 'embedded' and provider_target_path else [provider_target_path]
+        source_hash = _runtime._file_hash_or_none(source_path)
         if retry_plan is None:
             try:
                 scheduled = _runtime._get_validation_state().active_retry_plan(item_type, item_id, target_lang)
@@ -317,11 +379,20 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
         target_suffix = _runtime._target_suffix(target_path, target_lang)
         target_variant = target_suffix[1] if target_suffix is not None else ''
         print(f"[TRANSLATE] Expected target for {title} '{target_lang}': {_runtime.os.path.basename(target_path)}")
+        recovered_submission = None
+        if source_origin == 'embedded' and source_hash:
+            recovered_submission = _recover_embedded_provider_output(
+                item_type=item_type, item_id=item_id,
+                target_language=target_lang, source_path=source_path,
+                source_hash=source_hash, target_path=target_path,
+                candidates=provider_candidates,
+                receipt_owned_paths=receipt_owned_paths, title=title,
+            )
         existing = _runtime._find_existing_target(video_path, target_lang) if video_path else target_path if _runtime.os.path.exists(target_path) else None
         if existing:
             print(f"[DISK] {title} '{target_lang}': {_runtime.os.path.basename(existing)} already on disk")
-            submission = _runtime._find_submission_for_target(existing, target_lang)
-            recovered_origin = 'lingarr' if _runtime._submission_matches_source(submission, source_path, source_lang, existing, target_lang) else None
+            submission = recovered_submission or _runtime._find_submission_for_target(existing, target_lang)
+            recovered_origin = 'lingarr' if recovered_submission or _runtime._submission_matches_source(submission, source_path, source_lang, existing, target_lang) else None
             if recovered_origin:
                 with stats_lock:
                     stats['recovered_pending_outputs'] = stats.get('recovered_pending_outputs', 0) + 1
@@ -505,13 +576,8 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
                 stats['deferred'] += 1
             _runtime._status_transition(item_type, item_id, target_lang, 'missing_source', reason='source has no dialogue')
             continue
-        extra_target_paths = (
-            [provider_target_path]
-            if provider_target_path and _runtime.os.path.normcase(_runtime.os.path.abspath(provider_target_path)) != _runtime.os.path.normcase(_runtime.os.path.abspath(target_path))
-            else []
-        )
+        extra_target_paths = [path for path in provider_candidates if path and _runtime.os.path.normcase(_runtime.os.path.abspath(path)) != _runtime.os.path.normcase(_runtime.os.path.abspath(target_path))]
         target_snapshot = _runtime._snapshot_target_sidecars(video_path, target_lang, extra_target_paths) if video_path else {}
-        source_hash = _runtime._file_hash_or_none(source_path)
         print(f'[TRANSLATE] {title}: {source_lang} -> {target_lang} ({src_lines} lines)')
         try:
             attempt_id = _runtime._record_submission(item_id, target_lang, target_path, expected_target_path=target_path, video_path=video_path or None, source_path=source_path, source_hash=source_hash, source_language=source_lang, item_type=item_type, target_variant=target_variant, status='reserved')
@@ -678,8 +744,27 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
             print(f"{_runtime.YELLOW}[WARNING] {title} '{target_lang}': Lingarr completed but no new target-language sidecar was found (expected {target_path}){_runtime.RESET}")
             with stats_lock:
                 stats['timed_out'] += 1
+            try:
+                _runtime._get_validation_state().terminalize_missing_output_and_schedule_retry(
+                    attempt_id, item_type=item_type, item_id=item_id,
+                    target_language=target_lang, source_hash=source_hash or '',
+                    source_path=source_path, source_language=source_lang,
+                    target_path=target_path, series_key=series_key,
+                    series_title=series_title, media_title=title,
+                    source_cue_count=_runtime._count_srt_cues(source_path),
+                    eligible_completed_cycle=_runtime._completed_cycle + _runtime.REGENERATION_INITIAL_DELAY_CYCLES,
+                )
+            except _runtime.StateStoreError as exc:
+                print(f'{_runtime.YELLOW}[STATE] Could not atomically persist missing-output retry; retained submission cooldown: {exc}{_runtime.RESET}')
+                with stats_lock:
+                    stats['degraded'] = True
+            else:
+                try:
+                    _runtime._get_validation_state().record_circuit_outcome(series_key=series_key, series_title=series_title, success=False, reason='completed output missing', threshold=_runtime.CIRCUIT_FAILURE_THRESHOLD, open_cycles=_runtime.CIRCUIT_OPEN_CYCLES, config_fingerprint=_runtime._CIRCUIT_CONFIG_FINGERPRINT, trial_owner=trial_owner if trial_claimed else None, trial_job_id=job_id if trial_claimed else None, trial_plan_id=retry_plan['id'] if trial_claimed and retry_plan else None, lease_generation=trial_generation if trial_claimed else None)
+                except _runtime.StateStoreError as exc:
+                    print(f'{_runtime.YELLOW}[CIRCUIT] Could not record missing-output failure: {exc}{_runtime.RESET}')
+                _runtime._refresh_status_diagnostics()
             _runtime._status_transition(item_type, item_id, target_lang, 'timed_out', reason='completed output missing')
-            _defer_bound_retry_trial(retry_plan, trial_claimed, trial_generation, 'completed output missing')
             _runtime._shared_capacity.release(shared_token)
             continue
         if source_origin == 'embedded' and _runtime.os.path.normcase(_runtime.os.path.abspath(actual_target_path)) != _runtime.os.path.normcase(_runtime.os.path.abspath(target_path)):

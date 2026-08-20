@@ -652,7 +652,6 @@ class ServiceReliabilityTests(unittest.TestCase):
 
     def test_bound_retry_terminal_output_deferrals_release_trial(self):
         reasons = (
-            "completed output missing",
             "managed file ownership failed",
             "completed output provenance persistence failed",
         )
@@ -673,6 +672,7 @@ class ServiceReliabilityTests(unittest.TestCase):
                 self.assertEqual(retry["state"], "regeneration_waiting")
                 self.assertEqual(retry["lastDeferralClass"], "output_deferred")
                 self.assertEqual(state.circuit_breakers()[0]["state"], "open")
+                state.close()
 
     def test_existing_retry_success_resolves_plan_without_bound_trial(self):
         with tempfile.TemporaryDirectory() as directory:
