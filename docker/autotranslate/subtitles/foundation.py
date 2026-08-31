@@ -182,7 +182,7 @@ def classify_validation_failure(report: "ValidationReport") -> str:
         return "source_problem"
     return "whole_file"
 
-VALIDATOR_VERSION = "source-aware-v4-completeness-provenance"
+VALIDATOR_VERSION = "source-aware-v5-managed-language-validation"
 
 
 @dataclass

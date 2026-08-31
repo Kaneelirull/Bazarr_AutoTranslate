@@ -29,9 +29,11 @@ from autotranslate.production import load_runtime  # noqa: E402
 import autotranslate.subtitles.library as cleanup  # noqa: E402
 import autotranslate.subtitles.foundation as subtitle_foundation  # noqa: E402
 import autotranslate.subtitles.repair as subtitle_repair  # noqa: E402
+import autotranslate.subtitles.workflow as subtitle_workflow  # noqa: E402
 import autotranslate.composition as composition  # noqa: E402
 import autotranslate.items_workflow as items_workflow  # noqa: E402
 import autotranslate.maintenance.runtime as maintenance_runtime  # noqa: E402
+import autotranslate.status.runtime as status_runtime  # noqa: E402
 from autotranslate.subtitles.library import ValidationStateStore  # noqa: E402
 from autotranslate.persistence.state_store import StateStore  # noqa: E402
 from autotranslate.subtitles.foundation import ValidationIssue, ValidationReport  # noqa: E402
@@ -228,6 +230,79 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(
                 record.call_args.kwargs["success"], expected_success
             )
+            if expected_success:
+                self.assertIsNone(record.call_args.kwargs["reason"])
+
+    def test_repair_terminalizes_when_circuit_bookkeeping_raises(self):
+        report = SimpleNamespace(issues=[])
+        future = Future()
+        future.set_result(app.RepairJobResult(
+            "repaired", report, "Schitt's Creek S02E01", "et",
+            "episodes", 42, attempts=1, target_path="target.et.srt",
+        ))
+        metadata = {
+            "series_key": "sonarr:77",
+            "series_title": "Schitt's Creek",
+            "item_type": "episodes",
+            "item_id": 42,
+            "target_lang": "et",
+            "status_ref": {"kind": "maintenance", "id": "repair-status"},
+            "maintenance_scan_job_id": "scan-status",
+            "status_lock": threading.Lock(),
+            "status_published": False,
+            "scan_child_finished": False,
+        }
+        state = SimpleNamespace(
+            record_circuit_outcome=Mock(side_effect=TypeError("missing reason")),
+        )
+        with (
+            patch.object(app, "_get_validation_state", return_value=state),
+            patch.object(app, "_resolve_retry_success", return_value=False),
+            patch.object(app, "_complete_repair_status", return_value=True) as complete,
+            patch.object(app, "_scan_child_finished", return_value=True) as child_finished,
+        ):
+            app._publish_repair_status(future, metadata)
+            app._publish_repair_status(future, metadata)
+
+        complete.assert_called_once_with(
+            metadata, "repaired", reason=None, repaired=True,
+            details={"attempts": 1},
+        )
+        child_finished.assert_called_once_with("scan-status", "repaired")
+        self.assertTrue(metadata["status_published"])
+        self.assertTrue(metadata["scan_child_finished"])
+
+    def test_repair_terminal_status_retries_transient_persistence_failure(self):
+        future = Future()
+        future.set_result(app.RepairJobResult(
+            "repaired", SimpleNamespace(issues=[]), "Show S01E01", "et",
+            "episodes", 42, attempts=2, target_path="target.et.srt",
+        ))
+        metadata = {
+            "item_type": "episodes",
+            "item_id": 42,
+            "target_lang": "et",
+            "status_ref": {"kind": "maintenance", "id": "repair-status"},
+            "maintenance_scan_job_id": "scan-status",
+            "status_lock": threading.Lock(),
+            "status_published": False,
+        }
+        complete = Mock(side_effect=[False, False, False, True])
+        resolve = Mock(return_value=False)
+        with (
+            patch.object(app, "_complete_repair_status", complete),
+            patch.object(app, "_resolve_retry_success", resolve),
+            patch.object(app, "_get_validation_state", return_value=SimpleNamespace()),
+            patch.object(app, "_scan_child_finished", return_value=True) as child_finished,
+        ):
+            app._publish_repair_status(future, metadata)
+            self.assertFalse(metadata["status_published"])
+            app._publish_repair_status(future, metadata)
+
+        self.assertEqual(complete.call_count, 4)
+        resolve.assert_called_once()
+        child_finished.assert_called_once_with("scan-status", "repaired")
+        self.assertTrue(metadata["status_published"])
 
     def test_waiting_repairs_precede_translations_without_exceeding_shared_limit(self):
         for limit in (1, 2, 4):
@@ -1133,6 +1208,117 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(provider_target.read_text(encoding="utf-8"), make_srt("Lingarr"))
             self.assertEqual(canonical_target.read_text(encoding="utf-8"), make_srt("Concurrent"))
 
+    def test_cleanup_action_defers_when_target_changes_before_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "movie.sv.srt"
+            target.write_text(make_srt("Concurrent subtitle"), encoding="utf-8")
+            report = ValidationReport([
+                ValidationIssue("target_file_invalid", "expected Swedish; detected English")
+            ])
+
+            with (
+                patch.object(app, "_file_hash_or_none", side_effect=["before", "after"]),
+                patch.object(subtitle_workflow, "_apply_cleanup_action_locked") as apply_locked,
+            ):
+                action = app._apply_cleanup_action(target, None, "sv", report)
+
+            self.assertEqual(action, "action-deferred")
+            self.assertTrue(target.exists())
+            apply_locked.assert_not_called()
+
+    def test_cleanup_action_rejects_replacement_before_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "movie.sv.srt"
+            target.write_text(make_srt("Replacement subtitle"), encoding="utf-8")
+            report = ValidationReport([
+                ValidationIssue("target_file_invalid", "expected Swedish; detected English")
+            ])
+
+            with patch.object(
+                subtitle_workflow, "_apply_cleanup_action_locked"
+            ) as apply_locked:
+                action = app._apply_cleanup_action(
+                    target,
+                    None,
+                    "sv",
+                    report,
+                    expected_target_hash="hash-of-validated-file",
+                )
+
+            self.assertEqual(action, "action-deferred")
+            self.assertEqual(
+                target.read_text(encoding="utf-8"), make_srt("Replacement subtitle")
+            )
+            apply_locked.assert_not_called()
+
+    def test_outside_scope_valid_result_does_not_cache_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "movie.en.srt"
+            target = root / "movie.sv.srt"
+            source.write_text(make_srt("English source"), encoding="utf-8")
+            target.write_text(make_srt("Swedish target"), encoding="utf-8")
+
+            def replace_during_validation(_path):
+                target.write_text(make_srt("Concurrent replacement"), encoding="utf-8")
+                return ValidationReport([])
+
+            with (
+                patch.object(app, "CLEANUP_LANGUAGES", {"et"}),
+                patch.object(app, "_get_cleanup_detector", return_value=None),
+                patch.object(
+                    subtitle_foundation,
+                    "validate_srt_structure",
+                    side_effect=replace_during_validation,
+                ),
+                patch.object(app, "_record_validation_result") as record,
+            ):
+                action, _report = app._validate_translated_file(
+                    str(source), str(target), "en", "sv", 42,
+                    item_type="episodes", origin="external",
+                )
+
+            self.assertEqual(action, "action-deferred")
+            record.assert_not_called()
+
+    def test_outside_scope_report_does_not_cache_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "movie.en.srt"
+            target = root / "movie.sv.srt"
+            source.write_text(make_srt("English source"), encoding="utf-8")
+            target.write_text(make_srt("Ambiguous target"), encoding="utf-8")
+            report = ValidationReport([
+                ValidationIssue("excessive_lines", "cue 1 has too many lines")
+            ])
+
+            def replace_during_validation(*_args, **_kwargs):
+                target.write_text(make_srt("Concurrent replacement"), encoding="utf-8")
+                return report
+
+            with (
+                patch.object(app, "CLEANUP_LANGUAGES", {"et"}),
+                patch.object(app, "_get_cleanup_detector", return_value=object()),
+                patch.object(
+                    cleanup,
+                    "validate_subtitle_without_source",
+                    side_effect=replace_during_validation,
+                ),
+                patch.object(
+                    subtitle_workflow,
+                    "_confident_wrong_language_evidence",
+                    return_value=None,
+                ),
+                patch.object(app, "_record_validation_result") as record,
+            ):
+                action, _report = app._validate_translated_file(
+                    str(source), str(target), "en", "sv", 42,
+                    item_type="episodes", origin="external",
+                )
+
+            self.assertEqual(action, "action-deferred")
+            record.assert_not_called()
+
     def test_submission_backed_embedded_orphan_self_heals_without_submission(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1165,6 +1351,8 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 source_language="en", status="submitted",
             )
             orphan.write_text(make_srt("Translated"), encoding="utf-8")
+            future_mtime = time.time() + 1
+            os.utime(orphan, (future_mtime, future_mtime))
             pending = Mock(return_value=True)
             submit = Mock()
             validate = Mock(return_value=("valid", SimpleNamespace(issues=[])))
@@ -1185,6 +1373,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                     {"radarrId": 7, "title": "Movie", "missing_subtitles": [{"code2": "et"}]},
                     "movies", "radarrId", stats, threading.Lock(),
                 )
+            store.close()
 
             self.assertTrue(canonical.exists())
             self.assertFalse(orphan.exists())
@@ -1193,7 +1382,6 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             validate.assert_called_once()
             submit.assert_not_called()
             self.assertEqual(stats["completed"], 1)
-            store.close()
 
     def test_embedded_orphan_recovery_rejects_wrong_source_and_receipt_owned_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1707,9 +1895,259 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 first = app.run_existing_cleanup_scan()
                 second = app.run_existing_cleanup_scan()
 
-            self.assertEqual(first["files_checked"], 1)
+            self.assertEqual(first["files_checked"], 2)
             self.assertEqual(second["files_checked"], 0)
-            self.assertEqual(second["skipped_unchanged"], 1)
+            self.assertEqual(second["skipped_unchanged"], 2)
+
+    def test_wrong_language_managed_sidecar_is_quarantined_outside_ai_scope(self):
+        fixture_root = REPO_ROOT / "examples" / "LanguageValidationFailure" / "Shameless-S09E12"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "media"
+            quarantine = Path(directory) / "quarantine"
+            root.mkdir()
+            video = root / "Shameless (US) (2011) - S09E12.mkv"
+            video.write_bytes(b"video")
+            copied = {}
+            for language in ("en", "et", "sv"):
+                source = next(fixture_root.glob(f"*.{language}.srt"))
+                target = root / f"Shameless (US) (2011) - S09E12.{language}.srt"
+                target.write_bytes(source.read_bytes())
+                copied[language] = target
+
+            outcomes = []
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et", "sv"],
+                    CLEANUP_LANGUAGES={"et"},
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_QUARANTINE_DIR=quarantine,
+                    CLEANUP_SCAN_EXISTING=True,
+                    CLEANUP_SCAN_DRY_RUN=False,
+                    CLEANUP_ACTION="quarantine",
+                ),
+                patch.object(app, "_probe_media_duration", return_value=3600.0),
+                patch.object(app, "_tracked_bazarr_sync", return_value=True) as sync,
+                patch.object(app, "lingarr_translate_line") as cue_repair,
+                patch.object(
+                    app, "_status_record_maintenance_outcome",
+                    side_effect=lambda *args, **kwargs: outcomes.append((args, kwargs)),
+                ),
+            ):
+                stats = app.run_existing_cleanup_scan()
+
+            self.assertTrue(copied["en"].exists())
+            self.assertTrue(copied["et"].exists())
+            self.assertFalse(copied["sv"].exists())
+            quarantined = quarantine / copied["sv"].name
+            self.assertTrue(quarantined.exists())
+            self.assertEqual(stats["quarantined_files"], 1)
+            cue_repair.assert_not_called()
+            sync.assert_called_once_with(True, True, app.SYNC_TIMEOUT)
+            language_outcome = next(
+                (entry for entry in outcomes if entry[0][0] == "language_validation"),
+                None,
+            )
+            self.assertIsNotNone(language_outcome)
+            self.assertEqual(language_outcome[0][1], "quarantined")
+            self.assertEqual(
+                language_outcome[1]["reason"],
+                "expected sv; detected ENGLISH 1.00",
+            )
+
+            app._cycle_suppressions.begin_cycle(f"{self.id()}:regeneration")
+            regeneration_stats = defaultdict(int)
+            regeneration_stats["translations"] = []
+            submit = Mock(return_value=321)
+            validate = Mock(return_value=("valid", SimpleNamespace(issues=[])))
+
+            def completed_with_swedish(*_args, **_kwargs):
+                copied["sv"].write_text(
+                    make_multi_srt(*(["Det här är en svensk undertextrad."] * 7)),
+                    encoding="utf-8",
+                )
+                return "Completed"
+
+            with patch.multiple(
+                app,
+                LANGUAGES=["en", "et", "sv"],
+                CLEANUP_UNDERSIZED_ENABLED=False,
+                fetch_subtitles=lambda *_args: (
+                    str(video),
+                    [
+                        {"code2": "en", "path": str(copied["en"]), "forced": False},
+                        {"code2": "et", "path": str(copied["et"]), "forced": False},
+                    ],
+                ),
+                lingarr_resolve_media_id=lambda *_args: 99,
+                lingarr_get_active_translations=lambda: [],
+                lingarr_submit_file=submit,
+                lingarr_poll_job=completed_with_swedish,
+                _count_dialogue_lines=lambda _path: 100,
+                _estimate_timeout=lambda _path: 60,
+                _record_submission=lambda *_args, **_kwargs: 44,
+                _mark_submission_submitted=lambda *_args, **_kwargs: None,
+                _mark_submission_failed=lambda *_args, **_kwargs: None,
+                _update_submission_actual_path=lambda *_args, **_kwargs: None,
+                _record_pending_lingarr_output=lambda *_args, **_kwargs: True,
+                _validate_translated_file=validate,
+            ):
+                app.process_item(
+                    {
+                        "tvdbId": 900,
+                        "title": "Shameless (US) S09E12",
+                        "missing_subtitles": [{"code2": "sv"}],
+                    },
+                    "episodes", "tvdbId", regeneration_stats, threading.Lock(),
+                )
+
+            self.assertTrue(copied["sv"].exists())
+            submit.assert_called_once()
+            validate.assert_called_once()
+            self.assertEqual(regeneration_stats["completed"], 1)
+
+    def test_short_wrong_language_file_outside_ai_scope_is_retained(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "media"
+            quarantine = Path(directory) / "quarantine"
+            root.mkdir()
+            video = root / "show.mkv"
+            target = root / "show.sv.srt"
+            video.write_bytes(b"video")
+            target.write_text(make_srt("This is English"), encoding="utf-8")
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et", "sv"],
+                    CLEANUP_LANGUAGES={"et"},
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_QUARANTINE_DIR=quarantine,
+                    CLEANUP_SCAN_EXISTING=True,
+                    CLEANUP_SCAN_DRY_RUN=False,
+                    CLEANUP_ACTION="quarantine",
+                    CLEANUP_UNDERSIZED_ENABLED=False,
+                ),
+                patch.object(app, "_probe_media_duration", return_value=3600.0),
+                patch.object(app, "_tracked_bazarr_sync") as sync,
+            ):
+                stats = app.run_existing_cleanup_scan()
+
+            self.assertTrue(target.exists())
+            self.assertFalse(quarantine.exists())
+            self.assertEqual(stats["files_checked"], 1)
+            self.assertEqual(stats["reported_files"], 0)
+            sync.assert_not_called()
+
+    def test_wrong_language_without_usable_completeness_is_reported_not_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "media"
+            quarantine = Path(directory) / "quarantine"
+            root.mkdir()
+            video = root / "show.mkv"
+            target = root / "show.sv.srt"
+            video.write_bytes(b"video")
+            target.write_text(
+                make_multi_srt(*(["This is clearly an English dialogue sentence."] * 10)),
+                encoding="utf-8",
+            )
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["sv"],
+                    CLEANUP_LANGUAGES=set(),
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_QUARANTINE_DIR=quarantine,
+                    CLEANUP_SCAN_EXISTING=True,
+                    CLEANUP_SCAN_DRY_RUN=False,
+                    CLEANUP_ACTION="quarantine",
+                    CLEANUP_UNDERSIZED_ENABLED=False,
+                ),
+                patch.object(app, "_tracked_bazarr_sync") as sync,
+            ):
+                stats = app.run_existing_cleanup_scan()
+
+            self.assertTrue(target.exists())
+            self.assertFalse(quarantine.exists())
+            self.assertEqual(stats["reported_files"], 1)
+            sync.assert_not_called()
+
+    def test_source_less_managed_language_is_validated_when_ai_scope_is_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "media"
+            quarantine = Path(directory) / "quarantine"
+            root.mkdir()
+            video = root / "show.mkv"
+            target = root / "show.sv.srt"
+            video.write_bytes(b"video")
+            target.write_text(
+                make_timed_srt(150, 3500, "This is complete English dialogue"),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["sv"],
+                    CLEANUP_LANGUAGES=set(),
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_QUARANTINE_DIR=quarantine,
+                    CLEANUP_SCAN_EXISTING=True,
+                    CLEANUP_SCAN_DRY_RUN=False,
+                    CLEANUP_ACTION="quarantine",
+                ),
+                patch.object(app, "_probe_media_duration", return_value=3600.0),
+                patch.object(app, "_tracked_bazarr_sync", return_value=True) as sync,
+            ):
+                stats = app.run_existing_cleanup_scan()
+
+            self.assertFalse(target.exists())
+            self.assertTrue((quarantine / target.name).exists())
+            self.assertEqual(stats["files_checked"], 1)
+            self.assertEqual(stats["quarantined_files"], 1)
+            sync.assert_called_once_with(True, True, app.SYNC_TIMEOUT)
+
+    def test_legacy_target_only_cache_is_revalidated_for_managed_language(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "media"
+            quarantine = Path(directory) / "quarantine"
+            root.mkdir()
+            video = root / "show.mkv"
+            target = root / "show.sv.srt"
+            video.write_bytes(b"video")
+            target.write_text(
+                make_timed_srt(150, 3500, "This is complete English dialogue"),
+                encoding="utf-8",
+            )
+            target_hash = subtitle_foundation.file_sha256(target)
+            app._validation_state.record(
+                target,
+                source_hash=None,
+                target_hash=target_hash,
+                result="valid",
+                origin="external",
+                validator_version="source-aware-v4-completeness-provenance",
+            )
+
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["sv"],
+                    CLEANUP_LANGUAGES=set(),
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_QUARANTINE_DIR=quarantine,
+                    CLEANUP_SCAN_EXISTING=True,
+                    CLEANUP_SCAN_DRY_RUN=False,
+                    CLEANUP_ACTION="quarantine",
+                ),
+                patch.object(app, "_probe_media_duration", return_value=3600.0),
+                patch.object(app, "_tracked_bazarr_sync", return_value=True),
+            ):
+                stats = app.run_existing_cleanup_scan()
+
+            self.assertEqual(stats["files_checked"], 1)
+            self.assertEqual(stats["skipped_unchanged"], 0)
+            self.assertFalse(target.exists())
+            self.assertTrue((quarantine / target.name).exists())
 
     def test_format_only_recovery_does_not_call_lingarr(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2187,6 +2625,82 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(
                 snapshot["maintenance"]["lastScan"]["metrics"]["repaired"], 1
             )
+
+    def test_cleanup_scan_retries_terminal_persistence_without_double_counting(self):
+        scan_id = "scan-retry"
+        context = {
+            "started": time.monotonic(),
+            "stats": {},
+            "files_discovered": 1,
+            "files_checked": 1,
+            "pending": 1,
+            "repairs_queued": 1,
+            "repairs_completed": 0,
+            "enumeration_done": True,
+            "last_publish": 0,
+        }
+        with app._maintenance_scan_contexts_lock:
+            app._maintenance_scan_contexts[scan_id] = context
+        complete = Mock(side_effect=[False, False, False, True])
+        try:
+            with (
+                patch.object(app, "_status_complete_maintenance", complete),
+                patch.object(app, "_status_record_maintenance") as record,
+                patch.object(status_runtime, "_schedule_scan_finalization_retry") as schedule,
+            ):
+                self.assertFalse(app._scan_child_finished(scan_id, "repaired"))
+                self.assertIs(app._maintenance_scan_contexts[scan_id], context)
+                self.assertEqual(context["pending"], 0)
+                self.assertEqual(context["repairs_completed"], 1)
+                self.assertEqual(context["stats"]["async_repairs_completed"], 1)
+
+                self.assertTrue(app._scan_child_finished(scan_id, "repaired"))
+
+            self.assertNotIn(scan_id, app._maintenance_scan_contexts)
+            self.assertEqual(complete.call_count, 4)
+            record.assert_called_once()
+            schedule.assert_called_once_with(scan_id, context)
+            self.assertEqual(context["repairs_completed"], 1)
+            self.assertEqual(context["stats"]["async_repairs_completed"], 1)
+        finally:
+            with app._maintenance_scan_contexts_lock:
+                app._maintenance_scan_contexts.pop(scan_id, None)
+
+    def test_zero_child_scan_retries_terminal_persistence(self):
+        scan_id = "scan-zero-child-retry"
+        context = {
+            "started": time.monotonic(),
+            "stats": {},
+            "files_discovered": 0,
+            "files_checked": 0,
+            "pending": 0,
+            "repairs_queued": 0,
+            "repairs_completed": 0,
+            "enumeration_done": False,
+            "last_publish": 0,
+        }
+        with app._maintenance_scan_contexts_lock:
+            app._maintenance_scan_contexts[scan_id] = context
+        complete = Mock(side_effect=[False, False, False, True])
+        try:
+            with (
+                patch.object(app, "_status_complete_maintenance", complete),
+                patch.object(app, "_status_record_maintenance") as record,
+                patch.object(status_runtime, "_schedule_scan_finalization_retry") as schedule,
+            ):
+                app._scan_enumeration_finished(scan_id, {"files_checked": 0})
+                self.assertIs(app._maintenance_scan_contexts[scan_id], context)
+                self.assertTrue(context["finalization_pending"])
+                schedule.assert_called_once_with(scan_id, context)
+
+                self.assertTrue(app._retry_scan_finalization(scan_id, context))
+
+            self.assertNotIn(scan_id, app._maintenance_scan_contexts)
+            self.assertEqual(complete.call_count, 4)
+            record.assert_called_once()
+        finally:
+            with app._maintenance_scan_contexts_lock:
+                app._maintenance_scan_contexts.pop(scan_id, None)
 
     def test_repair_status_maps_terminal_outcomes_and_worker_errors(self):
         class Recorder:

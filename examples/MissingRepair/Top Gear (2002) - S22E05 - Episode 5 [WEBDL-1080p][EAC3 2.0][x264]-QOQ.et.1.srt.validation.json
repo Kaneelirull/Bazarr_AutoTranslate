@@ -1,0 +1,81 @@
+{
+  "sourcePath": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ.eng.srt",
+  "targetPath": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ.et.srt",
+  "sourceHash": "a713b8e6b4bb6ba26bfb3fa737d43d13178d367524acf94cc99e1347450fbb23",
+  "targetHash": "63bff9a78e83291c9e17c0d2ea321d860708dc37e65684cc81bf3db13c845fcc",
+  "targetLanguage": "et",
+  "repairAttempts": 0,
+  "repairAttemptHistory": [],
+  "formatFixes": [],
+  "formatRecoveredCues": [],
+  "lingarrOutcome": "not attempted",
+  "origin": "unknown",
+  "filenameClassification": "regular",
+  "completeness": {
+    "evaluated": false,
+    "undersized": false,
+    "reason": "subtitle structure is invalid",
+    "mediaDurationSeconds": 3737.48,
+    "subtitleBytes": 0,
+    "cueCount": 0,
+    "dialogueChars": 0,
+    "cuesPerMinute": 0.0,
+    "textCharsPerMinute": 0.0,
+    "bytesPerMinute": 0.0,
+    "timelineCoverage": 0.0,
+    "failedSignals": [],
+    "thresholds": {
+      "minMediaDurationSeconds": 900.0,
+      "minCuesPerMinute": 1.5,
+      "minTextCharsPerMinute": 40.0,
+      "minBytesPerMinute": 100.0,
+      "minTimelineCoverage": 0.6,
+      "requiredSignals": 3
+    }
+  },
+  "validation": {
+    "valid": false,
+    "summary": "block 985 has invalid cue number '```'; block 1325 has fewer than two lines; block 1724 has fewer than two lines",
+    "issues": [
+      {
+        "rule": "target_structure",
+        "detail": "block 985 has invalid cue number '```'",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 1325 has fewer than two lines",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 1724 has fewer than two lines",
+        "cueIndex": null,
+        "cueNumber": null
+      }
+    ]
+  },
+  "recordedAt": "2026-08-11T15:42:48Z",
+  "quarantineEvent": {
+    "identity": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ|et",
+    "targetPath": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ.et.srt",
+    "targetHash": "63bff9a78e83291c9e17c0d2ea321d860708dc37e65684cc81bf3db13c845fcc",
+    "targetLanguage": "et",
+    "rules": [
+      "target_structure"
+    ],
+    "origin": "unknown",
+    "firstSeen": "2026-08-11T15:42:48.345940+00:00",
+    "lastSeen": "2026-08-11T15:42:48.345940+00:00",
+    "occurrences": 1,
+    "resolvedAt": null
+  },
+  "repeatOffender": false,
+  "cycleSuppression": {
+    "identity": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ|et",
+    "action": "quarantined",
+    "cycleId": "3"
+  }
+}

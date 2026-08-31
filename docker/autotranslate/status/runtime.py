@@ -252,30 +252,100 @@ def _scan_child_queued(scan_job_id: str | None) -> None:
         details = _runtime._scan_progress_details(context)
     _runtime._status_update_maintenance(scan_job_id, 'scanning', details=details)
 
-def _scan_child_finished(scan_job_id: str | None, outcome: str) -> None:
+def _finalize_scan_context(scan_job_id: str, context: dict, *, failed: bool, details: dict) -> bool:
+    """Persist a scan terminal state before releasing its in-memory ownership."""
+    completed = False
+    for _attempt in range(3):
+        if _runtime._status_complete_maintenance(
+            scan_job_id,
+            'failed' if failed else 'accepted',
+            reason='repair worker failed' if failed else None,
+            details=details,
+        ):
+            completed = True
+            break
+    if not completed:
+        print(f'{_runtime.YELLOW}[STATUS] Maintenance scan completion degraded after 3 attempts; child completion will retry{_runtime.RESET}')
+        return False
+    with _runtime._maintenance_scan_contexts_lock:
+        if _runtime._maintenance_scan_contexts.get(scan_job_id) is context:
+            _runtime._maintenance_scan_contexts.pop(scan_job_id, None)
+    _runtime._status_record_maintenance(_runtime._maintenance_metrics(context['stats']))
+    return True
+
+
+def _schedule_scan_finalization_retry(scan_job_id: str, context: dict) -> None:
+    """Retry transient scan-finalization failures without blocking maintenance."""
+    with _runtime._maintenance_scan_contexts_lock:
+        if (
+            _runtime._maintenance_scan_contexts.get(scan_job_id) is not context
+            or context.get('finalization_retry_scheduled')
+        ):
+            return
+        context['finalization_retry_scheduled'] = True
+
+    def retry() -> None:
+        with _runtime._maintenance_scan_contexts_lock:
+            if _runtime._maintenance_scan_contexts.get(scan_job_id) is not context:
+                return
+            context['finalization_retry_scheduled'] = False
+        _retry_scan_finalization(scan_job_id, context)
+
+    timer = _runtime.threading.Timer(1.0, retry)
+    timer.daemon = True
+    timer.start()
+
+
+def _retry_scan_finalization(scan_job_id: str, context: dict) -> bool:
+    """Reconcile one finalization-pending scan context."""
+    with _runtime._maintenance_scan_contexts_lock:
+        if _runtime._maintenance_scan_contexts.get(scan_job_id) is not context:
+            return True
+        if context.get('finalization_in_progress'):
+            return False
+        context['finalization_in_progress'] = True
+        details = _runtime._scan_progress_details(context)
+        failed = bool(
+            context['stats'].get('async_repair_failures', 0)
+            or context['stats'].get('cleanup_repair_failures', 0)
+        )
+    try:
+        completed = _finalize_scan_context(
+            scan_job_id, context, failed=failed, details=details,
+        )
+    finally:
+        with _runtime._maintenance_scan_contexts_lock:
+            if _runtime._maintenance_scan_contexts.get(scan_job_id) is context:
+                context['finalization_in_progress'] = False
+    if not completed:
+        _schedule_scan_finalization_retry(scan_job_id, context)
+    return completed
+
+
+def _scan_child_finished(scan_job_id: str | None, outcome: str) -> bool:
     if not scan_job_id:
-        return
+        return True
     finalize = False
     with _runtime._maintenance_scan_contexts_lock:
         context = _runtime._maintenance_scan_contexts.get(scan_job_id)
         if context is None:
-            return
-        context['pending'] = max(0, context['pending'] - 1)
-        context['repairs_completed'] += 1
-        if outcome == 'repaired':
-            context['stats']['async_repairs_completed'] = context['stats'].get('async_repairs_completed', 0) + 1
-        elif outcome not in ('completed', 'quarantined', 'deleted'):
-            context['stats']['async_repair_failures'] = context['stats'].get('async_repair_failures', 0) + 1
-        details = _runtime._scan_progress_details(context)
+            return True
+        if not context.get('finalization_pending'):
+            context['pending'] = max(0, context['pending'] - 1)
+            context['repairs_completed'] += 1
+            if outcome == 'repaired':
+                context['stats']['async_repairs_completed'] = context['stats'].get('async_repairs_completed', 0) + 1
+            elif outcome not in ('completed', 'quarantined', 'deleted'):
+                context['stats']['async_repair_failures'] = context['stats'].get('async_repair_failures', 0) + 1
         finalize = context.get('enumeration_done', False) and context['pending'] == 0
         if finalize:
-            _runtime._maintenance_scan_contexts.pop(scan_job_id, None)
-    failed = bool(context['stats'].get('async_repair_failures', 0))
+            context['finalization_pending'] = True
     if finalize:
-        _runtime._status_complete_maintenance(scan_job_id, 'failed' if failed else 'accepted', reason='repair worker failed' if failed else None, details=details)
-        _runtime._status_record_maintenance(_runtime._maintenance_metrics(context['stats']))
+        return _retry_scan_finalization(scan_job_id, context)
     else:
+        details = _runtime._scan_progress_details(context)
         _runtime._status_update_maintenance(scan_job_id, 'waiting_repair_completion', details=details)
+        return True
 
 def _scan_enumeration_finished(scan_job_id: str | None, stats: dict) -> None:
     if not scan_job_id:
@@ -287,15 +357,13 @@ def _scan_enumeration_finished(scan_job_id: str | None, stats: dict) -> None:
             return
         context['stats'].update(stats)
         context['enumeration_done'] = True
-        details = _runtime._scan_progress_details(context)
         finalize = context['pending'] == 0
         if finalize:
-            _runtime._maintenance_scan_contexts.pop(scan_job_id, None)
-    failed = bool(context['stats'].get('async_repair_failures', 0) or context['stats'].get('cleanup_repair_failures', 0))
+            context['finalization_pending'] = True
     if finalize:
-        _runtime._status_complete_maintenance(scan_job_id, 'failed' if failed else 'accepted', reason='repair worker failed' if failed else None, details=details)
-        _runtime._status_record_maintenance(_runtime._maintenance_metrics(context['stats']))
+        _retry_scan_finalization(scan_job_id, context)
     else:
+        details = _runtime._scan_progress_details(context)
         _runtime._status_update_maintenance(scan_job_id, 'waiting_repair_completion', details=details)
 
 def _status_compact_history() -> int:
@@ -320,7 +388,7 @@ def _status_finish_validation(item_type: str, item_id: int, target_lang: str, ac
         _runtime._status_transition(item_type, item_id, target_lang, 'failed', reason=f'validation {action}')
 
 def _get_cleanup_detector():
-    if not _runtime.CLEANUP_LANGUAGES:
+    if not _runtime.CLEANUP_LANGUAGES and not _runtime.LANGUAGES:
         return None
     with _runtime._cleanup_detector_lock:
         if _runtime._cleanup_detector is None:
@@ -365,9 +433,9 @@ EXPORTS = {
         '_status_record_maintenance_outcome', '_maintenance_file_identity',
         '_maintenance_metrics', '_scan_progress_details',
         '_publish_scan_progress', '_scan_child_queued', '_scan_child_finished',
+        '_schedule_scan_finalization_retry', '_retry_scan_finalization',
         '_scan_enumeration_finished', '_status_compact_history',
         '_status_finish_validation', '_get_cleanup_detector',
         '_get_validation_state', '_initialize_state_store',
     )
 }
-

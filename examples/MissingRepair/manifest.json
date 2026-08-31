@@ -1,0 +1,29 @@
+{
+  "description": "Captured 22-attempt Top Gear quarantine sequence. Attempt 1 intentionally has a receipt but no payload.",
+  "baseName": "Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ.et",
+  "sourceHash": "a713b8e6b4bb6ba26bfb3fa737d43d13178d367524acf94cc99e1347450fbb23",
+  "attempts": [
+    {"suffix": 0, "payload": true, "rules": {"target_structure": 7}},
+    {"suffix": 1, "payload": false, "rules": {"target_structure": 3}},
+    {"suffix": 2, "payload": true, "rules": {"target_structure": 5}},
+    {"suffix": 3, "payload": true, "rules": {"target_structure": 5}},
+    {"suffix": 4, "payload": true, "rules": {"target_structure": 1}},
+    {"suffix": 5, "payload": true, "rules": {"target_structure": 9}},
+    {"suffix": 6, "payload": true, "rules": {"target_structure": 3}},
+    {"suffix": 7, "payload": true, "rules": {"target_structure": 3}},
+    {"suffix": 8, "payload": true, "rules": {"target_structure": 4}},
+    {"suffix": 9, "payload": true, "rules": {"target_structure": 1}},
+    {"suffix": 10, "payload": true, "rules": {"target_structure": 6}},
+    {"suffix": 11, "payload": true, "rules": {"target_structure": 3}},
+    {"suffix": 12, "payload": true, "rules": {"target_structure": 3}},
+    {"suffix": 13, "payload": true, "rules": {"target_structure": 2}},
+    {"suffix": 14, "payload": true, "rules": {"unexpected_script": 1, "cue_too_long": 1}},
+    {"suffix": 15, "payload": true, "rules": {"unexpected_script": 1, "cue_too_long": 1, "excessive_lines": 1}},
+    {"suffix": 16, "payload": true, "rules": {"target_structure": 3}},
+    {"suffix": 17, "payload": true, "rules": {"target_structure": 1}},
+    {"suffix": 18, "payload": true, "rules": {"target_structure": 1}},
+    {"suffix": 19, "payload": true, "rules": {"target_structure": 10}},
+    {"suffix": 20, "payload": true, "rules": {"target_structure": 3}},
+    {"suffix": 21, "payload": true, "rules": {"target_structure": 2}}
+  ]
+}

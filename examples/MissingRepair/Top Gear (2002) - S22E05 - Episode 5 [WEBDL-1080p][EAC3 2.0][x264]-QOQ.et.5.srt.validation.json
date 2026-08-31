@@ -1,0 +1,118 @@
+{
+  "sourcePath": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ.eng.srt",
+  "targetPath": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ.et.srt",
+  "sourceHash": "a713b8e6b4bb6ba26bfb3fa737d43d13178d367524acf94cc99e1347450fbb23",
+  "targetHash": "2c9af552477504cce5125f4b1fff156325abf997e4646abbea6f415a1071b85e",
+  "targetLanguage": "et",
+  "repairAttempts": 0,
+  "repairAttemptHistory": [],
+  "formatFixes": [],
+  "formatRecoveredCues": [],
+  "lingarrOutcome": "not attempted",
+  "origin": "unknown",
+  "filenameClassification": "regular",
+  "completeness": {
+    "evaluated": false,
+    "undersized": false,
+    "reason": "subtitle structure is invalid",
+    "mediaDurationSeconds": 3737.48,
+    "subtitleBytes": 0,
+    "cueCount": 0,
+    "dialogueChars": 0,
+    "cuesPerMinute": 0.0,
+    "textCharsPerMinute": 0.0,
+    "bytesPerMinute": 0.0,
+    "timelineCoverage": 0.0,
+    "failedSignals": [],
+    "thresholds": {
+      "minMediaDurationSeconds": 900.0,
+      "minCuesPerMinute": 1.5,
+      "minTextCharsPerMinute": 40.0,
+      "minBytesPerMinute": 100.0,
+      "minTimelineCoverage": 0.6,
+      "requiredSignals": 3
+    }
+  },
+  "validation": {
+    "valid": false,
+    "summary": "block 152 has fewer than two lines; block 153 has invalid cue number 'Use them only to understand:'; block 154 has fewer than two lines; block 155 has fewer than two lines; block 156 has fewer than two lines; and 4 more issue(s)",
+    "issues": [
+      {
+        "rule": "target_structure",
+        "detail": "block 152 has fewer than two lines",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 153 has invalid cue number 'Use them only to understand:'",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 154 has fewer than two lines",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 155 has fewer than two lines",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 156 has fewer than two lines",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 157 has fewer than two lines",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 158 has fewer than two lines",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 159 has fewer than two lines",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 1680 has invalid cue number 'Selle teadusettevõtte nimi oli ka midagi sarnast.'",
+        "cueIndex": null,
+        "cueNumber": null
+      }
+    ],
+    "observations": []
+  },
+  "recordedAt": "2026-08-15T04:21:08Z",
+  "quarantineEvent": {
+    "identity": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ|et",
+    "targetPath": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ.et.srt",
+    "targetHash": "2c9af552477504cce5125f4b1fff156325abf997e4646abbea6f415a1071b85e",
+    "targetLanguage": "et",
+    "rules": [
+      "target_structure"
+    ],
+    "origin": "unknown",
+    "firstSeen": "2026-08-15T04:21:08.077499+00:00",
+    "lastSeen": "2026-08-15T04:21:08.077499+00:00",
+    "occurrences": 1,
+    "resolvedAt": null
+  },
+  "repeatOffender": false,
+  "cycleSuppression": {
+    "identity": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ|et",
+    "action": "quarantined",
+    "cycleId": "61"
+  }
+}

@@ -54,7 +54,7 @@ def _scan_undersized_sidecars(stats: dict) -> bool:
             origin = _runtime._get_validation_state().matching_origin(subtitle, subtitle_hash) if subtitle_hash is not None else None
             tokens = _runtime._sidecar_tokens(video, subtitle)
             language = next((token for token in tokens if len(token) in (2, 3) and token.isalpha()), 'unknown')
-            action = _runtime._apply_cleanup_action(subtitle, None, language, report, completeness=completeness, origin=origin, lingarr_outcome='not attempted: whole-file completeness failure', dry_run=_runtime.CLEANUP_SCAN_DRY_RUN)
+            action = _runtime._apply_cleanup_action(subtitle, None, language, report, expected_target_hash=subtitle_hash, completeness=completeness, origin=origin, lingarr_outcome='not attempted: whole-file completeness failure', dry_run=_runtime.CLEANUP_SCAN_DRY_RUN)
             if action == 'quarantined':
                 if completeness is not None and completeness.undersized:
                     stats['undersized_quarantined'] += 1
@@ -161,6 +161,13 @@ def _managed_sidecar_is_valid(classification: _runtime.SidecarClassification, du
         return (True, evidence)
     else:
         evidence['reason'] = 'language_validation_failed' if any((issue.rule == 'target_file_invalid' for issue in report.issues)) else 'validation_failed'
+        wrong_language_issue = next((
+            issue for issue in report.issues
+            if issue.rule == 'target_file_invalid'
+            and issue.detail.startswith('detected ')
+        ), None)
+        if wrong_language_issue is not None:
+            evidence['detail'] = f'expected {language}; {wrong_language_issue.detail}'
     return (report.valid, evidence)
 
 def _apply_prune_action(video: _runtime.Path, classification: _runtime.SidecarClassification, readiness: dict, *, dry_run: bool) -> str:
@@ -250,7 +257,20 @@ def run_extra_sidecar_prune(videos: list[tuple[_runtime.Path, str | None]] | Non
                 if videos is None and _runtime._video_has_pending_repair(video):
                     _runtime._queue_video_for_pruning(video, item_type)
                 missing = ','.join((code for code, value in readiness.items() if not value['ready']))
-                reason_codes = '; '.join((f"{code}={value.get('reason') or 'language_validation_failed'}" for code, value in readiness.items() if not value['ready']))
+                reason_parts = []
+                for code, value in readiness.items():
+                    if value['ready']:
+                        continue
+                    reason = value.get('reason') or 'language_validation_failed'
+                    detail = next((
+                        candidate.get('detail')
+                        for candidate in value.get('candidates', [])
+                        if candidate.get('detail')
+                    ), None)
+                    reason_parts.append(
+                        f"{code}={reason}" + (f" ({detail})" if detail else '')
+                    )
+                reason_codes = '; '.join(reason_parts)
                 print(f'{_runtime.YELLOW}[PRUNE] Deferred {video.name}: managed language(s) not ready: {missing} ({reason_codes}){_runtime.RESET}')
                 continue
             stats['prune_ready'] += 1
@@ -314,10 +334,15 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
     from ..subtitles.foundation import file_sha256, target_language_for_code
     from ..subtitles.library import discover_target_subtitles, find_preferred_source, validate_subtitle_without_source
     with _runtime._cleanup_scan_lock:
+        managed_validation_languages = {
+            str(code).strip().casefold()
+            for code in (*_runtime.LANGUAGES, *_runtime.CLEANUP_LANGUAGES)
+            if str(code).strip()
+        }
         detector = _runtime._get_cleanup_detector()
         state = _runtime._get_validation_state()
         changed = _runtime._scan_undersized_sidecars(stats)
-        if detector is None or not _runtime.CLEANUP_LANGUAGES:
+        if detector is None or not managed_validation_languages:
             prune_stats, prune_episodes, prune_movies = _runtime.run_extra_sidecar_prune(already_locked=True, status_job_id=maintenance_scan_job_id)
             prune_stats['prune_bazarr_rescan_batches'] = int(prune_episodes or prune_movies)
             stats.update(prune_stats)
@@ -325,7 +350,9 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
             if changed and (not _runtime.shutdown_requested):
                 _runtime._tracked_bazarr_sync(True, True, _runtime.SYNC_TIMEOUT)
             return stats
-        candidates = discover_target_subtitles(_runtime.CLEANUP_ROOTS, _runtime.CLEANUP_LANGUAGES)
+        candidates = discover_target_subtitles(
+            _runtime.CLEANUP_ROOTS, managed_validation_languages
+        )
         if maintenance_scan_job_id:
             with _runtime._maintenance_scan_contexts_lock:
                 context = _runtime._maintenance_scan_contexts.get(maintenance_scan_job_id)
@@ -434,6 +461,12 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
             else:
                 stats['without_source'] += 1
                 report = validate_subtitle_without_source(candidate.path, detector, target_language, target_lang=candidate.target_lang, **_runtime._validation_kwargs())
+                completeness = _runtime._evaluate_completeness(
+                    candidate.path,
+                    _runtime._probe_media_duration(candidate_video)
+                    if candidate_video is not None else None,
+                )
+                _runtime._add_completeness_issue(report, completeness)
                 if report.valid:
                     print(f'[SCAN] OK {candidate.path.name} (target-only validation passed)')
                     _runtime._record_validation_result(candidate.path, None, target_hash, 'valid', report, sourceAvailable=False)
@@ -445,7 +478,28 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                     action = 'valid-warning'
                 else:
                     print(f'{_runtime.YELLOW}[SCAN] Invalid target without source {candidate.path.name}: {report.summary()}{_runtime.RESET}')
-                    action = _runtime._apply_cleanup_action(candidate.path, None, candidate.target_lang, report, lingarr_outcome='not attempted: no source subtitle', dry_run=_runtime.CLEANUP_SCAN_DRY_RUN)
+                    wrong_language = _runtime._confident_wrong_language_evidence(
+                        candidate.path, detector, target_language,
+                        candidate.target_lang, completeness,
+                    ) if candidate.target_lang not in _runtime.CLEANUP_LANGUAGES else None
+                    if candidate.target_lang not in _runtime.CLEANUP_LANGUAGES and wrong_language is None:
+                        print(f'{_runtime.YELLOW}[SCAN] Retained {candidate.path.name}: outside AI cleanup scope without a confident whole-file language mismatch{_runtime.RESET}')
+                        _runtime._record_validation_result(
+                            candidate.path, None, target_hash, 'reported', report,
+                            sourceAvailable=False,
+                            completeness=completeness.to_dict() if completeness is not None else None,
+                        )
+                        action = 'reported'
+                    else:
+                        if wrong_language is not None:
+                            setattr(report, 'wrong_language_evidence', wrong_language)
+                        action = _runtime._apply_cleanup_action(
+                            candidate.path, None, candidate.target_lang, report,
+                            expected_target_hash=target_hash,
+                            lingarr_outcome='not attempted: no source subtitle',
+                            completeness=completeness,
+                            dry_run=_runtime.CLEANUP_SCAN_DRY_RUN,
+                        )
             if report is not None:
                 excessive = sum((issue.rule == 'excessive_lines' for issue in report.issues))
                 stats['excessive_line_cues'] += excessive
@@ -478,10 +532,16 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 stats['dry_run_files'] += 1
             elif action == 'action-failed':
                 stats['action_failures'] += 1
-            operation_outcomes = {'valid': ('validation', 'validated'), 'valid-warning': ('validation', 'validated'), 'formatted': ('format_repair', 'formatted'), 'quarantined': ('quarantine', 'quarantined'), 'deleted': ('deletion', 'deleted'), 'action-failed': ('validation', 'failed')}
+            wrong_language = getattr(report, 'wrong_language_evidence', None)
+            operation_outcomes = {'valid': ('validation', 'validated'), 'valid-warning': ('validation', 'validated'), 'formatted': ('format_repair', 'formatted'), 'quarantined': ('language_validation' if wrong_language is not None else 'quarantine', 'quarantined'), 'deleted': ('language_validation' if wrong_language is not None else 'deletion', 'deleted'), 'action-failed': ('validation', 'failed')}
             if action in operation_outcomes:
                 operation, outcome = operation_outcomes[action]
-                _runtime._status_record_maintenance_outcome(operation, outcome, _runtime._maintenance_file_identity(candidate.path, candidate.target_lang), reason='validation action failed' if outcome == 'failed' else None)
+                reason = (
+                    f"expected {wrong_language['expectedLanguage']}; detected {wrong_language['detectedLanguage']} {wrong_language['detectedConfidence']:.2f}"
+                    if wrong_language is not None
+                    else 'validation action failed' if outcome == 'failed' else None
+                )
+                _runtime._status_record_maintenance_outcome(operation, outcome, _runtime._maintenance_file_identity(candidate.path, candidate.target_lang), reason=reason)
             _runtime._publish_scan_progress(maintenance_scan_job_id)
         _runtime._publish_scan_progress(maintenance_scan_job_id, force=True)
         prune_stats, prune_episodes, prune_movies = _runtime.run_extra_sidecar_prune(already_locked=True, status_job_id=maintenance_scan_job_id)
