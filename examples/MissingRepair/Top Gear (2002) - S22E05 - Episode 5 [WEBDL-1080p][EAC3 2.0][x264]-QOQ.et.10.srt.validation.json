@@ -1,0 +1,100 @@
+{
+  "sourcePath": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ.eng.srt",
+  "targetPath": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ.et.srt",
+  "sourceHash": "a713b8e6b4bb6ba26bfb3fa737d43d13178d367524acf94cc99e1347450fbb23",
+  "targetHash": "b260aaec1f88fef05bff3da67a7342df091a91157578f52619dbd4ae30319e5c",
+  "targetLanguage": "et",
+  "repairAttempts": 0,
+  "repairAttemptHistory": [],
+  "formatFixes": [],
+  "formatRecoveredCues": [],
+  "lingarrOutcome": "not attempted",
+  "origin": "unknown",
+  "filenameClassification": "regular",
+  "completeness": {
+    "evaluated": false,
+    "undersized": false,
+    "reason": "subtitle structure is invalid",
+    "mediaDurationSeconds": 3737.48,
+    "subtitleBytes": 0,
+    "cueCount": 0,
+    "dialogueChars": 0,
+    "cuesPerMinute": 0.0,
+    "textCharsPerMinute": 0.0,
+    "bytesPerMinute": 0.0,
+    "timelineCoverage": 0.0,
+    "failedSignals": [],
+    "thresholds": {
+      "minMediaDurationSeconds": 900.0,
+      "minCuesPerMinute": 1.5,
+      "minTextCharsPerMinute": 40.0,
+      "minBytesPerMinute": 100.0,
+      "minTimelineCoverage": 0.6,
+      "requiredSignals": 3
+    }
+  },
+  "validation": {
+    "valid": false,
+    "summary": "block 141 has invalid cue number 'Seega, me oleme siin,'; block 300 has fewer than two lines; block 968 has invalid cue number '```estonian'; block 1174 has invalid cue number 'X Factor, kas seal lõpetad'; block 1175 has fewer than two lines; and 1 more issue(s)",
+    "issues": [
+      {
+        "rule": "target_structure",
+        "detail": "block 141 has invalid cue number 'Seega, me oleme siin,'",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 300 has fewer than two lines",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 968 has invalid cue number '```estonian'",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 1174 has invalid cue number 'X Factor, kas seal lõpetad'",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 1175 has fewer than two lines",
+        "cueIndex": null,
+        "cueNumber": null
+      },
+      {
+        "rule": "target_structure",
+        "detail": "block 1176 has fewer than two lines",
+        "cueIndex": null,
+        "cueNumber": null
+      }
+    ],
+    "observations": []
+  },
+  "recordedAt": "2026-08-16T14:31:25Z",
+  "quarantineEvent": {
+    "identity": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ|et",
+    "targetPath": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ.et.srt",
+    "targetHash": "b260aaec1f88fef05bff3da67a7342df091a91157578f52619dbd4ae30319e5c",
+    "targetLanguage": "et",
+    "rules": [
+      "target_structure"
+    ],
+    "origin": "unknown",
+    "firstSeen": "2026-08-16T14:31:25.463928+00:00",
+    "lastSeen": "2026-08-16T14:31:25.463928+00:00",
+    "occurrences": 1,
+    "resolvedAt": null
+  },
+  "repeatOffender": false,
+  "cycleSuppression": {
+    "identity": "/media/_Shows/Top Gear (2002) [tvdbid-74608]/Season 22/Top Gear (2002) - S22E05 - Episode 5 [WEBDL-1080p][EAC3 2.0][x264]-QOQ|et",
+    "action": "quarantined",
+    "cycleId": "93"
+  }
+}

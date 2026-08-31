@@ -2,3 +2,6 @@
 *.sh text eol=lf
 *.py text eol=lf
 Dockerfile text eol=lf
+examples/MissingRepair/*.srt text eol=lf
+examples/MissingRepair/*.json text eol=lf
+examples/LanguageValidationFailure/**/*.srt text eol=lf

@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import uuid
+from copy import deepcopy
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -129,7 +130,11 @@ def _safe_maintenance_text(value, fallback=None, *, limit: int = 160):
 
 def _safe_maintenance_reason(value):
     text = _safe_maintenance_text(value, limit=200)
-    return text if text in MAINTENANCE_PUBLIC_REASONS else None
+    wrong_language = bool(re.fullmatch(
+        r"expected [a-z]{2,3}; detected [A-Z][A-Z_ ]{1,30} (?:0|1)\.\d{2}",
+        text or "",
+    ))
+    return text if text in MAINTENANCE_PUBLIC_REASONS or wrong_language else None
 
 
 def _first_int(item: dict, *keys: str) -> int | None:
@@ -468,13 +473,20 @@ class StatusTracker:
             job = self._find_maintenance_locked(job_id)
             if job is None:
                 return False
-            self._apply_maintenance_details(job, details)
-            self._finish_maintenance_locked(job, outcome, self.clock(), reason=reason)
-            self._maintenance["activeJobs"] = [
-                entry for entry in self._maintenance.get("activeJobs", [])
-                if entry.get("statusJobId") != job_id
-            ]
-            self._write_snapshot_locked()
+            previous_maintenance = deepcopy(self._maintenance)
+            try:
+                self._apply_maintenance_details(job, details)
+                self._finish_maintenance_locked(job, outcome, self.clock(), reason=reason)
+                self._maintenance["activeJobs"] = [
+                    entry for entry in self._maintenance.get("activeJobs", [])
+                    if entry.get("statusJobId") != job_id
+                ]
+                self._write_snapshot_locked()
+            except OSError:
+                # Keep the active row retryable. The history event is deliberately
+                # retained and deduplicated by statusJobId on the next attempt.
+                self._maintenance = previous_maintenance
+                raise
             return True
 
     def record_maintenance_outcome(
@@ -553,7 +565,12 @@ class StatusTracker:
         event = self._maintenance_public(job)
         event["kind"] = "maintenance_job"
         event["timestamp"] = job["finishedAt"]
-        self._append_history_locked(event)
+        if not any(
+            existing.get("kind") == "maintenance_job"
+            and existing.get("statusJobId") == job.get("statusJobId")
+            for existing in self._history
+        ):
+            self._append_history_locked(event)
 
     def set_episode_identity(
         self,
@@ -821,9 +838,14 @@ class StatusTracker:
 
     def _append_history_locked(self, event: dict) -> None:
         self._history.append(event)
-        self.history_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.history_path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+        try:
+            self.history_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.history_path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except OSError:
+            if self._history and self._history[-1] is event:
+                self._history.pop()
+            raise
 
     def _drop_expired_locked(self) -> None:
         cutoff = self.clock() - self.retention_days * 86400

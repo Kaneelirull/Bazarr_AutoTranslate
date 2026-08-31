@@ -163,13 +163,14 @@ def _recover_embedded_provider_output(
 
 def _source_is_usable(source_path: str, source_lang: str, media_duration: float | None, title: str, item_type: str, stats: dict, stats_lock: _runtime.threading.Lock, *, origin: str='bazarr') -> bool:
     from .subtitles.foundation import validate_srt_structure
+    validated_source_hash = _runtime._file_hash_or_none(source_path)
     report = validate_srt_structure(source_path)
     completeness = _runtime._evaluate_completeness(source_path, media_duration)
     _runtime._add_completeness_issue(report, completeness)
     if report.valid:
         return True
     print(f"{_runtime.YELLOW}[SOURCE] Rejected {title} '{source_lang}': {report.summary()}{_runtime.RESET}")
-    action = _runtime._apply_cleanup_action(source_path, None, source_lang, report, completeness=completeness, origin=origin, lingarr_outcome='not attempted: source is not suitable for full translation')
+    action = _runtime._apply_cleanup_action(source_path, None, source_lang, report, expected_target_hash=validated_source_hash, completeness=completeness, origin=origin, lingarr_outcome='not attempted: source is not suitable for full translation')
     with stats_lock:
         stats['cleanup_undersized_sources'] = stats.get('cleanup_undersized_sources', 0) + int(completeness is not None and completeness.undersized)
         _runtime._record_cleanup_stats(stats, action, report)

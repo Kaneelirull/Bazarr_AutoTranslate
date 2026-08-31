@@ -261,6 +261,41 @@ def _derive_target_path(source_path: str, source_lang: str, target_lang: str) ->
 def _validation_kwargs() -> dict:
     return {'min_chars': _runtime.CLEANUP_MIN_CHARS, 'min_confidence': _runtime.CLEANUP_MIN_CONFIDENCE, 'max_unique_ratio': _runtime.CLEANUP_MAX_UNIQUE_RATIO, 'max_cyrillic_ratio': _runtime.CLEANUP_MAX_CYRILLIC_RATIO, 'max_cjk_ratio': _runtime.CLEANUP_MAX_CJK_RATIO, 'max_latin_ratio': _runtime.CLEANUP_MAX_LATIN_RATIO, 'min_letters_for_script': _runtime.CLEANUP_MIN_LETTERS_FOR_SCRIPT, 'max_cue_lines': _runtime.CLEANUP_MAX_CUE_LINES, 'max_cue_chars': _runtime.CLEANUP_MAX_CUE_CHARS, 'max_expansion_ratio': _runtime.CLEANUP_MAX_EXPANSION_RATIO, 'max_expansion_chars': _runtime.CLEANUP_MAX_EXPANSION_CHARS, 'max_source_similarity': _runtime.CLEANUP_MAX_SOURCE_SIMILARITY}
 
+
+def _confident_wrong_language_evidence(
+    path: str | _runtime.Path,
+    detector,
+    expected_language,
+    target_lang: str,
+    completeness,
+) -> dict | None:
+    """Return typed evidence only for a safe whole-file language mismatch."""
+    if completeness is None or not completeness.evaluated or completeness.undersized:
+        return None
+    from .foundation import (
+        clean_srt_text, detect_language, read_text_best_effort,
+        validate_srt_structure,
+    )
+    subtitle_path = _runtime.Path(path)
+    if not validate_srt_structure(subtitle_path).valid:
+        return None
+    raw = read_text_best_effort(subtitle_path)
+    if raw is None:
+        return None
+    cleaned = clean_srt_text(raw)
+    if len(cleaned) < _runtime.CLEANUP_MIN_CHARS:
+        return None
+    detected, confidence = detect_language(detector, cleaned)
+    if detected is None or detected == expected_language:
+        return None
+    if confidence < _runtime.CLEANUP_MIN_CONFIDENCE:
+        return None
+    return {
+        'expectedLanguage': target_lang.casefold(),
+        'detectedLanguage': detected.name,
+        'detectedConfidence': round(float(confidence), 4),
+    }
+
 def _source_less_line_only_warning(report) -> bool:
     return _runtime.CLEANUP_SOURCELESS_LINE_ONLY_ACTION == 'warn' and bool(report.issues) and all((issue.rule == 'excessive_lines' for issue in report.issues))
 
@@ -426,7 +461,30 @@ def _record_quarantine_event(target_path: str | _runtime.Path, target_lang: str,
         print(f"[CLEANUP] Repeat offender hash for {_runtime.os.path.basename(str(target_path))}; historical occurrence {entry['occurrences']}")
     return (entry, repeated)
 
-def _apply_cleanup_action(target_path: str | _runtime.Path, source_path: str | _runtime.Path | None, target_lang: str, report, *, repair_attempts: int=0, lingarr_outcome: str='not attempted', attempt_history: list[dict] | None=None, format_fixes: list[str] | None=None, format_recovered_cues: list[int] | None=None, completeness=None, origin: str | None=None, item_type: str | None=None, item_id: int | None=None, donor_history: list[dict] | None=None, candidate_raw: str | None=None, partial_candidate_id: int | None=None, dry_run: bool=False) -> str:
+def _apply_cleanup_action(target_path: str | _runtime.Path, source_path: str | _runtime.Path | None, target_lang: str, report, *, expected_target_hash: str | None=None, repair_attempts: int=0, lingarr_outcome: str='not attempted', attempt_history: list[dict] | None=None, format_fixes: list[str] | None=None, format_recovered_cues: list[int] | None=None, completeness=None, origin: str | None=None, item_type: str | None=None, item_id: int | None=None, donor_history: list[dict] | None=None, candidate_raw: str | None=None, partial_candidate_id: int | None=None, dry_run: bool=False) -> str:
+    target = _runtime.Path(target_path)
+    current_target_hash = _runtime._file_hash_or_none(target)
+    expected_target_hash = expected_target_hash or current_target_hash
+    if current_target_hash != expected_target_hash:
+        print(f'{_runtime.YELLOW}[CLEANUP] Deferred {target}: target changed after validation{_runtime.RESET}')
+        return 'action-deferred'
+    with _runtime._target_repair_lock(target):
+        if _runtime._file_hash_or_none(target) != expected_target_hash:
+            print(f'{_runtime.YELLOW}[CLEANUP] Deferred {target}: target changed before cleanup action{_runtime.RESET}')
+            return 'action-deferred'
+        return _apply_cleanup_action_locked(
+            target_path, source_path, target_lang, report,
+            repair_attempts=repair_attempts, lingarr_outcome=lingarr_outcome,
+            attempt_history=attempt_history, format_fixes=format_fixes,
+            format_recovered_cues=format_recovered_cues,
+            completeness=completeness, origin=origin, item_type=item_type,
+            item_id=item_id, donor_history=donor_history,
+            candidate_raw=candidate_raw, partial_candidate_id=partial_candidate_id,
+            dry_run=dry_run,
+        )
+
+
+def _apply_cleanup_action_locked(target_path: str | _runtime.Path, source_path: str | _runtime.Path | None, target_lang: str, report, *, repair_attempts: int=0, lingarr_outcome: str='not attempted', attempt_history: list[dict] | None=None, format_fixes: list[str] | None=None, format_recovered_cues: list[int] | None=None, completeness=None, origin: str | None=None, item_type: str | None=None, item_id: int | None=None, donor_history: list[dict] | None=None, candidate_raw: str | None=None, partial_candidate_id: int | None=None, dry_run: bool=False) -> str:
     from .library import quarantine_destination, quarantine_subtitle, write_validation_report
     target = _runtime.Path(target_path)
     source_hash = _runtime._file_hash_or_none(source_path)
@@ -778,7 +836,7 @@ def _perform_repair(source_path: str, target_path: str, source_lang: str, target
                     print(f'{_runtime.YELLOW}[REPAIR] Could not persist partial progress: {exc}{_runtime.RESET}')
             if not admit_publication():
                 return _runtime.RepairJobResult('repair-deferred', repair.report, label, target_lang, item_type, item_id, repair.attempts, second_attempts, str(target_path))
-            action = _runtime._apply_cleanup_action(target_path, source_path, target_lang, repair.report, repair_attempts=repair.attempts, lingarr_outcome=repair.reason, attempt_history=repair.attempt_history, format_fixes=format_fixes, format_recovered_cues=format_recovered_cues, completeness=completeness, origin=origin, item_type=item_type, item_id=item_id, donor_history=repair.donor_history, candidate_raw=repair.partial_raw if _runtime.CLEANUP_ACTION == 'quarantine' else None, partial_candidate_id=partial_id)
+            action = _runtime._apply_cleanup_action(target_path, source_path, target_lang, repair.report, expected_target_hash=expected_target_hash, repair_attempts=repair.attempts, lingarr_outcome=repair.reason, attempt_history=repair.attempt_history, format_fixes=format_fixes, format_recovered_cues=format_recovered_cues, completeness=completeness, origin=origin, item_type=item_type, item_id=item_id, donor_history=repair.donor_history, candidate_raw=repair.partial_raw if _runtime.CLEANUP_ACTION == 'quarantine' else None, partial_candidate_id=partial_id)
             if action in ('quarantined', 'deleted') and item_id is not None:
                 _runtime._clear_submission(item_id, target_lang, item_type)
                 _runtime._clear_submission_for_path(target_path, target_lang)
@@ -834,19 +892,84 @@ def _run_repair_with_capacity(capacity_token: int, job_kwargs: dict, metadata: d
     finally:
         _runtime._shared_capacity.release(capacity_token)
 
-def _publish_repair_status(future: _runtime.Future, metadata: dict) -> None:
-    """Publish a repair's terminal dashboard state without draining its future."""
+def _finish_repair_scan_child(metadata: dict, outcome: str) -> None:
+    """Release a maintenance scan child at most once."""
     status_lock = metadata.get('status_lock')
     if status_lock is not None:
         with status_lock:
-            if metadata.get('status_published'):
+            if metadata.get('scan_child_finished'):
                 return
-            metadata['status_published'] = True
+    finished = _runtime._scan_child_finished(
+        metadata.get('maintenance_scan_job_id'), outcome,
+    )
+    if finished and status_lock is not None:
+        with status_lock:
+            metadata['scan_child_finished'] = True
+
+
+def _repair_terminal_status(future: _runtime.Future) -> tuple[str, str | None, bool, dict | None, str]:
+    """Map a completed worker to one public terminal state."""
     try:
         result = future.result()
     except _runtime.CancelledError:
-        _runtime._complete_repair_status(metadata, 'deferred', reason='repair persisted for restart during shutdown')
-        _runtime._scan_child_finished(metadata.get('maintenance_scan_job_id'), 'deferred')
+        return ('deferred', 'repair persisted for restart during shutdown', False, None, 'deferred')
+    except Exception:
+        return ('failed', 'repair worker failed', False, None, 'failed')
+    details = {'attempts': result.attempts}
+    if result.action == 'repaired':
+        return ('repaired', None, True, details, 'repaired')
+    if result.action in ('quarantined', 'deleted'):
+        return (result.action, result.action, False, details, result.action)
+    if result.action == 'repair-deferred':
+        return ('deferred', 'repair deferred', False, details, 'failed')
+    return ('failed', f'repair {result.action}', False, details, 'failed')
+
+
+def _publish_repair_status(future: _runtime.Future, metadata: dict) -> None:
+    """Publish terminal repair state even when secondary bookkeeping degrades."""
+    status_lock = metadata.get('status_lock')
+    if status_lock is not None:
+        with status_lock:
+            if (
+                metadata.get('status_published')
+                and metadata.get('bookkeeping_published')
+                and metadata.get('scan_child_finished')
+            ) or metadata.get('status_publishing'):
+                return
+            metadata['status_publishing'] = True
+    outcome, reason, repaired, details, child_outcome = _repair_terminal_status(future)
+    terminalized = bool(metadata.get('status_published'))
+    bookkeeping_succeeded = bool(metadata.get('bookkeeping_published'))
+    try:
+        if not terminalized:
+            for _attempt in range(3):
+                if _runtime._complete_repair_status(
+                    metadata, outcome, reason=reason, repaired=repaired, details=details,
+                ):
+                    terminalized = True
+                    break
+        if not terminalized and metadata.get('status_ref'):
+            print(f'{_runtime.YELLOW}[REPAIR] Terminal status persistence degraded after 3 attempts; restart reconciliation remains authoritative{_runtime.RESET}')
+        if not bookkeeping_succeeded:
+            try:
+                _publish_repair_status_once(future, metadata)
+                bookkeeping_succeeded = True
+            except Exception as exc:
+                print(f'{_runtime.YELLOW}[REPAIR] Secondary terminal bookkeeping degraded: {type(exc).__name__}: {exc}{_runtime.RESET}')
+        _finish_repair_scan_child(metadata, child_outcome)
+    finally:
+        if status_lock is not None:
+            with status_lock:
+                metadata['status_publishing'] = False
+                metadata['status_published'] = terminalized or not metadata.get('status_ref')
+                metadata['bookkeeping_published'] = bookkeeping_succeeded
+
+
+def _publish_repair_status_once(future: _runtime.Future, metadata: dict) -> None:
+    """Perform durable and diagnostic repair completion bookkeeping once."""
+    try:
+        result = future.result()
+    except _runtime.CancelledError:
         return
     except Exception:
         durable_job_id = metadata.get('durable_job_id')
@@ -855,7 +978,6 @@ def _publish_repair_status(future: _runtime.Future, metadata: dict) -> None:
                 _runtime._get_validation_state().transition_repair_job(durable_job_id, 'failed', error_code='worker_exception', expected_states=('queued', 'active'))
             except _runtime.StateStoreError:
                 pass
-        _runtime._complete_repair_status(metadata, 'failed', reason='repair worker failed')
         retry_plan_id = metadata.get('retry_plan_id')
         trial_generation = metadata.get('trial_generation')
         if retry_plan_id is not None and trial_generation is not None:
@@ -874,7 +996,6 @@ def _publish_repair_status(future: _runtime.Future, metadata: dict) -> None:
                 _runtime._refresh_status_diagnostics()
             except _runtime.StateStoreError as exc:
                 print(f'{_runtime.YELLOW}[CIRCUIT] Could not release failed repair trial: {exc}{_runtime.RESET}')
-        _runtime._scan_child_finished(metadata.get('maintenance_scan_job_id'), 'failed')
         return
     durable_job_id = metadata.get('durable_job_id')
     if durable_job_id is not None:
@@ -918,7 +1039,8 @@ def _publish_repair_status(future: _runtime.Future, metadata: dict) -> None:
                 try:
                     _runtime._get_validation_state().record_circuit_outcome(
                         series_key=series_key, series_title=series_title,
-                        success=True, threshold=_runtime.CIRCUIT_FAILURE_THRESHOLD,
+                        success=True, reason=None,
+                        threshold=_runtime.CIRCUIT_FAILURE_THRESHOLD,
                         open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
                         config_fingerprint=_runtime._CIRCUIT_CONFIG_FINGERPRINT,
                     )
@@ -934,7 +1056,6 @@ def _publish_repair_status(future: _runtime.Future, metadata: dict) -> None:
                 _runtime._refresh_status_diagnostics()
             except _runtime.StateStoreError as exc:
                 print(f'{_runtime.YELLOW}[CIRCUIT] Could not record repair outcome: {exc}{_runtime.RESET}')
-        _runtime._complete_repair_status(metadata, 'repaired', repaired=True, details={'attempts': result.attempts})
     elif result.action in ('quarantined', 'deleted'):
         series_key = metadata.get('series_key')
         series_title = metadata.get('series_title')
@@ -956,7 +1077,6 @@ def _publish_repair_status(future: _runtime.Future, metadata: dict) -> None:
                 print(f'{_runtime.YELLOW}[CIRCUIT] Could not record repair outcome: {exc}{_runtime.RESET}')
         if linked_retry_plan_id is None or linked_trial_current:
             _runtime._schedule_validation_retry(report=result.report, action=result.action, source_path=metadata.get('source_path') or '', source_lang=metadata.get('source_lang') or '', target_path=result.target_path, target_lang=result.target_lang, item_type=result.item_type, item_id=result.item_id, title=result.title, series_key=metadata.get('series_key'), series_title=metadata.get('series_title'))
-        _runtime._complete_repair_status(metadata, result.action, reason=result.action, details={'attempts': result.attempts})
     elif result.action == 'repair-deferred':
         if linked_retry_plan_id is None or linked_trial_current:
             _runtime._schedule_validation_retry(report=result.report, action=result.action, source_path=metadata.get('source_path') or '', source_lang=metadata.get('source_lang') or '', target_path=result.target_path, target_lang=result.target_lang, item_type=result.item_type, item_id=result.item_id, title=result.title, series_key=metadata.get('series_key'), series_title=metadata.get('series_title'))
@@ -972,7 +1092,6 @@ def _publish_repair_status(future: _runtime.Future, metadata: dict) -> None:
                 _runtime._refresh_status_diagnostics()
             except _runtime.StateStoreError as exc:
                 print(f'{_runtime.YELLOW}[CIRCUIT] Could not release deferred repair trial: {exc}{_runtime.RESET}')
-        _runtime._complete_repair_status(metadata, 'deferred', reason='repair deferred', details={'attempts': result.attempts})
     else:
         retry_plan_id = metadata.get('retry_plan_id')
         trial_generation = metadata.get('trial_generation')
@@ -993,8 +1112,6 @@ def _publish_repair_status(future: _runtime.Future, metadata: dict) -> None:
                 _runtime._refresh_status_diagnostics()
             except _runtime.StateStoreError as exc:
                 print(f'{_runtime.YELLOW}[CIRCUIT] Could not release failed repair trial: {exc}{_runtime.RESET}')
-        _runtime._complete_repair_status(metadata, 'failed', reason=f'repair {result.action}', details={'attempts': result.attempts})
-    _runtime._scan_child_finished(metadata.get('maintenance_scan_job_id'), 'repaired' if result.action == 'repaired' else result.action if result.action in ('quarantined', 'deleted') else 'failed')
 
 def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, target_lang: str) -> str:
     with _runtime._pending_repairs_lock:
@@ -1050,7 +1167,7 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
                 _runtime._status_ref_complete(status_ref, 'deferred', reason='repair persistence unavailable')
                 print(f'{_runtime.YELLOW}[REPAIR] Could not persist repair before submit: {exc}{_runtime.RESET}')
                 return 'repair-deferred'
-        metadata = {'key': repair_key, 'report': report, 'target_path': job_kwargs.get('target_path'), 'item_type': job_kwargs.get('item_type'), 'item_id': job_kwargs.get('item_id'), 'target_lang': job_kwargs.get('target_lang'), 'source_lang': job_kwargs.get('source_lang'), 'source_path': job_kwargs.get('source_path'), 'series_key': job_kwargs.get('series_key'), 'series_title': job_kwargs.get('series_title'), 'retry_plan_id': job_kwargs.get('retry_plan_id'), 'expected_source_hash': job_kwargs.get('expected_source_hash'), 'trial_owner': job_kwargs.get('trial_owner'), 'trial_job_id': job_kwargs.get('trial_job_id'), 'trial_plan_id': job_kwargs.get('trial_plan_id'), 'trial_generation': job_kwargs.get('trial_generation'), 'queued_monotonic': _runtime.time.monotonic(), 'status_ref': status_ref, 'maintenance_scan_job_id': job_kwargs.get('maintenance_scan_job_id'), 'status_lock': _runtime.threading.Lock(), 'status_published': False, 'durable_job_id': durable_job_id, 'publication_lock': _runtime.threading.Lock(), 'publication_started': False}
+        metadata = {'key': repair_key, 'report': report, 'target_path': job_kwargs.get('target_path'), 'item_type': job_kwargs.get('item_type'), 'item_id': job_kwargs.get('item_id'), 'target_lang': job_kwargs.get('target_lang'), 'source_lang': job_kwargs.get('source_lang'), 'source_path': job_kwargs.get('source_path'), 'series_key': job_kwargs.get('series_key'), 'series_title': job_kwargs.get('series_title'), 'retry_plan_id': job_kwargs.get('retry_plan_id'), 'expected_source_hash': job_kwargs.get('expected_source_hash'), 'trial_owner': job_kwargs.get('trial_owner'), 'trial_job_id': job_kwargs.get('trial_job_id'), 'trial_plan_id': job_kwargs.get('trial_plan_id'), 'trial_generation': job_kwargs.get('trial_generation'), 'queued_monotonic': _runtime.time.monotonic(), 'status_ref': status_ref, 'maintenance_scan_job_id': job_kwargs.get('maintenance_scan_job_id'), 'status_lock': _runtime.threading.Lock(), 'status_published': False, 'bookkeeping_published': False, 'durable_job_id': durable_job_id, 'publication_lock': _runtime.threading.Lock(), 'publication_started': False}
         capacity_token = _runtime._shared_capacity.reserve_repair()
         try:
             future = _runtime._get_repair_executor().submit(_runtime._run_repair_with_capacity, capacity_token, job_kwargs, metadata)
@@ -1269,6 +1386,7 @@ def _resolve_retry_success(plan_id: int | None, expected_source_hash: str | None
         return False
 
 def _validate_translated_file(source_path: str, target_path: str, source_lang: str, target_lang: str, item_id: int | None, title: str='', dry_run: bool=False, *, defer_repair: bool=False, item_type: str | None=None, media_duration: float | None=None, origin: str | None=None, provenance_source_hash: str | None=None, series_key: str | None=None, series_title: str | None=None, maintenance_scan_job_id: str | None=None, retry_plan_id: int | None=None, trial_owner: str | None=None, trial_job_id: int | None=None, trial_plan_id: int | None=None, trial_generation: int | None=None) -> tuple[str, object]:
+    validated_target_hash = _runtime._file_hash_or_none(target_path)
     validation_identity = {
         'title': title or ('Movie' if item_type == 'movies' else 'Episode' if item_type == 'episodes' else 'Media item'),
         'episodeCode': _runtime.episode_identity_from_path(target_path),
@@ -1277,17 +1395,49 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
         'targetLanguage': target_lang,
     }
     if target_lang not in _runtime.CLEANUP_LANGUAGES:
-        from .foundation import validate_srt_structure
-        report = validate_srt_structure(target_path)
+        from .foundation import target_language_for_code
+        from .library import validate_subtitle_without_source
+        detector = _runtime._get_cleanup_detector()
+        target_language = target_language_for_code(target_lang)
+        if detector is None or target_language is None:
+            from .foundation import validate_srt_structure
+            report = validate_srt_structure(target_path)
+        else:
+            report = validate_subtitle_without_source(
+                _runtime.Path(target_path), detector, target_language,
+                target_lang=target_lang, **_runtime._validation_kwargs(),
+            )
         completeness = _runtime._evaluate_completeness(target_path, media_duration)
         _runtime._add_completeness_issue(report, completeness)
         if report.valid:
-            if not _runtime._record_validation_result(target_path, _runtime._file_hash_or_none(source_path), _runtime._file_hash_or_none(target_path), 'valid', report, origin=origin, completeness=completeness.to_dict() if completeness is not None else None, **validation_identity):
+            if validated_target_hash is None or _runtime._file_hash_or_none(target_path) != validated_target_hash:
+                print(f'{_runtime.YELLOW}[CLEANUP] Deferred {target_path}: target changed during validation{_runtime.RESET}')
+                return ('action-deferred', report)
+            if not _runtime._record_validation_result(target_path, _runtime._file_hash_or_none(source_path), validated_target_hash, 'valid', report, origin=origin, completeness=completeness.to_dict() if completeness is not None else None, **validation_identity):
                 return ('repair-deferred', report)
             return ('valid', report)
         label = title or _runtime.os.path.basename(target_path)
         print(f"{_runtime.YELLOW}[CLEANUP] Invalid translation {label} '{target_lang}': {report.summary()}{_runtime.RESET}")
-        action = _runtime._apply_cleanup_action(target_path, source_path, target_lang, report, lingarr_outcome='not attempted: file-level issue is not cue-repairable', completeness=completeness, origin=origin, item_type=item_type, item_id=item_id, dry_run=dry_run)
+        wrong_language = _confident_wrong_language_evidence(
+            target_path, detector, target_language, target_lang, completeness,
+        ) if detector is not None and target_language is not None else None
+        if origin != 'lingarr' and wrong_language is None:
+            print(f"{_runtime.YELLOW}[CLEANUP] Retained {label} '{target_lang}': outside AI cleanup scope without a confident whole-file language mismatch{_runtime.RESET}")
+            if validated_target_hash is None or _runtime._file_hash_or_none(target_path) != validated_target_hash:
+                print(f'{_runtime.YELLOW}[CLEANUP] Deferred {target_path}: target changed during validation{_runtime.RESET}')
+                return ('action-deferred', report)
+            if not _runtime._record_validation_result(
+                target_path, _runtime._file_hash_or_none(source_path),
+                validated_target_hash, 'reported', report,
+                origin=origin,
+                completeness=completeness.to_dict() if completeness is not None else None,
+                **validation_identity,
+            ):
+                return ('repair-deferred', report)
+            return ('reported', report)
+        if wrong_language is not None:
+            setattr(report, 'wrong_language_evidence', wrong_language)
+        action = _runtime._apply_cleanup_action(target_path, source_path, target_lang, report, expected_target_hash=validated_target_hash, lingarr_outcome='not attempted: file-level issue is not cue-repairable', completeness=completeness, origin=origin, item_type=item_type, item_id=item_id, dry_run=dry_run)
         if action in ('quarantined', 'deleted') and item_id is not None:
             _runtime._clear_submission(item_id, target_lang, item_type)
             _runtime._clear_submission_for_path(target_path, target_lang)
@@ -1301,7 +1451,7 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
     if target_language is None or detector is None:
         return ('valid', None)
     source_hash = _runtime._file_hash_or_none(source_path)
-    expected_target_hash = _runtime._file_hash_or_none(target_path)
+    expected_target_hash = validated_target_hash
     target_suffix = _runtime._target_suffix(target_path, target_lang)
     target_identity = _runtime._target_identity_from_sidecar(target_path, target_lang)
     target_variant = target_suffix[1] if target_suffix is not None else None
@@ -1431,7 +1581,7 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
             synchronous_kwargs.pop(coordination_key, None)
         result = _runtime._perform_repair(**synchronous_kwargs)
         return (result.action, result.report)
-    action = _runtime._apply_cleanup_action(target_path, source_path, target_lang, report, format_fixes=format_fixes, format_recovered_cues=format_recovered_cues, completeness=completeness, origin=effective_origin, item_type=item_type, item_id=item_id, dry_run=dry_run)
+    action = _runtime._apply_cleanup_action(target_path, source_path, target_lang, report, expected_target_hash=expected_target_hash, format_fixes=format_fixes, format_recovered_cues=format_recovered_cues, completeness=completeness, origin=effective_origin, item_type=item_type, item_id=item_id, dry_run=dry_run)
     if action in ('quarantined', 'deleted') and item_id is not None:
         _runtime._clear_submission(item_id, target_lang, item_type)
         _runtime._clear_submission_for_path(target_path, target_lang)
@@ -1465,6 +1615,7 @@ EXPORTS = {
         '_completed_repair_futures', '_drain_pending_repairs',
         '_shutdown_repair_executor', '_regeneration_delay_cycles',
         '_schedule_validation_retry', '_resolve_retry_success',
+        '_confident_wrong_language_evidence',
         '_validate_translated_file',
     )
 }

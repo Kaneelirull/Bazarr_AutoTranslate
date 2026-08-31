@@ -1,0 +1,8838 @@
+1
+00:00:07,000 --> 00:00:09,080
+(TEEMALAUL KÄIB)
+
+2
+00:00:14,920 --> 00:00:18,840
+
+
+3
+00:00:14,920 --> 00:00:18,840
+Porsche Cayman meie ringrajal...
+
+4
+00:00:18,880 --> 00:00:22,640
+Ferrari – just "Ferrari", seal on kõik.
+
+5
+00:00:18,880 --> 00:00:22,640
+piir Itaalias, Itaalias...
+
+6
+00:00:22,680 --> 00:00:25,360
+Ja üks vana Peugeot.
+
+
+7
+00:00:22,680 --> 00:00:25,360
+üksikasjalikud autod sõidavad mööda kitsede karja.
+
+8
+00:00:33,000 --> 00:00:34,560
+Tere!
+
+9
+00:00:34,600 --> 00:00:37,560
+Tere õhtust.
+
+10
+00:00:34,600 --> 00:00:37,560
+aitäh väga.
+
+11
+00:00:34,600 --> 00:00:37,560
+aitäh kõigile.
+
+12
+00:00:39,040 --> 00:00:40,480
+Aitäh kõigile.
+
+13
+00:00:40,520 --> 00:00:46,760
+Nüüd, iga paari aasta järel esitleb Chevrolet
+
+14
+00:00:40,520 --> 00:00:46,760
+tutvustab uut Corvetet.
+
+15
+00:00:46,800 --> 00:00:51,400
+ja nad ütlevad alati,
+
+16
+00:00:46,800 --> 00:00:51,400
+"See on parim...
+
+17
+00:00:46,800 --> 00:00:51,400
+ja nad ütlevad alati: "See on parim...
+
+18
+00:00:51,440 --> 00:00:56,680
+Ja siis sa mõtled: "Jah, täpselt nii.
+
+19
+00:00:51,440 --> 00:00:56,680
+sellest samal moel, nagu mina olen kõige paremini riietatud.
+
+20
+00:00:51,440 --> 00:00:56,680
+"saatejuht telesaates "Top Gear"."
+
+21
+00:00:56,720 --> 00:00:59,080
+mis tegelikult...
+
+22
+00:00:56,720 --> 00:00:59,080
+nagu te hiljem näete, olen ma.
+
+23
+00:00:59,120 --> 00:01:03,480
+Igatahes, tõde on see, et…
+
+24
+00:00:59,120 --> 00:01:03,480
+Corvette'i pole kunagi olnud konkurent.
+
+25
+00:01:03,520 --> 00:01:05,440
+...parimale, mida
+
+26
+00:01:03,520 --> 00:01:05,440
+nagu hiljem näha on, ma olen.
+Igatahes, tõde on see, et ühtegi
+Corvettet pole kunagi olnud nii hea, kui
+parimad võimalikud autod.
+
+27
+00:01:05,480 --> 00:01:10,040
+ja näib, et see on...
+
+28
+00:01:05,480 --> 00:01:10,040
+peaaegu sama lugu.
+
+29
+00:01:05,480 --> 00:01:10,040
+... selle uusima mudeliga.
+
+30
+00:01:10,960 --> 00:01:12,240
+Aga kas see on tõsi?
+
+31
+00:01:12,280 --> 00:01:15,240
+Nojah, Richard Hammond.
+
+
+32
+00:01:12,280 --> 00:01:15,240
+on seda teavet selgu saanud.
+
+33
+00:01:23,400 --> 00:01:26,920
+HAMMOND: Minu arvates on Corvette'id...
+
+34
+00:01:23,400 --> 00:01:26,920
+Corveted on alati välja näinud suurepäraselt.
+
+35
+00:01:29,160 --> 00:01:32,680
+Ja selle puhul...
+
+36
+00:01:29,160 --> 00:01:32,680
+seitsmes põlvkond.
+
+37
+00:01:32,720 --> 00:01:35,320
+nad on tõesti teinud kõigest, mis võimalik.
+
+38
+00:01:32,720 --> 00:01:35,320
+nad on tõesti kõik endast välistanud.
+
+39
+00:01:35,360 --> 00:01:37,840
+[mootori poorete tõus]
+
+40
+00:01:39,000 --> 00:01:42,840
+(kahinat) Ah, jah!
+
+41
+00:01:42,880 --> 00:01:47,440
+(kunitsus) Ei jumalatagi!
+
+42
+00:01:42,880 --> 00:01:47,440
+See läheb veel hullemaks.
+
+43
+00:01:47,480 --> 00:01:49,600
+Nad on need isegi tagasi toonud.
+
+44
+00:01:47,480 --> 00:01:49,600
+"Stingray" embleem.
+
+45
+00:01:49,640 --> 00:01:51,680
+klassikaliselt valmistatud Corvette'idest.
+
+46
+00:01:49,640 --> 00:01:51,680
+...kuuskümnendate aastatest.
+
+47
+00:01:53,000 --> 00:01:54,040
+Ma ütleksin, et töö on tehtud.
+
+48
+00:01:55,520 --> 00:01:58,560
+Aga see ei ole nii.
+
+49
+00:01:55,520 --> 00:01:58,560
+kuna tegelikult on veel midagi juurde.
+
+50
+00:02:02,920 --> 00:02:05,480
+```text
+Meil on 6,2-liitrine V8 mootor.
+```
+
+51
+00:02:02,920 --> 00:02:05,480
+460 hobujõu.
+
+52
+00:02:05,520 --> 00:02:08,000
+ja sama arv pöördemomendiga.
+
+53
+00:02:08,040 --> 00:02:11,280
+Mida see tähendab, siis igas ülekandes...
+
+54
+00:02:08,040 --> 00:02:11,280
+igas olukorras,
+
+55
+00:02:11,320 --> 00:02:14,800
+sa vajutad gaasi.
+
+56
+00:02:11,320 --> 00:02:14,800
+ja siis juhtuvad asjad.
+
+57
+00:02:19,680 --> 00:02:23,640
+(Naerab) Seal on see müra.
+
+58
+00:02:23,680 --> 00:02:24,840
+[mootori pöörded tõusevad]
+
+59
+00:02:27,040 --> 00:02:29,360
+See on see lükatus selja peale.
+
+60
+00:02:29,400 --> 00:02:33,040
+Sada nullist saja juurde – kõik käib kiiresti.
+
+61
+00:02:29,400 --> 00:02:33,040
+vähem kui neljas sekundis.
+
+62
+00:02:33,680 --> 00:02:36,320
+Kõrgeim kiirus: 190.
+
+63
+00:02:36,360 --> 00:02:37,600
+(naerdes)
+
+64
+00:02:39,200 --> 00:02:42,880
+Miks need jõmpsakad ja igavad isikud?
+
+65
+00:02:39,200 --> 00:02:42,880
+Miks need nunnad ja igavad inimesed ei saa aru, mis siin toimub?
+
+66
+00:02:42,920 --> 00:02:46,720
+Ma mõtlen, James Mayile meeldib auto.
+
+67
+00:02:42,920 --> 00:02:46,720
+mis paneks tema jaoks kõik paika.
+
+68
+00:02:46,760 --> 00:02:48,720
+See oleks nagu SodaStream.
+
+69
+00:02:46,760 --> 00:02:48,720
+oma aluspesuga.
+
+70
+00:02:52,640 --> 00:02:55,640
+"Vette" maksab 65 000 naela.
+
+71
+00:02:55,680 --> 00:02:57,720
+mis võib-olla tundub palju.
+
+72
+00:02:57,760 --> 00:03:00,400
+kui võrlda seda teiste konkurentidega.
+
+73
+00:02:57,760 --> 00:03:00,400
+võrdluses selle konkurentidega.
+
+74
+00:03:00,440 --> 00:03:01,960
+seda teist poolt ookeani.
+
+75
+00:03:03,760 --> 00:03:07,560
+Et Jaguar F-Type V8 soetada,
+
+76
+00:03:03,760 --> 00:03:07,560
+sellise auto saamiseks on vaja veel 20 000 naela.
+
+77
+00:03:07,600 --> 00:03:10,680
+Audi R8 V8 mudel,
+
+78
+00:03:07,600 --> 00:03:10,680
+veel 30 000 naela.
+
+79
+00:03:10,720 --> 00:03:14,600
+911 V8? See ei ole võimalik...
+
+80
+00:03:10,720 --> 00:03:14,600
+Sellist asja ei ole.
+
+81
+00:03:14,640 --> 00:03:17,160
+Aga et sellele lähedale jõuda…
+
+82
+00:03:14,640 --> 00:03:17,160
+samas jõudlusel nagu 911-l.
+
+83
+00:03:17,200 --> 00:03:19,760
+teile on vaja juurde veel 25 000 naela.
+
+84
+00:03:19,800 --> 00:03:24,400
+Tegelikult, kui te otsite...
+
+85
+00:03:19,800 --> 00:03:24,400
+et saada sama jõudlusega Porsche 911 mudelit, peate lisaks kulutama veel 25 000 naela.
+
+86
+00:03:19,800 --> 00:03:24,400
+sama raha eest.
+
+87
+00:03:24,440 --> 00:03:25,840
+sa seda vaatad.
+
+88
+00:03:30,600 --> 00:03:34,320
+See on uusim versioon.
+
+89
+00:03:30,600 --> 00:03:34,320
+911 mudeli väiksem vend.
+
+90
+00:03:35,480 --> 00:03:38,120
+Porsche Cayman GTS.
+
+91
+00:03:43,520 --> 00:03:45,320
+Aga siin on asi.
+
+92
+00:03:45,360 --> 00:03:48,320
+Kuigi Cayman...
+
+93
+00:03:45,360 --> 00:03:48,320
+maksab umbes sama palju.
+
+94
+00:03:45,360 --> 00:03:48,320
+kui ka Corvette'i puhul.
+
+95
+00:03:48,360 --> 00:03:51,720
+kui jutt on jõust.
+
+96
+00:03:48,360 --> 00:03:51,720
+võimsuse osas on nende vahe aga väga suur.
+
+97
+00:03:48,360 --> 00:03:51,720
+nende vahe on väga suur.
+
+98
+00:03:51,760 --> 00:03:54,040
+piisavalt suur, et see tervenisti ära mahutada.
+
+99
+00:03:51,760 --> 00:03:54,040
+Suurtanker.
+
+100
+00:03:54,080 --> 00:03:56,800
+Ameerika Ühendriikide supertanker.
+
+101
+00:03:56,840 --> 00:03:59,280
+Sellel on 336 hobujõu suurusega pidurdusjõud.
+
+102
+00:03:59,320 --> 00:04:02,000
+võrreldes...
+
+103
+00:03:59,320 --> 00:04:02,000
+Corvette'i puhul on see 460.
+
+104
+00:04:02,040 --> 00:04:05,040
+Ja sellel on 185 vähem pöördemomenti.
+
+105
+00:04:06,960 --> 00:04:10,200
+Kõik see tähendab seda, et...
+
+106
+00:04:06,960 --> 00:04:10,200
+see on täiesti mõttetu.
+
+107
+00:04:10,240 --> 00:04:12,840
+Me peame sõiduautode võistlust.
+
+108
+00:04:12,880 --> 00:04:16,960
+Tegemegi seda ikkagi.
+
+109
+00:04:12,880 --> 00:04:16,960
+…kuna oleme targad.
+
+110
+00:04:12,880 --> 00:04:16,960
+ja põhjalikud.
+
+111
+00:04:17,000 --> 00:04:20,160
+-(MOOTORID KARJUVAD)
+
+112
+00:04:17,000 --> 00:04:20,160
+-Kolm, kaks, üks...
+
+113
+00:04:20,760 --> 00:04:22,320
+Mine!
+
+114
+00:04:22,360 --> 00:04:24,360
+(rehvid hõikavad)
+
+115
+00:04:28,720 --> 00:04:32,920
+Ja siin me oleme. Nagu ma ütlesin,
+
+116
+00:04:28,720 --> 00:04:32,920
+täiesti mõttetust.
+
+117
+00:04:36,240 --> 00:04:38,800
+Aga tegelikult on asi nii.
+
+118
+00:04:36,240 --> 00:04:38,800
+Omaette vaadelduna.
+
+119
+00:04:38,840 --> 00:04:43,600
+Cayman GTS on...
+
+120
+00:04:38,840 --> 00:04:43,600
+väike, aga suurepärane.
+
+121
+00:04:38,840 --> 00:04:43,600
+väike asi.
+
+122
+00:04:47,360 --> 00:04:49,200
+Täielikult täiuslik insenerilahendus.
+
+123
+00:04:50,440 --> 00:04:51,440
+Täielik täpsus.
+
+124
+00:04:55,400 --> 00:04:58,800
+See on lihtsalt selline tunne.
+
+125
+00:04:55,400 --> 00:04:58,800
+elav, käsitöökindel ja kompaktne.
+
+126
+00:04:58,840 --> 00:05:03,440
+Need kõik sõnad...
+
+127
+00:04:58,840 --> 00:05:03,440
+tasakaal, elegants.
+
+128
+00:04:58,840 --> 00:05:03,440
+eeldatavus, manööverdamisvõime.
+
+129
+00:05:03,480 --> 00:05:06,720
+kõik need head, ilusad ja maitsvad asjad.
+
+130
+00:05:03,480 --> 00:05:06,720
+igasuguseid omadusi, kõik on seal olemas.
+
+131
+00:05:09,320 --> 00:05:14,280
+Täiuslik näide sellest, mida...
+
+132
+00:05:09,320 --> 00:05:14,280
+mida tähendab Euroopa sportauto.
+
+133
+00:05:09,320 --> 00:05:14,280
+peaks olema.
+
+134
+00:05:16,680 --> 00:05:19,920
+See on jõuline näide.
+
+135
+00:05:16,680 --> 00:05:19,920
+millest on võimalik).
+
+136
+00:05:19,960 --> 00:05:22,240
+mida hea inseneritöö endast kujutab.
+
+
+137
+00:05:19,960 --> 00:05:22,240
+peaks olema.
+
+138
+00:05:22,280 --> 00:05:25,120
+ja miks just Euroopas, mitte Ameerikas.
+
+139
+00:05:25,160 --> 00:05:29,200
+kus alati pidi pöörduma.
+
+140
+00:05:25,160 --> 00:05:29,200
+– sellistele autodele, mis on tõelised sportautod."
+
+141
+00:05:30,480 --> 00:05:31,840
+Nüüd oleme siin.
+
+142
+00:05:31,880 --> 00:05:35,280
+sel hetkel testisüsteemi kasutades.
+
+143
+00:05:31,880 --> 00:05:35,280
+kus ma tavaliselt ütlenks,
+
+144
+00:05:35,320 --> 00:05:37,360
+"Corvette'i välimus on imeline."
+
+145
+00:05:37,400 --> 00:05:39,560
+"hea hinnaga,"
+
+146
+00:05:37,400 --> 00:05:39,560
+aga...
+
+147
+00:05:39,600 --> 00:05:43,240
+Ja siis ma sügavalt ohkan.
+
+148
+00:05:39,600 --> 00:05:43,240
+(sügavalt oigates)
+
+149
+00:05:43,280 --> 00:05:44,560
+"Kahjuks ei suuda Porsche'i puhul seda öelda."
+
+150
+00:05:43,280 --> 00:05:44,560
+Porsche'i juures kahjuks...
+
+151
+00:05:44,600 --> 00:05:47,640
+"Corvette'i mudeliga."
+
+
+152
+00:05:44,600 --> 00:05:47,640
+"seda lihtsalt ei suuda välja kannatada."
+
+153
+00:05:47,680 --> 00:05:50,640
+Siis me mängime natuke.
+
+154
+00:05:47,680 --> 00:05:50,640
+kui mängiks vaikne muusika ja ma ütlen,...
+
+155
+00:05:47,680 --> 00:05:50,640
+"Tagasi stuudiosse."
+
+156
+00:05:52,360 --> 00:05:56,960
+Aga ei, seekord me nii ei tee.
+
+157
+00:05:52,360 --> 00:05:56,960
+Me ei lähe stuudiosse.
+
+158
+00:05:57,000 --> 00:05:59,600
+Me läheme tagasi.
+
+159
+00:05:57,000 --> 00:05:59,600
+tagasi Corvette'i juurde.
+
+160
+00:05:59,640 --> 00:06:03,280
+Sest see ei ole enam...
+
+161
+00:05:59,640 --> 00:06:03,280
+mingi maapiirkonna jõmblus.
+
+162
+00:06:03,320 --> 00:06:06,600
+Sellel on vedrustus.
+
+163
+00:06:03,320 --> 00:06:06,600
+valmistatud süsinikkiust.
+
+164
+00:06:06,640 --> 00:06:11,480
+Selle istmete raamid on valmistatud
+
+165
+00:06:06,640 --> 00:06:11,480
+...valmistatud ülalkest magneesiumist.
+
+166
+00:06:11,520 --> 00:06:13,480
+Sellel on erinevad sõiduprogrammid, nagu Ferraril.
+
+167
+00:06:11,520 --> 00:06:13,480
+sõidu režiimid.
+
+168
+00:06:13,520 --> 00:06:15,440
+nagu Ferraris.
+
+169
+00:06:15,480 --> 00:06:19,640
+Ja see suur, valjuhäälne kaheksa silindriga mootor.
+
+170
+00:06:15,480 --> 00:06:19,640
+võib sulgeda.
+
+171
+00:06:15,480 --> 00:06:19,640
+poole oma silindritest.
+
+172
+00:06:19,680 --> 00:06:21,920
+et see oleks ökonoomisem.
+
+173
+00:06:24,480 --> 00:06:28,280
+Varasemad Corvette'i alustel olevad osad.
+
+174
+00:06:24,480 --> 00:06:28,280
+olid päris lähedal.
+
+175
+00:06:24,480 --> 00:06:28,280
+nendest oluliselt erinev.
+
+176
+00:06:31,720 --> 00:06:34,400
+Aga see on täiesti uus.
+
+177
+00:06:31,720 --> 00:06:34,400
+kõrgtehnoloogiline, kleepeenete abil kokku pandud mudel.
+
+178
+00:06:31,720 --> 00:06:34,400
+alumiiniumist konstruktsioon.
+
+179
+00:06:34,440 --> 00:06:37,120
+mis suudab olla
+
+180
+00:06:34,440 --> 00:06:37,120
+kergem ja jäigem.
+
+181
+00:06:38,520 --> 00:06:40,040
+Parim on see, et see on välja töötatud...
+
+182
+00:06:40,080 --> 00:06:43,040
+Nürburgringi ringrajal.
+
+183
+00:06:40,080 --> 00:06:43,040
+mitte Nagvilis.
+
+184
+00:06:43,080 --> 00:06:45,920
+See tähendab, et...
+
+185
+00:06:43,080 --> 00:06:45,920
+nurgataolisus on...
+
+186
+00:06:45,960 --> 00:06:48,000
+Noh, see on üsna erakordne sündmus.
+
+187
+00:06:48,720 --> 00:06:49,800
+(rehvid hõikavad)
+
+188
+00:06:56,400 --> 00:06:58,640
+Kogu see jõud...
+
+189
+00:06:56,400 --> 00:06:58,640
+kogu see massiivsus.
+
+190
+00:06:58,680 --> 00:07:00,960
+aga see on ikkagi...
+
+191
+00:06:58,680 --> 00:07:00,960
+põhimõtteliselt tammitav.
+
+192
+00:07:03,760 --> 00:07:06,040
+Kas sa mäletad, kui sul oli...
+
+193
+00:07:03,760 --> 00:07:06,040
+Kas sa mäletad, kui sul oli lapsepõlves elevant nagu lemmikloom?
+
+194
+00:07:06,080 --> 00:07:07,320
+Nii see ongi.
+
+195
+00:07:09,200 --> 00:07:11,240
+See on "Sweet Home Alabama".
+
+196
+00:07:11,280 --> 00:07:13,360
+See on nagu tüdrukud, kes kannavad teksist lühikesi pükse.
+
+197
+00:07:19,320 --> 00:07:23,000
+Jah! See on kõik.
+
+198
+00:07:19,320 --> 00:07:23,000
+Ma tahtsin, et see nii oleks.
+
+199
+00:07:23,040 --> 00:07:28,440
+Aga mis on kõige tähtsam...
+
+200
+00:07:23,040 --> 00:07:28,440
+on nagu Porsche oleks teaduslabor.
+
+201
+00:07:28,480 --> 00:07:34,320
+Olgu meil selles suhtes täielik selgus.
+
+202
+00:07:28,480 --> 00:07:34,320
+see pole nii, et Corvette oleks…
+
+203
+00:07:28,480 --> 00:07:34,320
+ka see pole kaotanut oma lihtsameelsust.
+
+204
+00:07:34,360 --> 00:07:36,840
+Kui Porsche on laboratoorium,
+
+205
+00:07:34,360 --> 00:07:36,840
+täis lasereid.
+
+206
+00:07:36,880 --> 00:07:39,280
+See on nagu Lääne-Ameerika stiilis baariklubi.
+
+207
+00:07:43,080 --> 00:07:44,920
+Aga sa ei pea seda ütlema.
+
+208
+00:07:43,080 --> 00:07:44,920
+Selle pärast pole vaja vabandada.
+
+209
+00:07:44,960 --> 00:07:47,120
+Sa ei pea seda ütlema.
+
+210
+00:07:44,960 --> 00:07:47,120
+"No matter, vähemalt see on odav."
+
+211
+00:07:47,160 --> 00:07:48,680
+Või siis: "See on parim..."
+
+212
+00:07:47,160 --> 00:07:48,680
+nende poolt tehtav."
+
+213
+00:07:49,400 --> 00:07:51,120
+See on lihtsalt hea.
+
+214
+00:07:52,880 --> 00:07:57,400
+Tegelikult on see...
+
+215
+00:07:52,880 --> 00:07:57,400
+parim sportauto üldse.
+
+216
+00:07:52,880 --> 00:07:57,400
+mis on pärit Ameerikast.
+
+217
+00:07:57,440 --> 00:08:01,040
+Ja seekord ei saa sa sellega midagi teha.
+
+218
+00:07:57,440 --> 00:08:01,040
+ja seekord sa ei saa sellele midagi vastata.
+
+219
+00:08:09,360 --> 00:08:10,520
+See on hea auto.
+
+220
+00:08:11,320 --> 00:08:13,520
+See on tüütav.
+
+221
+00:08:13,560 --> 00:08:18,600
+See on tüütu, sest...
+
+222
+00:08:13,560 --> 00:08:18,600
+teisest kord.
+
+223
+00:08:13,560 --> 00:08:18,600
+selles sarjas.
+
+224
+00:08:18,640 --> 00:08:21,720
+Ma olen sinuga nõus...
+
+225
+00:08:18,640 --> 00:08:21,720
+Tegelikult, teisel korral.
+
+226
+00:08:18,640 --> 00:08:21,720
+Minu elus olen ma teiega esimest korda nõus.
+
+227
+00:08:21,760 --> 00:08:24,400
+Mis, sa ei kavatse?
+
+228
+00:08:21,760 --> 00:08:24,400
+- minu nimi on Billy Bob Hammond,
+
+229
+00:08:21,760 --> 00:08:24,400
+kas sa oled?
+
+230
+00:08:24,440 --> 00:08:27,080
+– Ei, ja ma ei kavatse ka.
+
+231
+00:08:24,440 --> 00:08:27,080
+– Ma ei maini seda jopet, mitte mingil juhul.
+
+232
+00:08:24,440 --> 00:08:27,080
+– Kas sa ei ole?
+
+233
+00:08:27,120 --> 00:08:29,280
+Ei, ma saan, ma tean.
+
+234
+00:08:27,120 --> 00:08:29,280
+sa tahad, et ma seda teen.
+
+235
+00:08:27,120 --> 00:08:29,280
+aga ma ei tee seda.
+
+236
+00:08:29,320 --> 00:08:31,600
+Te teate ju, mida ma...
+
+237
+00:08:29,320 --> 00:08:31,600
+kõigepealt teen seda.
+
+238
+00:08:29,320 --> 00:08:31,600
+ja ma küsin sulle seda.
+
+239
+00:08:31,640 --> 00:08:34,520
+Millest neist kahest?
+
+240
+00:08:31,640 --> 00:08:34,520
+millest te valiksite?
+
+241
+00:08:34,560 --> 00:08:37,160
+Ah, näete, just seda mõtlesingi.
+
+242
+00:08:34,560 --> 00:08:37,160
+tegelikult väga raske küsimus.
+
+243
+00:08:37,200 --> 00:08:39,640
+-kuna need mõlemad...
+
+244
+00:08:37,200 --> 00:08:39,640
+– See on väga hea sõita.
+
+245
+00:08:37,200 --> 00:08:39,640
+Nad on küll.
+
+246
+00:08:39,680 --> 00:08:44,120
+Seda ei saa vaidlustada.
+
+247
+00:08:39,680 --> 00:08:44,120
+Aga ma ei tea, ma ei usu...
+
+248
+00:08:39,680 --> 00:08:44,120
+Porsche näeb väga hea välja.
+
+249
+00:08:44,160 --> 00:08:47,120
+– See näeb lihtsalt vana ja ilmatu välja.
+
+250
+00:08:44,160 --> 00:08:47,120
+– See on nii. Seega ma ütleksin...
+
+251
+00:08:44,160 --> 00:08:47,120
+Ma võtaksin pigem Corvetteri.
+
+252
+00:08:47,160 --> 00:08:48,640
+Probleem on selles, et…
+
+253
+00:08:47,160 --> 00:08:48,640
+aga Corvette'i puhul on teine asi,
+
+254
+00:08:48,680 --> 00:08:51,040
+aga sa ei pea seda kahetsama, nagu sa ütlesid, vaid pead selle selgitada.
+
+
+255
+00:08:48,680 --> 00:08:51,040
+vabandage selle eest, nagu te ütlesite.
+
+256
+00:08:51,080 --> 00:08:52,760
+aga sa peaksid seda selgitama.
+
+257
+00:08:51,080 --> 00:08:52,760
+et see selgitada oleks vaja.
+
+258
+00:08:52,800 --> 00:08:54,360
+Sa peaksid selle selgitama.
+
+259
+00:08:52,800 --> 00:08:54,360
+ära läheks ringi seda jutustama,
+
+260
+00:08:54,400 --> 00:08:56,960
+"Või on seal magneesiumist istmed?"
+
+261
+00:08:54,400 --> 00:08:56,960
+ja südametunnistusega magneesiumiistmed,"
+
+262
+00:08:57,000 --> 00:08:59,840
+või kõik arvaksid lihtsalt, et...
+
+263
+00:08:57,000 --> 00:08:59,840
+sa olid lihtsalt ülbe.
+
+264
+00:08:59,880 --> 00:09:03,720
+Jah, see oleks nagu...
+
+265
+00:08:59,880 --> 00:09:03,720
+– kodus on ju ikka mingi tantsijatüdruk.
+
+266
+00:08:59,880 --> 00:09:03,720
+et kohtuda sinu emaga.
+
+267
+00:09:03,760 --> 00:09:07,080
+Ütleksime ju nii,
+
+268
+00:09:03,760 --> 00:09:07,080
+"Ei, tal on keskharidustase!"
+
+269
+00:09:07,120 --> 00:09:10,560
+Sa oled täiesti õige.
+
+270
+00:09:07,120 --> 00:09:10,560
+Nii et siin me oleme.
+
+271
+00:09:07,120 --> 00:09:10,560
+on valik kahe vahel.
+
+272
+00:09:10,600 --> 00:09:15,320
+ja üks pisut räpane raamatukogu töötaja.
+
+273
+00:09:10,600 --> 00:09:15,320
+ja üks leidlik stuudiotantsija.
+
+274
+00:09:15,360 --> 00:09:16,760
+Jah. Jah.
+
+275
+00:09:16,800 --> 00:09:19,200
+Nüüd vaatame, mis välja tuleb.
+
+276
+00:09:16,800 --> 00:09:19,200
+mis on kõige kiirem.
+
+277
+00:09:16,800 --> 00:09:19,200
+meie ringrajal.
+
+278
+00:09:19,240 --> 00:09:23,960
+Muidugi, see tähendab, et...
+
+279
+00:09:19,240 --> 00:09:23,960
+nende üle andmine.
+
+280
+00:09:19,240 --> 00:09:23,960
+et need jõuaks meie rahulikuma sõitja kätte.
+
+281
+00:09:24,000 --> 00:09:28,960
+Mõned väidavad, et...
+
+282
+00:09:24,000 --> 00:09:28,960
+tema lemmikkõrs.
+
+283
+00:09:24,000 --> 00:09:28,960
+on kartul.
+
+284
+00:09:29,000 --> 00:09:32,560
+ja kuigi...
+
+285
+00:09:29,000 --> 00:09:32,560
+ta on nüüdseks näinud.
+
+286
+00:09:29,000 --> 00:09:32,560
+Viiskümme halli tooni.
+
+287
+00:09:32,600 --> 00:09:37,680
+ta arutleb ikka veel...
+
+288
+00:09:32,600 --> 00:09:37,680
+BDSM on juhend, mis õpetab sõitmist.
+
+289
+00:09:37,720 --> 00:09:39,760
+Me ei tea midagi muud.
+
+290
+00:09:37,720 --> 00:09:39,760
+tema nimeks on The Stig!
+
+291
+00:09:41,560 --> 00:09:44,320
+KLARKSUN: Ja näh, nad on juba käimas!
+
+292
+00:09:41,560 --> 00:09:44,320
+Kaks enesekindlat stardiüritust.
+
+293
+00:09:44,360 --> 00:09:47,240
+Porsche'il on mootor keskel.
+
+294
+00:09:44,360 --> 00:09:47,240
+Corvette'il on transmissioon ja sidur ühes pakendis.
+
+295
+00:09:47,280 --> 00:09:49,920
+Mõlemal on selgelt...
+
+296
+00:09:47,280 --> 00:09:49,920
+hea pidur alates stardist.
+
+297
+00:09:49,960 --> 00:09:55,040
+See on nagu skalpelli ja...
+
+298
+00:09:49,960 --> 00:09:55,040
+kõik on kiire, see on esimene kurv.
+Ja... oh, wow,
+Porsche libiseb.
+
+(naer)
+hammikas lendab läbi õhu.
+
+299
+00:09:49,960 --> 00:09:55,040
+esimesse kurvi.
+
+300
+00:09:55,080 --> 00:09:58,280
+Ja... Oh, vau!
+
+301
+00:09:55,080 --> 00:09:58,280
+see on Porsche.
+
+302
+00:09:55,080 --> 00:09:58,280
+see libisemast.
+
+303
+00:09:58,320 --> 00:10:04,080
+(Esineb Carpentersi ansambli muusikat.)
+
+304
+00:09:58,320 --> 00:10:04,080
+Seal on selline vaikne hetk.
+
+305
+00:09:58,320 --> 00:10:04,080
+(RAADIOST KUULUB MUUSIKA)
+
+306
+00:10:04,120 --> 00:10:07,160
+CLARKSON: Näib, et...
+
+307
+00:10:04,120 --> 00:10:07,160
+tagurdab ringi.
+
+308
+00:10:04,120 --> 00:10:07,160
+Corvette'is.
+
+309
+00:10:07,200 --> 00:10:11,720
+Olge ettevaatlikud, läbime Chicagoga.
+
+310
+00:10:07,200 --> 00:10:11,720
+jälleen kord on tegemist Caymaniga.
+
+311
+00:10:07,200 --> 00:10:11,720
+see, kuidas selle sabaga käitub.
+
+312
+00:10:11,760 --> 00:10:15,560
+Šokk ja imetlus, Chevrolet!
+
+313
+00:10:11,760 --> 00:10:15,560
+täielikult kontrolli all.
+
+314
+00:10:15,600 --> 00:10:17,840
+See on tõeline proovikivi.
+
+315
+00:10:15,600 --> 00:10:17,840
+mille tagumik on pehmelt sõeljal.
+
+316
+00:10:17,880 --> 00:10:20,360
+Jah, Corvette on...
+
+317
+00:10:17,880 --> 00:10:20,360
+küllap natuke libisema hakkab.
+
+318
+00:10:20,400 --> 00:10:24,160
+nagu The Stig laskub valla.
+
+319
+00:10:20,400 --> 00:10:24,160
+460 hobujõu vääriline triip.
+
+320
+00:10:24,200 --> 00:10:28,000
+(ANSAMMESTI MUUSIKA)
+
+321
+00:10:24,200 --> 00:10:28,000
+Seal on mingine vaiksus valitsenud.
+
+322
+00:10:24,200 --> 00:10:28,000
+(JÄRGUB)
+
+323
+00:10:28,040 --> 00:10:29,800
+Olge siis valmis.
+
+324
+00:10:28,040 --> 00:10:29,800
+Jätkusuutlikkus.
+
+325
+00:10:29,840 --> 00:10:33,240
+Porsche vajab natuke...
+
+326
+00:10:29,840 --> 00:10:33,240
+Õigeaegne korrigeeriv pöörde algus.
+
+327
+00:10:29,840 --> 00:10:33,240
+See on üllatus.
+
+328
+00:10:34,920 --> 00:10:38,680
+Okei, nüüd me läheneme.
+
+329
+00:10:34,920 --> 00:10:38,680
+Alles kaks kurvi jäänud.
+
+330
+00:10:38,720 --> 00:10:42,520
+Äge pidurdus, probleeme ei teki.
+
+331
+00:10:38,720 --> 00:10:42,520
+kõigest ühest küljest.
+
+332
+00:10:38,720 --> 00:10:42,520
+Atlandi ookeani rannikul.
+
+333
+00:10:42,560 --> 00:10:47,200
+Sisse Gamboni juurde...
+
+334
+00:10:42,560 --> 00:10:47,200
+Jah, Cayman libiseb jälle.
+
+335
+00:10:42,560 --> 00:10:47,200
+ja üle joone!
+
+336
+00:10:49,360 --> 00:10:50,800
+Olge valmis.
+
+337
+00:10:49,360 --> 00:10:50,800
+Jah.
+
+338
+00:10:51,520 --> 00:10:52,880
+Mul on ajad olemas.
+
+339
+00:10:54,800 --> 00:10:59,760
+Selgetuseta.
+
+340
+00:10:54,800 --> 00:10:59,760
+Porsche'i raamatukoguhoidja.
+
+341
+00:10:54,800 --> 00:10:59,760
+1:21,6.
+
+342
+00:10:59,800 --> 00:11:02,480
+Nii, ei ole paha, sama nagu...
+
+343
+00:10:59,800 --> 00:11:02,480
+Audi R8 V10.
+
+344
+00:11:02,520 --> 00:11:03,520
+HAMMOND: See oli kiire, jah.
+
+345
+00:11:03,560 --> 00:11:05,840
+Aga…
+
+346
+00:11:03,560 --> 00:11:05,840
+(köhib)
+
+347
+00:11:05,880 --> 00:11:09,040
+Kaval tantsijatirts.
+
+348
+00:11:05,880 --> 00:11:09,040
+Aga...
+(kähed selgeks tegemine)
+See nutikas tantsijatüdruk,
+
+349
+00:11:09,080 --> 00:11:10,440
+Ei ole võimalik, see…
+
+350
+00:11:10,480 --> 00:11:12,960
+Vaata seda!
+
+351
+00:11:10,480 --> 00:11:12,960
+sama nagu Porsche Carrera GT.
+
+352
+00:11:13,000 --> 00:11:15,000
+See on väga, väga kiire auto.
+
+353
+00:11:15,040 --> 00:11:16,960
+Seal on midagi juhtunud.
+
+354
+00:11:15,040 --> 00:11:16,960
+nõges on jõud.
+
+355
+00:11:17,000 --> 00:11:19,240
+See on midagi.
+
+356
+00:11:17,000 --> 00:11:19,240
+Midagi väga strange on juhtunud!
+
+357
+00:11:19,280 --> 00:11:24,720
+Igatahes, uudised.
+
+358
+00:11:19,280 --> 00:11:24,720
+ja me alustame sellest.
+
+359
+00:11:19,280 --> 00:11:24,720
+uus Ford Focus RS.
+
+360
+00:11:24,760 --> 00:11:29,320
+Tal on 320 hobujõudu.
+
+361
+00:11:24,760 --> 00:11:29,320
+2,3-liitrise mootoriga.
+
+362
+00:11:24,760 --> 00:11:29,320
+ja kõige tähtsam on see, et sellel on nelikvedu.
+
+363
+00:11:29,360 --> 00:11:32,800
+ja kõige tähtsam on see, et...
+
+364
+00:11:29,360 --> 00:11:32,800
+nelja veosüsteemiga auto.
+
+365
+00:11:32,840 --> 00:11:34,840
+-Sa tead ju, mida ma mõtlen?
+
+366
+00:11:32,840 --> 00:11:34,840
+kas see ongi nii, kas pole?
+
+367
+00:11:32,840 --> 00:11:34,840
+-Hmm-hmm.
+
+368
+00:11:34,880 --> 00:11:37,880
+See on tagasitulek.
+
+369
+00:11:34,880 --> 00:11:37,880
+Escort Coswortsi tagasitulek.
+
+370
+00:11:37,920 --> 00:11:39,560
+-Jah.
+
+371
+00:11:37,920 --> 00:11:39,560
+- Nüüd on tore aeg.
+
+372
+00:11:39,600 --> 00:11:43,400
+See on tõsi, ma olen põnevil.
+
+373
+00:11:39,600 --> 00:11:43,400
+aga see ei pruugi nii hea olla.
+
+374
+00:11:39,600 --> 00:11:43,400
+kui Fiesta ST.
+
+375
+00:11:43,440 --> 00:11:44,720
+Noh, see juhtub.
+
+376
+00:11:43,440 --> 00:11:44,720
+Ei, ei lähe.
+
+377
+00:11:44,760 --> 00:11:45,840
+– See on küll nii!
+
+378
+00:11:44,760 --> 00:11:45,840
+–Fiesta on…
+
+379
+00:11:45,880 --> 00:11:47,400
+320 hobujõudu!
+
+380
+00:11:47,440 --> 00:11:50,440
+Ma tean, aga see käib selle kohta.
+
+381
+00:11:47,440 --> 00:11:50,440
+kogemuse puhtus.
+
+382
+00:11:47,440 --> 00:11:50,440
+meie kompaktmudelis.
+
+383
+00:11:50,480 --> 00:11:54,080
+Nagu näib, on see nii.
+
+384
+00:11:50,480 --> 00:11:54,080
+vastavalt ühe allika andmetele.
+
+385
+00:11:50,480 --> 00:11:54,080
+Ameerikas,
+
+386
+00:11:54,120 --> 00:11:55,800
+\- sellele "drift" nupule vajutades.
+
+387
+00:11:54,120 --> 00:11:55,800
+-Mis?
+
+388
+00:11:55,840 --> 00:11:58,840
+"Drift"-nupp. Sellele vajutades...
+
+389
+00:11:55,840 --> 00:11:58,840
+Isegi tema suudab sellega trikitada.
+
+390
+00:11:58,880 --> 00:12:01,120
+-Mida? Sa vajutad seda?
+
+391
+00:11:58,880 --> 00:12:01,120
+ja see lihtsalt libistab?
+
+392
+00:11:58,880 --> 00:12:01,120
+- Jah.
+
+393
+00:12:01,160 --> 00:12:02,880
+-Ma ei taha triivitada.
+
+394
+00:12:01,160 --> 00:12:02,880
+– Sa teed seda küll!
+
+395
+00:12:02,920 --> 00:12:05,960
+Ma ei taha. Driftimine on teiste jaoks.
+
+396
+00:12:02,920 --> 00:12:05,960
+need. Drifting on mõeldud...
+
+397
+00:12:06,000 --> 00:12:09,240
+See ei ole nii.
+
+398
+00:12:06,000 --> 00:12:09,240
+See on paaritusritus.
+
+399
+00:12:06,000 --> 00:12:09,240
+Tüdrukud armastavad seda.
+
+400
+00:12:09,280 --> 00:12:11,360
+Jah, tal on õigus!
+
+401
+00:12:09,280 --> 00:12:11,360
+Teie teate ju, et see on nii.
+
+402
+00:12:11,400 --> 00:12:13,720
+See on nagu oleks...
+
+403
+00:12:11,400 --> 00:12:13,720
+tõeline luksus.
+
+404
+00:12:18,120 --> 00:12:19,120
+See olen mina ise.
+
+405
+00:12:19,800 --> 00:12:21,120
+Ross-on-Wye'is.
+
+406
+00:12:23,000 --> 00:12:24,680
+Oh, nüüd siis...
+
+407
+00:12:24,720 --> 00:12:27,360
+-Te teate ju Apple'i, firma, mis toodab
+
+408
+00:12:24,720 --> 00:12:27,360
+– Kas te tunnete Applet, mis toodab arvuteid ja telefone?
+
+409
+00:12:24,720 --> 00:12:27,360
+- Jah.
+
+410
+00:12:27,400 --> 00:12:29,320
+Ilma mingil põhjusel näib, et nad...
+
+411
+00:12:27,400 --> 00:12:29,320
+– Nad töötavad autoga.
+
+412
+00:12:29,360 --> 00:12:30,400
+-Tõesti?
+
+413
+00:12:29,360 --> 00:12:30,400
+-Jah.
+
+414
+00:12:30,440 --> 00:12:33,000
+Kas sellega kaasneb?
+
+415
+00:12:30,440 --> 00:12:33,000
+ennustav roolisüsteem?
+
+416
+00:12:33,040 --> 00:12:34,080
+See on ju ebatavaline.
+
+417
+00:12:33,040 --> 00:12:34,080
+kas see toimib?
+
+418
+00:12:34,120 --> 00:12:36,040
+Ma ei ole kindel.
+
+419
+00:12:34,120 --> 00:12:36,040
+et see toimiks,
+
+420
+00:12:36,080 --> 00:12:39,480
+kui sa seda iga kord kasutad.
+
+421
+00:12:36,080 --> 00:12:39,480
+"Mis on sinu iTunesi salasõna?"
+Ja siis see paneb sind sellise salasõna kasutama,
+mida sa ei suuda meeles pidada.
+
+(Ülaltoodud tekst on ainult kontekstiks.)
+
+get in it, it'll say,
+sinna sisse logima, ütleb see.
+
+422
+00:12:36,080 --> 00:12:39,480
+"Mis on sinu iTunesi salasõna?"
+
+423
+00:12:39,520 --> 00:12:42,920
+Ja siis see sind petma hakkab.
+
+424
+00:12:39,520 --> 00:12:42,920
+mis on sinu iTunesi salasõna?"
+Ja siis see nõutab seda sinult.
+
+425
+00:12:39,520 --> 00:12:42,920
+kui sa seda ei mäleta.
+
+426
+00:12:42,960 --> 00:12:44,920
+Siis läheb kõik valesti.
+
+427
+00:12:42,960 --> 00:12:44,920
+ja siis sa helistad neile.
+
+428
+00:12:42,960 --> 00:12:44,920
+ja siis nad ütlevad:
+
+429
+00:12:44,960 --> 00:12:47,520
+"Ah, see on sinu süü."
+
+430
+00:12:44,960 --> 00:12:47,520
+Sa hoiad seda valesti."
+
+431
+00:12:47,560 --> 00:12:52,760
+Ja siis ühel päeval saadetakse see.
+
+432
+00:12:47,560 --> 00:12:52,760
+ja siis nad ütlevad: "Oh, see on sinu süü. Sa hoiad seda valesti." Ja ühel päeval saadab see...
+
+
+433
+00:12:47,560 --> 00:12:52,760
+…et peate need muutma."
+
+434
+00:12:52,800 --> 00:12:56,440
+Sa oleksid õige.
+
+435
+00:12:52,800 --> 00:12:56,440
+paroolid, sest...
+
+436
+00:12:52,800 --> 00:12:56,440
+Apple'i iTunes'is, teisel päeval...
+
+437
+00:12:56,480 --> 00:12:59,960
+"Sa pead seda muutma," ütles ta mulle.
+
+438
+00:12:56,480 --> 00:12:59,960
+sinu parool. See on liiga lihtne ära arvata.
+
+439
+00:12:56,480 --> 00:12:59,960
+see on liiga lihtne ära arvata."
+
+440
+00:13:00,000 --> 00:13:03,120
+Ja ma mõtlesin: "Kuidas keegi seda ära arvata saaks?"
+
+441
+00:13:00,000 --> 00:13:03,120
+kui keegi üldse seda ära arvata suudab?
+
+442
+00:13:00,000 --> 00:13:03,120
+"kas tõesti 'carrrot29'? See on ju…".
+
+443
+00:13:05,160 --> 00:13:08,440
+Nüüd ütle ma sulle midagi.
+
+444
+00:13:05,160 --> 00:13:08,440
+Seal on üldvalimised.
+
+445
+00:13:05,160 --> 00:13:08,440
+Mis juhtub, ehk olete kuulnud.
+
+446
+00:13:08,480 --> 00:13:11,440
+-Kas tõesti?
+
+447
+00:13:08,480 --> 00:13:11,440
+-Jah, on küll.
+
+448
+00:13:08,480 --> 00:13:11,440
+isegi Walesis.
+
+449
+00:13:11,480 --> 00:13:16,000
+Ja paljud inimesed…
+
+450
+00:13:11,480 --> 00:13:16,000
+"Ah, ma ei saa," ütlevad nad.
+
+451
+00:13:11,480 --> 00:13:16,000
+"Ma ei taha sellega tegeleda."
+
+452
+00:13:16,040 --> 00:13:18,320
+"Kõik poliitikud on ühed ja samad,"
+
+453
+00:13:16,040 --> 00:13:18,320
+ja kõik erakonnad.
+
+454
+00:13:16,040 --> 00:13:18,320
+– "Oh, mul pole lihtsalt tahtmist sellega tegeleda. Kõik poliitikud on samad ja kõik erakonnad..."
+
+455
+00:13:18,360 --> 00:13:23,320
+"Nii me mõtlesime: kas äkki..."
+
+456
+00:13:18,360 --> 00:13:23,320
+kas saaksime otsustada, kellele hääletada.
+
+457
+00:13:18,360 --> 00:13:23,320
+...kui me saaksime aru, kelle poolt hääletada, lähtudes sellest, milliseid autosid juhid kasutavad."
+
+458
+00:13:23,360 --> 00:13:25,320
+-Väga hea mõte.
+
+459
+00:13:23,360 --> 00:13:25,320
+- See on väga hea mõte.
+
+460
+00:13:25,360 --> 00:13:27,640
+"Jah, ma suutsin."
+
+461
+00:13:25,360 --> 00:13:27,640
+Ma olen selle välja selgitanud. See ei olnud lihtne, aga me suutsime.
+
+462
+00:13:25,360 --> 00:13:27,640
+See polnud kerge, aga me suutsime seda teha.
+
+463
+00:13:27,680 --> 00:13:30,440
+Nüüd siis, David Cameron, kes...
+
+464
+00:13:27,680 --> 00:13:30,440
+olma konservatiivse partei juht, kas?
+
+465
+00:13:30,480 --> 00:13:34,280
+Ta… Noh, tal pole seda.
+
+466
+00:13:30,480 --> 00:13:34,280
+ta tegelikult autot ei oma, aga...
+
+467
+00:13:30,480 --> 00:13:34,280
+Nende perekonna auto on Honda CRV.
+
+468
+00:13:34,320 --> 00:13:35,360
+Olgu?
+
+469
+00:13:35,400 --> 00:13:37,960
+Nick Cleggil on...
+
+470
+00:13:35,400 --> 00:13:37,960
+Ford Galaxy.
+
+471
+00:13:38,000 --> 00:13:39,120
+-Jumal tänn, mis see on.
+
+472
+00:13:38,000 --> 00:13:39,120
+-Oh, kurja.
+
+473
+00:13:39,160 --> 00:13:40,680
+Selline auto on temalt üllatav.
+
+474
+00:13:42,320 --> 00:13:44,880
+Ed Milibandil on...
+
+475
+00:13:42,320 --> 00:13:44,880
+Lamborghini Aventador.
+
+476
+00:13:44,920 --> 00:13:46,280
+Kas ta tõesti?
+
+477
+00:13:46,320 --> 00:13:48,320
+(MÕLEMAD ARUANDVAD)
+
+478
+00:13:48,360 --> 00:13:51,760
+– See on valelik. Tal on…
+
+479
+00:13:48,360 --> 00:13:51,760
+rohekas sinine Ford Focus.
+
+480
+00:13:48,360 --> 00:13:51,760
+-Oh.
+
+481
+00:13:51,800 --> 00:13:53,760
+Nigel Farage.
+
+482
+00:13:51,800 --> 00:13:53,760
+küsige, millist autot ta sõidab.
+
+483
+00:13:53,800 --> 00:13:55,840
+- Üks Jaguar. Vana Jaguar.
+
+484
+00:13:53,800 --> 00:13:55,840
+-Jah, see on ka nii.
+
+485
+00:13:55,880 --> 00:13:59,920
+Kas keegi veel? Kas keegi soovib?
+
+486
+00:13:55,880 --> 00:13:59,920
+ära proovi ennustada.
+
+487
+00:13:55,880 --> 00:13:59,920
+Mida Nigel Farage sõidab?
+
+488
+00:13:59,960 --> 00:14:01,840
+-(VAATAJAD)
+
+489
+00:13:59,960 --> 00:14:01,840
+(RÄSIME HALVULT)
+
+490
+00:13:59,960 --> 00:14:01,840
+-KLARSKON: Mis?
+
+491
+00:14:01,880 --> 00:14:06,160
+Võib-olla Bentley?
+
+492
+00:14:01,880 --> 00:14:06,160
+Mis?
+
+
+493
+00:14:06,200 --> 00:14:08,600
+Kas te olete tuttav Ühendkuningriigi Vabadus- ja Demokraatia Liiduga?
+
+494
+00:14:06,200 --> 00:14:08,600
+kas sa oled ja need on...?
+
+495
+00:14:10,000 --> 00:14:13,840
+Nigel Farage sõidab...
+
+496
+00:14:10,000 --> 00:14:13,840
+Volvo V70.
+
+497
+00:14:13,880 --> 00:14:16,320
+-HAMMOND: Kas tõesti?
+
+498
+00:14:13,880 --> 00:14:16,320
+-Ta juhib autot, mis on pärit välismaalt.
+
+499
+00:14:19,760 --> 00:14:21,520
+\- Nicola Sturgeon.
+
+500
+00:14:19,760 --> 00:14:21,520
+-Kes?
+
+501
+00:14:21,560 --> 00:14:22,880
+Nicola Sturgeon.
+
+502
+00:14:24,520 --> 00:14:25,880
+Šoti Rahvuspartei. Šotimaa.
+
+503
+00:14:25,920 --> 00:14:28,360
+-Ah, see on ju see Nicola Sturgeon.
+
+504
+00:14:25,920 --> 00:14:28,360
+Jah, see just nimelt Nicola Sturgeon.
+
+505
+00:14:28,400 --> 00:14:29,680
+– Jah, aga mis temaga?
+
+506
+00:14:28,400 --> 00:14:29,680
+-Ei, sa proovi hoopis.
+
+507
+00:14:29,720 --> 00:14:32,840
+-Ah, ma tean.
+
+508
+00:14:29,720 --> 00:14:32,840
+Hmm, McLaren.
+
+509
+00:14:29,720 --> 00:14:32,840
+(Hammond naerab.)
+
+510
+00:14:39,080 --> 00:14:40,080
+Ei, sa proovi.
+
+511
+00:14:42,160 --> 00:14:44,440
+Nicola Sturgeon ise ei sõida autot.
+
+512
+00:14:44,480 --> 00:14:46,080
+– Mis, Šotimaal?
+
+513
+00:14:44,480 --> 00:14:46,080
+-Ma tean, ma ei saa sellest aru.
+
+514
+00:14:46,120 --> 00:14:47,920
+Kuidas seal liigelda saab?
+
+515
+00:14:46,120 --> 00:14:47,920
+Šotimaal, kui sa…
+
+516
+00:14:46,120 --> 00:14:47,920
+kui teil pole autot?
+
+517
+00:14:47,960 --> 00:14:49,720
+Mingeimagi aimu pole.
+
+518
+00:14:47,960 --> 00:14:49,720
+Igatahes, ta ei saa.
+
+519
+00:14:49,760 --> 00:14:53,360
+Leanne Wood. Nüüd on kõik.
+
+520
+00:14:49,760 --> 00:14:53,360
+Ta on valmis.
+
+521
+00:14:53,400 --> 00:14:55,520
+Hmm… üks härg.
+
+522
+00:14:57,400 --> 00:14:58,680
+Volkswagen Passat.
+
+523
+00:14:58,720 --> 00:15:01,640
+Oh, Jumal!
+
+524
+00:14:58,720 --> 00:15:01,640
+Ma vihkan Passati.
+
+525
+00:15:01,680 --> 00:15:03,360
+Natalie Bennett, roheliste erakonna esindaja.
+
+526
+00:15:01,680 --> 00:15:03,360
+roheliste parteist.
+
+527
+00:15:03,400 --> 00:15:06,400
+Oi! Hmm...
+
+528
+00:15:03,400 --> 00:15:06,400
+Lamborghini LM002.
+
+529
+00:15:06,440 --> 00:15:08,600
+Meil on sellest tegelikult pilt.
+
+530
+00:15:06,440 --> 00:15:08,600
+ma arvan, et meil on ühest sellisest pilt.
+
+531
+00:15:06,440 --> 00:15:08,600
+kuskil.
+
+532
+00:15:08,640 --> 00:15:10,200
+– Jah, seal see on.
+
+533
+00:15:08,640 --> 00:15:10,200
+-HAMMOND: Jah,
+
+534
+00:15:08,640 --> 00:15:10,200
+See on see auto. Jah.
+
+535
+00:15:10,240 --> 00:15:12,000
+Kas sa arvad, et...
+
+536
+00:15:10,240 --> 00:15:12,000
+Kas rohelise partei juht seda sõidab?
+
+537
+00:15:12,040 --> 00:15:13,720
+-Jah, kas ta tõesti?
+
+538
+00:15:12,040 --> 00:15:13,720
+-Sa oled täiesti õige.
+
+539
+00:15:13,760 --> 00:15:15,240
+-Olen ma?
+
+540
+00:15:13,760 --> 00:15:15,240
+– Jah, ta ei oma.
+
+541
+00:15:15,280 --> 00:15:17,560
+-Ah.
+
+542
+00:15:15,280 --> 00:15:17,560
+Ei, tal pole seda.
+
+543
+00:15:15,280 --> 00:15:17,560
+üks selline, kuidagi nii.
+
+544
+00:15:17,600 --> 00:15:21,360
+Tal pole autot.
+
+545
+00:15:17,600 --> 00:15:21,360
+aga ta on selle klubi liige.
+
+546
+00:15:17,600 --> 00:15:21,360
+ja ta on autoklubi liige.
+
+547
+00:15:21,400 --> 00:15:24,280
+Kas see on Dodge Chargeri klubi?
+
+
+548
+00:15:21,400 --> 00:15:24,280
+Omanike klubi?
+
+549
+00:15:24,320 --> 00:15:26,560
+-Üllataval kombel, James, see ei ole nii.
+
+550
+00:15:24,320 --> 00:15:26,560
+-Kas nad korraldavad võistluspäevi?
+
+551
+00:15:28,200 --> 00:15:30,360
+Asjaolud on nii, et…
+
+552
+00:15:28,200 --> 00:15:30,360
+kõik need juhid,
+
+553
+00:15:30,400 --> 00:15:34,320
+ükski neist pole hea auto.
+
+554
+00:15:30,400 --> 00:15:34,320
+tal on lihtsalt odav auto.
+
+555
+00:15:30,400 --> 00:15:34,320
+Igaüks neist.
+
+556
+00:15:34,360 --> 00:15:36,600
+– Jah.
+
+557
+00:15:34,360 --> 00:15:36,600
+-"Ja ma tean, miks."
+
+558
+00:15:36,640 --> 00:15:38,200
+See on seetõttu, et…
+
+559
+00:15:36,640 --> 00:15:38,200
+soovivad, et neid nähtaks.
+
+560
+00:15:38,240 --> 00:15:40,520
+– kas mehena või naisena.
+
+561
+00:15:38,240 --> 00:15:40,520
+rahva seas.
+
+562
+00:15:38,240 --> 00:15:40,520
+-Jah, ma kahtlustan, et nii on.
+
+563
+00:15:40,560 --> 00:15:44,280
+Jah, aga sind võib näha...
+
+564
+00:15:40,560 --> 00:15:44,280
+mehena või naisena.
+
+565
+00:15:40,560 --> 00:15:44,280
+inimeste jaoks.
+
+566
+00:15:44,320 --> 00:15:45,880
+aga ikka juhirooli taha.
+
+567
+00:15:44,320 --> 00:15:45,880
+Üks huvitav auto.
+
+568
+00:15:45,920 --> 00:15:48,800
+Jah, see oleks võimalik.
+
+569
+00:15:45,920 --> 00:15:48,800
+Ford Fiesta ST.
+
+570
+00:15:45,920 --> 00:15:48,800
+See on hea auto.
+
+571
+00:15:48,840 --> 00:15:51,600
+Kas me annaksim häälte kellelegi?
+
+572
+00:15:48,840 --> 00:15:51,600
+kes oleks valmis Ford Fiesta ST ostma?
+
+573
+00:15:51,640 --> 00:15:53,640
+- Ma oleksin valmis, kohe.
+
+574
+00:15:51,640 --> 00:15:53,640
+- Ma oleksin valmis, kohe.
+
+575
+00:15:53,680 --> 00:15:56,880
+- (PUHKUR): Mis? Kas te ei tahaks? Mille poolest te hääletaksite? Keegi, kes on huvitatud...
+
+576
+00:15:53,680 --> 00:15:56,880
+(RÄNGALT RÄSIGEN)
+
+577
+00:15:53,680 --> 00:15:56,880
+-"Mis? Sa ei tahaks?"
+
+578
+00:15:56,920 --> 00:15:59,920
+Kuidas sa häälteksid?
+
+579
+00:15:56,920 --> 00:15:59,920
+Keegi, kellel on huvi.
+
+580
+00:15:56,920 --> 00:15:59,920
+riigi tervishoiusüsteemis?
+
+581
+00:15:59,960 --> 00:16:01,040
+(higistamine)
+
+582
+00:16:02,280 --> 00:16:04,440
+MEES: Ei, selline inimene, kes...
+
+583
+00:16:02,280 --> 00:16:04,440
+kes on huvitatud valemirallist.
+
+584
+00:16:04,480 --> 00:16:06,960
+Sa oled hääletanud kellegi poolt.
+
+585
+00:16:04,480 --> 00:16:06,960
+sõltumata poliitikast.
+
+586
+00:16:07,000 --> 00:16:09,400
+-kui nad oleksid sellest huvitatud.
+
+587
+00:16:07,000 --> 00:16:09,400
+kas sa oled huvitatud valem-1-st?
+
+588
+00:16:07,000 --> 00:16:09,400
+-Jah.
+
+589
+00:16:09,440 --> 00:16:12,880
+Kas te seda vaatate?
+
+590
+00:16:09,440 --> 00:16:12,880
+Cameron ja Miliband.
+
+591
+00:16:09,440 --> 00:16:12,880
+ja Clegg?
+
+592
+00:16:12,920 --> 00:16:15,960
+See on see, mis võidule aitab.
+
+593
+00:16:12,920 --> 00:16:15,960
+suure kogukond inimestest.
+
+594
+00:16:16,000 --> 00:16:19,400
+Kes siin tahaks sellele hääl anda?
+
+595
+00:16:16,000 --> 00:16:19,400
+kes on.
+
+596
+00:16:16,000 --> 00:16:19,400
+kas keegi siin häälteks sellise inimese poolt, kes on huvitatud Formule 1-st?
+
+597
+00:16:19,440 --> 00:16:21,680
+Jah!
+
+598
+00:16:21,720 --> 00:16:25,480
+Seal ongi see. Sada protsenti.
+
+599
+00:16:21,720 --> 00:16:25,480
+britid soovivad sind.
+
+600
+00:16:21,720 --> 00:16:25,480
+keda oleks huvitatud vormel-1-st.
+
+601
+00:16:26,560 --> 00:16:29,000
+Aha, nüüd siis…
+
+602
+00:16:29,040 --> 00:16:33,760
+Ma tulin siia täna hommikul.
+
+603
+00:16:29,040 --> 00:16:33,760
+Volkswagen Golf GTI-s.
+
+604
+00:16:29,040 --> 00:16:33,760
+See on auto, mida ma seekord kasutan.
+
+605
+00:16:33,800 --> 00:16:35,600
+Absoluutselt imeline auto.
+
+606
+00:16:35,640 --> 00:16:38,640
+Jah, väga hea.
+
+607
+00:16:35,640 --> 00:16:38,640
+See ei ole nii hea kui Fiesta ST.
+
+608
+00:16:35,640 --> 00:16:38,640
+aga see on hea auto.
+
+609
+00:16:38,680 --> 00:16:40,440
+Jah, on küll. Jah, on küll.
+
+610
+00:16:38,680 --> 00:16:40,440
+peale ühe asja.
+
+611
+00:16:40,480 --> 00:16:42,320
+Sellel on üks väga tüütav asi.
+
+612
+00:16:40,480 --> 00:16:42,320
+asi, mis seal on.
+
+613
+00:16:42,360 --> 00:16:44,840
+Kas kellegil on Volkswagen Golf?
+
+614
+00:16:42,360 --> 00:16:44,840
+hetkel selle ökonoomia režiimiga?
+
+615
+00:16:42,360 --> 00:16:44,840
+Kas teil on...?
+
+616
+00:16:45,680 --> 00:16:47,200
+Kuidas need sind ärritavad?
+
+617
+00:16:47,240 --> 00:16:49,080
+Te sõidad rahulikult mööda ja...
+
+618
+00:16:47,240 --> 00:16:49,080
+ja aeg-ajalt...
+
+619
+00:16:49,120 --> 00:16:51,000
+see lihtsalt ilmub üles.
+
+620
+00:16:49,120 --> 00:16:51,000
+väike teade.
+
+621
+00:16:49,120 --> 00:16:51,000
+juhendpaneelil.
+
+622
+00:16:51,040 --> 00:16:54,880
+"Miks mitte?"
+
+623
+00:16:51,040 --> 00:16:54,880
+"Miks mitte akent üles tõsta?"
+
+624
+00:16:51,040 --> 00:16:54,880
+See oleks aerodünaamilisem...
+
+625
+00:16:54,920 --> 00:16:56,640
+"Kuna ma tahan hingata..."
+
+626
+00:16:54,920 --> 00:16:56,640
+...et ma saaksin sisse hingata!
+
+627
+00:16:56,680 --> 00:16:59,560
+"Miks mitte ühte käiku juurde panna?"
+
+628
+00:16:56,680 --> 00:16:59,560
+See oleks parem...
+
+629
+00:16:59,600 --> 00:17:03,560
+Miks mitte… Miks mitte vaik olla?
+
+630
+00:16:59,600 --> 00:17:03,560
+just seda sa tahad?
+
+631
+00:16:59,600 --> 00:17:03,560
+et seda kogu aeg öelda.
+
+632
+00:17:03,600 --> 00:17:06,240
+See paneb sind...
+
+633
+00:17:03,600 --> 00:17:06,240
+Ma võiksin selle pärast hulluks minna!
+
+634
+00:17:06,280 --> 00:17:10,560
+Kui ma töötaksin Volkswagenis, nende...
+
+635
+00:17:06,280 --> 00:17:10,560
+tööde osakond, umbes nii.
+
+636
+00:17:10,600 --> 00:17:13,360
+Ma paneksin sinna natuke...
+
+637
+00:17:10,600 --> 00:17:13,360
+sõnumeid sinna seesse.
+
+638
+00:17:10,600 --> 00:17:13,360
+aga sellel oleks olnud selline ajastus,
+
+639
+00:17:13,400 --> 00:17:15,680
+nii et need ei ilmuks.
+
+640
+00:17:13,400 --> 00:17:15,680
+kuni palju hiljem.
+
+641
+00:17:13,400 --> 00:17:15,680
+Ma olin tegelikult juba pensionile jäänud.
+
+642
+00:17:15,720 --> 00:17:17,840
+ja sa sõidad seal rahulikult mööda.
+
+643
+00:17:15,720 --> 00:17:17,840
+ja siis see ütleks:
+
+644
+00:17:15,720 --> 00:17:17,840
+"Tõsta aken üles."
+
+645
+00:17:17,880 --> 00:17:19,600
+"Miks mitte natuke aeglustada?"
+
+646
+00:17:17,880 --> 00:17:19,600
+Miks mitte midagi muuta?
+
+647
+00:17:19,640 --> 00:17:22,800
+Siis see äkitselt ütleb...
+
+648
+00:17:19,640 --> 00:17:22,800
+"Miks sa seda ei tee?"
+
+649
+00:17:19,640 --> 00:17:22,800
+mine ja keeda oma pea ära?
+
+650
+00:17:22,840 --> 00:17:27,240
+Aga see öeldakse ainult üks kord.
+
+651
+00:17:22,840 --> 00:17:27,240
+et sa ei oleks kindel.
+
+652
+00:17:22,840 --> 00:17:27,240
+kui sa oleksid seda tegelikult näinud.
+
+653
+00:17:28,560 --> 00:17:30,080
+Ja siis veel üks kord.
+
+654
+00:17:28,560 --> 00:17:30,080
+sa võiksid olla lihtsalt autoga teel.
+
+655
+00:17:30,120 --> 00:17:31,960
+te teate ju, see võib olla.
+
+656
+00:17:30,120 --> 00:17:31,960
+kolm aastat hiljem,
+
+657
+00:17:30,120 --> 00:17:31,960
+sa võiksid lihtsalt sõita mööda teed.
+
+658
+00:17:32,000 --> 00:17:33,400
+ja siis see ütlesks.
+
+659
+00:17:32,000 --> 00:17:33,400
+"Tõsta alla akent."
+
+660
+00:17:32,000 --> 00:17:33,400
+Vaheta käik.
+
+661
+00:17:33,440 --> 00:17:36,600
+Siis see äkki algaks.
+
+662
+00:17:33,440 --> 00:17:36,600
+"Sa oled oma elu raiskanud."
+
+663
+00:17:36,640 --> 00:17:38,720
+Aga sa ainult...
+
+664
+00:17:36,640 --> 00:17:38,720
+üks kord nähtud, siis on nähtud.
+
+665
+00:17:38,760 --> 00:17:42,440
+See oleks tõesti...
+
+666
+00:17:38,760 --> 00:17:42,440
+paneb autojuhte šokeerima!
+
+667
+00:17:42,480 --> 00:17:45,760
+Sa võidksid äkitselt lihtsalt öelda...
+
+668
+00:17:42,480 --> 00:17:45,760
+"Sinu naine on olnud abielus."
+
+669
+00:17:42,480 --> 00:17:45,760
+"Et sinu naine on naabrimehega suhetes olnud."
+
+670
+00:17:45,800 --> 00:17:48,080
+Ja sa läed diilerini.
+
+671
+00:17:45,800 --> 00:17:48,080
+ja ütles: "See ütles seda!"
+
+672
+00:17:48,120 --> 00:17:50,560
+ja ta ütleb: "Ei, nii ei olnud."
+
+673
+00:17:48,120 --> 00:17:50,560
+"See ei saa nii öelnud olla."
+
+674
+00:17:48,120 --> 00:17:50,560
+sellest tüüpi asjadest."
+
+675
+00:17:50,600 --> 00:17:52,320
+"See ei saa olla olnud."
+
+676
+00:17:50,600 --> 00:17:52,320
+Aga asi on selles, et...
+
+677
+00:17:52,360 --> 00:17:55,720
+see võtaks Volkswagènil palju aega.
+
+678
+00:17:52,360 --> 00:17:55,720
+et see oleks valminud, selleks kuluks palju aega.
+
+679
+00:17:55,760 --> 00:17:57,480
+siis neil oleks vaja palju aega.
+
+680
+00:17:55,760 --> 00:17:57,480
+ja siis nad võiksid teile helistada ja öelda:
+
+681
+00:17:57,520 --> 00:17:59,120
+"Härra May,
+
+682
+00:17:57,520 --> 00:17:59,120
+astuge palun mu kabinetti.
+
+683
+00:17:59,160 --> 00:18:01,720
+Aga ma olen ju pensionile läinud.
+
+684
+00:17:59,160 --> 00:18:01,720
+Ma kukun suust välja.
+
+685
+00:17:59,160 --> 00:18:01,720
+vanade kodus.
+
+686
+00:18:01,760 --> 00:18:04,360
+naerdes inimeste üle.
+
+687
+00:18:01,760 --> 00:18:04,360
+kes olid ostnud Volkswagen Golfi autosid.
+
+688
+00:18:04,400 --> 00:18:06,600
+Nüüd ma tahan teile midagi näidata.
+
+689
+00:18:04,400 --> 00:18:06,600
+veel üks lugu...
+
+690
+00:18:06,640 --> 00:18:09,520
+Ma arvan, daamid ja härrad, et teile meeldib see.
+
+691
+00:18:06,640 --> 00:18:09,520
+ning härrad ja daamid,
+
+692
+00:18:06,640 --> 00:18:09,520
+teile meeldib see kindlasti.
+
+693
+00:18:10,560 --> 00:18:12,960
+Bristoli linnapea, hästi?
+
+694
+00:18:13,000 --> 00:18:19,280
+Ta teatas sellest üsna hiljuti.
+
+695
+00:18:13,000 --> 00:18:19,280
+et ta kavatseb eraldada.
+
+696
+00:18:13,000 --> 00:18:19,280
+2,3 miljonit riiklikku raha.
+
+697
+00:18:19,320 --> 00:18:22,880
+mis kulutatakse ära.
+
+698
+00:18:19,320 --> 00:18:22,880
+...mis paigaldatakse 13 000 teele."
+
+699
+00:18:22,920 --> 00:18:25,080
+tema ütles, et see tähendab seda, et…
+
+700
+00:18:22,920 --> 00:18:25,080
+piirakiirus on 20 miili tunnis.
+
+701
+00:18:25,120 --> 00:18:28,160
+kogu Bristoli üle.
+
+702
+00:18:25,120 --> 00:18:28,160
+See on linnapea.
+
+
+703
+00:18:28,200 --> 00:18:29,560
+Ta on alles nüüd kihutamisega vahetult tabatud.
+
+704
+00:18:28,200 --> 00:18:29,560
+ta on just kiiruseületamise eest tabatud.
+
+705
+00:18:31,800 --> 00:18:36,480
+Ma arvan, et me kõik peaksime...
+
+706
+00:18:31,800 --> 00:18:36,480
+võtame hetke, et ennast sättida.
+
+707
+00:18:31,800 --> 00:18:36,480
+ja võtta hetk, et ennast rahustada.
+
+708
+00:18:36,520 --> 00:18:38,480
+Ma lähen proovima.
+
+709
+00:18:36,520 --> 00:18:38,480
+tõsine ja... Oh.
+
+710
+00:18:40,640 --> 00:18:43,520
+Oi ei! Kuidas...?
+
+711
+00:18:40,640 --> 00:18:43,520
+Oh.
+
+712
+00:18:43,560 --> 00:18:47,400
+Ta ütles hiljem, et...
+
+713
+00:18:43,560 --> 00:18:47,400
+ta kiidab.
+
+714
+00:18:43,560 --> 00:18:47,400
+Avoni ja Somerseti politsei.
+
+715
+00:18:47,440 --> 00:18:49,160
+tema hoolivuse eest.
+
+716
+00:18:47,440 --> 00:18:49,160
+tema tabamiseks.
+
+717
+00:18:49,200 --> 00:18:52,080
+Ma paneks raha sellele, et ta seda ei öelnud.
+
+718
+00:18:49,200 --> 00:18:52,080
+Kui kiri saabus.
+
+719
+00:18:49,200 --> 00:18:52,080
+postkastist läbi.
+
+720
+00:18:52,960 --> 00:18:54,320
+Olge siis, läheme edasi.
+
+721
+00:18:54,360 --> 00:18:59,200
+Nüüd, möödunud aastal.
+
+722
+00:18:54,360 --> 00:18:59,200
+McLaren on meile pakkunud
+
+723
+00:18:54,360 --> 00:18:59,200
+täiesti imelist P1 mudelit,
+
+724
+00:18:59,240 --> 00:19:03,200
+ja Porsche andis meile
+
+725
+00:18:59,240 --> 00:19:03,200
+ja Porsche andis meile sama hämmastava 918 mudeli.
+
+726
+00:19:03,240 --> 00:19:08,160
+aga me oleme seda alati teadnud.
+
+727
+00:19:03,240 --> 00:19:08,160
+millest me oleme alati teadnud.
+
+728
+00:19:03,240 --> 00:19:08,160
+hibrid-superauto on teel.
+
+729
+00:19:08,200 --> 00:19:10,520
+Noh, see ei ole enam nii kaugele jõudnud.
+
+730
+00:19:08,200 --> 00:19:10,520
+aga seda enam mitte.
+
+731
+00:19:10,560 --> 00:19:15,320
+See on siin, see ongi see.
+
+732
+00:19:10,560 --> 00:19:15,320
+millest te kõik ootate.
+
+733
+00:19:10,560 --> 00:19:15,320
+ja ma olen sellega sõitnud.
+
+734
+00:19:15,360 --> 00:19:18,120
+Ferrari. See ongi see Ferrari.
+
+735
+00:19:28,080 --> 00:19:30,840
+MAY: McLaren ja Porsche.
+
+736
+00:19:28,080 --> 00:19:30,840
+ehk arvatakse, et nad on loonud
+
+737
+00:19:30,880 --> 00:19:34,120
+ilusad autod.
+
+738
+00:19:30,880 --> 00:19:34,120
+P1-s ja 918-s,
+
+739
+00:19:38,560 --> 00:19:42,800
+aga ma arvan, et neil tuleb see uuesti läbi mõelda.
+
+740
+00:19:38,560 --> 00:19:42,800
+et nad peaksid jälle oma pliiatsikohvrid välja võtma.
+
+741
+00:19:42,840 --> 00:19:46,560
+kuna see on see, mida...
+
+742
+00:19:42,840 --> 00:19:46,560
+ja nii peaks superauto välja nägema.
+
+743
+00:20:01,920 --> 00:20:05,480
+Ja nii peaks superauto välja nägema.
+
+744
+00:20:01,920 --> 00:20:05,480
+peaks välja kuulma.
+
+745
+00:20:05,520 --> 00:20:07,560
+[mootori pöörded tõusevad]
+
+746
+00:20:14,760 --> 00:20:18,480
+Ükski õudne kaheksa silindrine mootor.
+
+747
+00:20:14,760 --> 00:20:18,480
+või väikesed ja jõuetud turbolaadijad.
+
+748
+00:20:18,520 --> 00:20:21,240
+see on Ferrari.
+
+749
+00:20:18,520 --> 00:20:21,240
+suurim hitt...
+
+750
+00:20:24,040 --> 00:20:28,840
+Kaheteist silindri heli.
+
+751
+00:20:24,040 --> 00:20:28,840
+õigesti V-kujul paigutatult.
+
+752
+00:20:28,880 --> 00:20:30,640
+Palun väga.
+
+753
+00:20:37,880 --> 00:20:39,480
+Ja siis on veel hind.
+
+754
+00:20:39,520 --> 00:20:43,160
+LaFerraril on need kaks teist.
+
+755
+00:20:39,520 --> 00:20:43,160
+ja seal ka lamas.
+
+756
+00:20:44,960 --> 00:20:48,400
+Porsche 918, 646 000 naela.
+
+757
+00:20:48,440 --> 00:20:52,760
+McLaren P1 maksab 866 000 naela.
+
+758
+00:20:52,800 --> 00:20:53,800
+LaFerrari…
+
+759
+00:20:55,880 --> 00:20:57,800
+Miljon naela!
+
+760
+00:20:57,840 --> 00:21:00,240
+See on päris korralik hind.
+
+761
+00:20:57,840 --> 00:21:00,240
+ei mingit jamamist.
+
+762
+00:21:02,160 --> 00:21:04,520
+Ja see pole veel kõik.
+
+763
+00:21:04,560 --> 00:21:07,840
+Pinky ja Perky on olnud...
+
+764
+00:21:04,560 --> 00:21:07,840
+kavatsesid täpselt selgitada.
+
+765
+00:21:07,880 --> 00:21:11,680
+kuidas targalt see McLaren on ehitatud.
+
+766
+00:21:07,880 --> 00:21:11,680
+ja kui nutikad McLarenid ja Porsche'd on.
+
+767
+00:21:11,720 --> 00:21:14,880
+Nojah, see on.
+
+768
+00:21:11,720 --> 00:21:14,880
+ka väga nutikas.
+
+769
+00:21:19,440 --> 00:21:24,320
+See on valmistatud mitte ainult ühest materjalist.
+
+770
+00:21:19,440 --> 00:21:24,320
+aga neli erinevat tüüpi.
+
+771
+00:21:19,440 --> 00:21:24,320
+kõigest neljast erinevast tüübist.
+
+772
+00:21:24,360 --> 00:21:27,000
+et see oleks võimalikult kerge.
+
+773
+00:21:24,360 --> 00:21:27,000
+nii kergena kui võimalik.
+
+774
+00:21:27,040 --> 00:21:31,840
+Tegelikult on see kergem kui...
+
+775
+00:21:27,040 --> 00:21:31,840
+Porsche'i või McLareni?
+
+776
+00:21:31,880 --> 00:21:36,560
+Juhi iste on fikseeritud.
+
+777
+00:21:31,880 --> 00:21:36,560
+ja selle asemel on rool.
+
+778
+00:21:31,880 --> 00:21:36,560
+ja pedaalid, mis liiguvad.
+
+779
+00:21:36,600 --> 00:21:39,440
+See tähendab, et seda ei ole vaja.
+
+780
+00:21:36,600 --> 00:21:39,440
+istme mehhanismi.
+
+781
+00:21:39,480 --> 00:21:42,280
+mis tähendab, et roolijale
+
+782
+00:21:39,480 --> 00:21:42,280
+võib istuda madalamal.
+
+783
+00:21:42,320 --> 00:21:45,280
+katus võib olla madalam.
+
+784
+00:21:42,320 --> 00:21:45,280
+ja see langetab.
+
+785
+00:21:42,320 --> 00:21:45,280
+keskpunkti raskus.
+
+786
+00:21:47,680 --> 00:21:49,560
+Et kurvide läbimise oleks parem.
+
+787
+00:21:50,440 --> 00:21:52,640
+Siis jõuame mootori juurde.
+
+788
+00:21:55,600 --> 00:21:59,840
+Nagu McLareniga.
+
+789
+00:21:55,600 --> 00:21:59,840
+ja Porsche'i.
+
+790
+00:21:55,600 --> 00:21:59,840
+LaFerrari on hübriidauto.
+
+791
+00:21:59,880 --> 00:22:04,040
+Sellel on bensiinimootor.
+
+792
+00:21:59,880 --> 00:22:04,040
+ja elektriline mootor.
+
+793
+00:21:59,880 --> 00:22:04,040
+et pöörata rattaid.
+
+794
+00:22:04,080 --> 00:22:08,120
+Aga teiste puhul on olukord teisiti.
+
+795
+00:22:04,080 --> 00:22:08,120
+saab sõita ainult elektriga.
+
+796
+00:22:04,080 --> 00:22:08,120
+üksnes elektriga.
+
+797
+00:22:08,160 --> 00:22:09,480
+nagu Toyota Prius.
+
+798
+00:22:09,520 --> 00:22:12,480
+aga Ferrari seda ei suuda.
+
+799
+00:22:09,520 --> 00:22:12,480
+kuna Ferrari ise ütleb,
+
+800
+00:22:12,520 --> 00:22:15,080
+"Me ei ole selles huvitatud.
+
+801
+00:22:12,520 --> 00:22:15,080
+"Me ei ole selles huvitatud," ütles Ferrari.
+
+802
+00:22:17,240 --> 00:22:19,840
+Selle asemel on aku...
+
+803
+00:22:17,240 --> 00:22:19,840
+ja elektrimootoriga koosnev süsteem.
+
+804
+00:22:19,880 --> 00:22:23,400
+töötab umbes samamoodi nagu...
+
+805
+00:22:19,880 --> 00:22:23,400
+liikumisenergia.
+
+806
+00:22:19,880 --> 00:22:23,400
+taastamissüsteem.
+
+807
+00:22:23,440 --> 00:22:25,120
+F1 autodel.
+
+808
+00:22:25,160 --> 00:22:29,000
+Üks lihtne selgitus on see, et...
+
+809
+00:22:25,160 --> 00:22:29,000
+see energia salvestatakse.
+
+810
+00:22:25,160 --> 00:22:29,000
+mis tavaliselt läheb kaotsi.
+
+811
+00:22:29,040 --> 00:22:30,720
+pidurdamisel, näiteks.
+
+812
+00:22:30,760 --> 00:22:33,280
+ja hoiab seda alles.
+
+813
+00:22:30,760 --> 00:22:33,280
+kui seda on vaja.
+
+814
+00:22:42,440 --> 00:22:44,200
+Elektriline mootor,
+
+815
+00:22:42,440 --> 00:22:44,200
+bensiinimootor,
+
+816
+00:22:44,240 --> 00:22:47,120
+need on kõik koos töötamas.
+
+817
+00:22:44,240 --> 00:22:47,120
+kogu aeg.
+
+818
+00:22:47,160 --> 00:22:48,720
+Neid ei saa eraldada.
+
+819
+00:22:50,600 --> 00:22:55,200
+See on lihtsalt...
+
+820
+00:22:50,600 --> 00:22:55,200
+950 hobujõu superauto.
+
+821
+00:22:59,120 --> 00:23:01,560
+Aga vaatamata sellele,
+
+822
+00:22:59,120 --> 00:23:01,560
+ja võidusõidu tehnoloogia,
+
+823
+00:23:01,600 --> 00:23:05,960
+sa ei satuta sellessese.
+
+824
+00:23:01,600 --> 00:23:05,960
+austeraalsuse maailmas.
+
+825
+00:23:01,600 --> 00:23:05,960
+ükskõik kui palju tehnoloogiaid kasutatakse.
+
+826
+00:23:08,360 --> 00:23:12,120
+Teil on navigatsioonisüsteem olemas.
+
+827
+00:23:08,360 --> 00:23:12,120
+kliimaseade.
+
+828
+00:23:12,160 --> 00:23:13,680
+See on täiesti mugav.
+
+829
+00:23:14,880 --> 00:23:17,560
+Tegelikult on see väga mugav.
+
+830
+00:23:21,120 --> 00:23:24,560
+Kuid see on ka...
+
+831
+00:23:21,120 --> 00:23:24,560
+peaks olema kõige kiiremini sõidetav.
+
+832
+00:23:24,600 --> 00:23:29,240
+ja kõige põnevam sõiduauto.
+
+833
+00:23:24,600 --> 00:23:29,240
+Mis Ferrari kunagi valmistanud on.
+
+834
+00:23:29,280 --> 00:23:32,560
+Ja et teada saada, kui põnev see on...
+
+835
+00:23:29,280 --> 00:23:32,560
+me peame siia tulema.
+
+836
+00:23:34,280 --> 00:23:36,840
+Ferrari Fiorano katsekeskus.
+
+837
+00:23:38,560 --> 00:23:41,840
+Neid, keda Ferrari võlus on koju kutsunud.
+
+838
+00:23:38,560 --> 00:23:41,840
+see on püha asfalt.
+
+839
+00:23:41,880 --> 00:23:45,320
+kus ettevõtte suured saavutused on sündinud.
+
+840
+00:23:41,880 --> 00:23:45,320
+Seal on sündinud tippvormelautod.
+
+841
+00:23:47,080 --> 00:23:51,240
+Aga kui ma kohale jõudsin...
+
+842
+00:23:47,080 --> 00:23:51,240
+"Püha" ei olnud see sõna, mis mul pähe tuli.
+
+843
+00:23:47,080 --> 00:23:51,240
+mis mul pähe tuli.
+
+844
+00:23:52,680 --> 00:23:54,080
+(mölgemine)
+
+845
+00:23:57,760 --> 00:24:00,160
+Oh, kuradi jura!
+
+846
+00:24:00,200 --> 00:24:03,760
+Pärast kahte tundi.
+
+847
+00:24:00,200 --> 00:24:03,760
+ja ootamine stardijoone ääres...
+
+848
+00:24:03,800 --> 00:24:06,160
+Pedaalid natuke.
+
+849
+00:24:03,800 --> 00:24:06,160
+veel kaugemal.
+
+850
+00:24:06,200 --> 00:24:07,840
+(pedaalid pöörlevad)
+
+851
+00:24:07,880 --> 00:24:09,520
+Ei, see on liiga kaugel.
+
+852
+00:24:07,880 --> 00:24:09,520
+Oodake hetk.
+
+853
+00:24:09,560 --> 00:24:11,080
+(pedaalid pöörlevad)
+
+854
+00:24:11,120 --> 00:24:14,720
+...rada oli lõpuks valmis.
+
+855
+00:24:11,120 --> 00:24:14,720
+ma ei ole veel valmis.
+
+856
+00:24:11,120 --> 00:24:14,720
+et proovida seda.
+
+857
+00:24:14,760 --> 00:24:15,760
+[mootori poorete tõus]
+
+858
+00:24:17,160 --> 00:24:19,720
+Punane, punane, punane.
+
+859
+00:24:26,920 --> 00:24:28,560
+[mootori hääled]
+
+860
+00:24:30,680 --> 00:24:32,480
+Issand, mis ahjud!
+
+861
+00:24:41,720 --> 00:24:43,240
+Vabandust, ma juba...
+
+862
+00:24:41,720 --> 00:24:43,240
+esimesel kurvil.
+
+863
+00:24:45,160 --> 00:24:46,640
+Palju pidureid.
+
+864
+00:24:50,160 --> 00:24:54,320
+Nüüdseks on see nii.
+
+865
+00:24:50,160 --> 00:24:54,320
+See on teie jaoks 950 hobujõudu.
+
+866
+00:24:55,440 --> 00:24:57,200
+Ja kui me juba teemal oleme…
+
+867
+00:24:57,240 --> 00:24:58,800
+950 hobujõudu.
+
+868
+00:24:58,840 --> 00:25:01,480
+on midagi, mis on absoluutselt kindel.
+
+
+869
+00:24:58,840 --> 00:25:01,480
+teiste kahega võrreldes.
+
+870
+00:25:02,680 --> 00:25:06,280
+Ja ka tippkiirus on muljetavaldav.
+
+871
+00:25:02,680 --> 00:25:06,280
+218 kilomeetrit tunnis.
+
+872
+00:25:08,440 --> 00:25:11,640
+Aga see pole ainus põhjus.
+
+873
+00:25:08,440 --> 00:25:11,640
+hobujõu kogus.
+
+874
+00:25:08,440 --> 00:25:11,640
+see on muljetavaldav.
+
+875
+00:25:11,680 --> 00:25:14,640
+see, kuidas see on esitatud.
+
+876
+00:25:14,680 --> 00:25:17,760
+Isegi kui sa oleksid...
+
+877
+00:25:14,680 --> 00:25:17,760
+veidi ebaküüne või natuke kohmetu oledki.
+
+878
+00:25:17,800 --> 00:25:19,400
+nagu ma seda praegu teen.
+
+879
+00:25:19,440 --> 00:25:21,680
+sa oled ikka veel...
+
+880
+00:25:19,440 --> 00:25:21,680
+see tohutu sosina.
+
+881
+00:25:21,720 --> 00:25:24,200
+See lööb sind lihtsalt kõdi.
+
+882
+00:25:21,720 --> 00:25:24,200
+nagu kontrolli alt väljunud rong.
+
+883
+00:25:26,280 --> 00:25:28,520
+See on KER-i süsteem toimimas.
+
+884
+00:25:28,560 --> 00:25:30,520
+See ongi selle jaoks mõeldud.
+
+885
+00:25:31,840 --> 00:25:33,760
+Lisaks sellele veel...
+
+886
+00:25:31,840 --> 00:25:33,760
+Ferrari on sellest teadlik.
+
+887
+00:25:33,800 --> 00:25:35,520
+et kõik ei...
+
+888
+00:25:33,800 --> 00:25:35,520
+kes selle autosõidab.
+
+889
+00:25:35,560 --> 00:25:37,760
+keda selle autoga sõidetakse.
+
+890
+00:25:35,560 --> 00:25:37,760
+"Sebastian" või "Vettel".
+
+891
+00:25:42,920 --> 00:25:46,640
+Sest LaFerrari.
+
+892
+00:25:42,920 --> 00:25:46,640
+läheb palju kiiremini.
+
+893
+00:25:42,920 --> 00:25:46,640
+kui sa ise suudaksid ette kujutada.
+
+894
+00:25:46,680 --> 00:25:48,800
+Ferrari on palju kiirem, kui sa oskad ette kujutada.
+
+895
+00:25:46,680 --> 00:25:48,800
+mõeldud, et te mõtleksite selle üle.*
+
+896
+00:25:48,840 --> 00:25:52,720
+Näiteks on sellel...
+
+897
+00:25:48,840 --> 00:25:52,720
+tõeliselt, väga täiustatud.
+
+
+898
+00:25:48,840 --> 00:25:52,720
+pidurdussüsteem.
+
+899
+00:25:52,760 --> 00:25:54,640
+põhineb valemisõidu tehnoloogial.
+
+900
+00:25:54,680 --> 00:25:56,760
+Ja seda saab.
+
+901
+00:25:54,680 --> 00:25:56,760
+jäta see lihtsalt sisse.
+
+902
+00:25:57,200 --> 00:25:58,320
+Miks mitte?
+
+903
+00:25:58,360 --> 00:25:59,560
+See aitab vältida avariisid.
+
+904
+00:26:01,080 --> 00:26:05,440
+LaFerrari on ka täis tehnoloogilisi nüansse.
+
+905
+00:26:01,080 --> 00:26:05,440
+aktiivse aerodünaamikaga.
+
+906
+00:26:05,480 --> 00:26:07,200
+Nüüd on see aga midagi uut.
+
+907
+00:26:05,480 --> 00:26:07,200
+superautol.
+
+908
+00:26:07,240 --> 00:26:11,600
+aga see süsteem on juhitav.
+
+909
+00:26:07,240 --> 00:26:11,600
+kui seda juhtima on 21 arvutit.
+
+910
+00:26:11,640 --> 00:26:14,560
+Mis tähendab, et...
+
+911
+00:26:11,640 --> 00:26:14,560
+vastavalt Ferrarisse kuuluvate inseneride arvamusel.
+
+912
+00:26:14,600 --> 00:26:20,560
+isegi mina peaks suutma.
+
+913
+00:26:14,600 --> 00:26:20,560
+"võtke Fiorano kuulus..."
+
+914
+00:26:14,600 --> 00:26:20,560
+aga Ferrari inseneride arvates, isegi mina peaksin suutma.
+
+915
+00:26:23,560 --> 00:26:25,080
+Aktiivne aerodünaamika.
+
+916
+00:26:23,560 --> 00:26:25,080
+Siin me läheme.
+
+917
+00:26:26,840 --> 00:26:28,200
+Ära karda.
+
+918
+00:26:26,840 --> 00:26:28,200
+Ära karda.
+
+919
+00:26:29,840 --> 00:26:31,600
+(naerdes)
+
+920
+00:26:33,320 --> 00:26:35,480
+See! Vaata seda!
+
+921
+00:26:36,880 --> 00:26:38,520
+(naer)
+
+922
+00:26:38,560 --> 00:26:40,760
+Mida kiiremini sa sõidad...
+
+923
+00:26:38,560 --> 00:26:40,760
+mida kiiremini, seda paremini see toimib!
+
+924
+00:26:43,320 --> 00:26:47,680
+Ma mõtlen,
+
+925
+00:26:43,320 --> 00:26:47,680
+nagu Jenniferi McLaren.
+
+926
+00:26:43,320 --> 00:26:47,680
+see on täielikult tagaveoline.
+
+927
+00:26:47,720 --> 00:26:50,600
+ja see võib olla päris hirmutav.
+
+928
+00:26:47,720 --> 00:26:50,600
+aga see ei ole ohtlik auto.
+
+929
+00:26:55,840 --> 00:26:56,880
+(naerdes väga ärevasti)
+
+930
+00:26:57,960 --> 00:26:59,200
+Oh, jumal küll!
+
+931
+00:27:01,520 --> 00:27:02,840
+Vau, jah!
+
+932
+00:27:06,960 --> 00:27:08,320
+Vau, hetkel. Vabandust.
+
+933
+00:27:10,640 --> 00:27:12,920
+Olge vaiksem.
+
+934
+00:27:10,640 --> 00:27:12,920
+...vaid natuke aeglasemalt.
+
+935
+00:27:12,960 --> 00:27:15,640
+Richard Hammond.
+
+936
+00:27:12,960 --> 00:27:15,640
+tema sõnul jõuab Porsche 918 selle hübriidsupauto kohta kõige kaugemale.
+
+937
+00:27:15,680 --> 00:27:18,720
+see, see, just need to rah-rah.
+
+938
+00:27:15,680 --> 00:27:18,720
+hübriidautode seas kõige kaugemale.
+
+939
+00:27:18,760 --> 00:27:21,160
+See on kõige vastutustundlikum.
+
+940
+00:27:18,760 --> 00:27:21,160
+kui soovitate.
+
+941
+00:27:21,200 --> 00:27:24,080
+Jeremy armastab P1 mudelit, sest...
+
+942
+00:27:21,200 --> 00:27:24,080
+ta ütleb, et see võtab idee...
+
+943
+00:27:24,120 --> 00:27:26,480
+mis sisuliselt tähendab...
+
+944
+00:27:24,120 --> 00:27:26,480
+keskkonnaalane probleem.
+
+945
+00:27:26,520 --> 00:27:29,240
+ja kasutab seda, et muuta...
+
+946
+00:27:26,520 --> 00:27:29,240
+et muuta see superauto veelgi põnevamaks.
+
+947
+00:27:31,440 --> 00:27:34,960
+Selles osas...
+
+948
+00:27:31,440 --> 00:27:34,960
+Ferrari on stiilsem.
+
+949
+00:27:31,440 --> 00:27:34,960
+nagu McLaren.
+
+950
+00:27:37,320 --> 00:27:38,480
+Välja arvatud kaks asja.
+
+951
+00:27:39,880 --> 00:27:43,840
+LaFerrari näeb parem välja,
+
+952
+00:27:39,880 --> 00:27:43,840
+ja ma arvan, et see on parem.
+
+953
+00:27:46,760 --> 00:27:48,880
+See on maailma parim auto.
+
+954
+00:27:46,760 --> 00:27:48,880
+maailmas.
+
+955
+00:28:09,280 --> 00:28:10,600
+Noh, siis...
+
+956
+00:28:09,280 --> 00:28:10,600
+Seal me oleme.
+
+957
+00:28:11,160 --> 00:28:12,200
+Siin me oleme.
+
+958
+00:28:15,240 --> 00:28:19,080
+Nüüd, võib-olla te mäletate.
+
+959
+00:28:15,240 --> 00:28:19,080
+eelmisel aastal pärast Hammondi...
+
+960
+00:28:15,240 --> 00:28:19,080
+oli sõidetud Porsche'iga.
+
+961
+00:28:19,120 --> 00:28:25,240
+Ma ütlesin talle, et kui...
+
+962
+00:28:19,120 --> 00:28:25,240
+kui pärast seda, kui Hammond Porsche'iga ringi käis, ütlesin ma talle, et kui...
+
+963
+00:28:19,120 --> 00:28:25,240
+kui see osutuks ringrajal McLarenist kiiremaks,
+
+964
+00:28:25,280 --> 00:28:28,800
+Ma oleksin muutnud oma nime.
+
+965
+00:28:25,280 --> 00:28:28,800
+...ja nüüd James May ütleb meile, pigem...
+
+966
+00:28:25,280 --> 00:28:28,800
+Sa ju seda ütlesid.
+
+967
+00:28:28,840 --> 00:28:30,640
+Ah, jah. Sa ütlesid seda.
+
+968
+00:28:30,680 --> 00:28:35,400
+Ja nüüd on meil James May.
+
+969
+00:28:30,680 --> 00:28:35,400
+selgitades meile, pigem...
+
+970
+00:28:30,680 --> 00:28:35,400
+ilma igasuguse alusega, minu arvates.
+
+971
+00:28:35,440 --> 00:28:39,840
+kuna ta pole neid ise sõitnud.
+
+972
+00:28:35,440 --> 00:28:39,840
+McLaren või Porsche?
+
+973
+00:28:35,440 --> 00:28:39,840
+et Ferrari on kõige parem.
+
+974
+00:28:39,880 --> 00:28:47,000
+Nii et, kas keegi siin sooviks seda näha?
+
+975
+00:28:39,880 --> 00:28:47,000
+milline neist autodest on…
+
+976
+00:28:39,880 --> 00:28:47,000
+kas on ringrajal kõige kiirem?
+
+977
+00:28:47,040 --> 00:28:49,040
+Jah!
+
+978
+00:28:49,080 --> 00:28:50,800
+Meiegi sooviksime seda näha.
+
+979
+00:28:50,840 --> 00:28:53,320
+Porsche ka tahaks seda teha.
+
+980
+00:28:50,840 --> 00:28:53,320
+Aga meil on probleem.
+
+981
+00:28:53,360 --> 00:28:58,080
+McLaren on öelnud, et meil ei ole lubadus.
+
+982
+00:28:53,360 --> 00:28:58,080
+aga me ei saa testi meie radadel läbi viia.
+
+983
+00:28:58,120 --> 00:29:00,120
+MIS?
+
+984
+00:29:00,160 --> 00:29:03,720
+Oodake hetke, meie oma ringrada ei saa kasutada.
+
+985
+00:29:00,160 --> 00:29:03,720
+McLareni ringrada. Seal see toimub.
+
+986
+00:29:00,160 --> 00:29:03,720
+seal nad uusi asju arendavad.
+
+987
+00:29:03,760 --> 00:29:08,200
+Jah, ma tean.
+
+988
+00:29:03,760 --> 00:29:08,200
+Ja ma tean seda hästi.
+
+989
+00:29:03,760 --> 00:29:08,200
+Ma tean ka, et nad ise seda teavad.
+
+990
+00:29:08,240 --> 00:29:10,640
+need sedasorti väikesed detailid nagu...
+
+991
+00:29:08,240 --> 00:29:10,640
+ja muud sellised asjad.
+
+992
+00:29:10,680 --> 00:29:14,240
+soodustab seda.
+
+993
+00:29:10,680 --> 00:29:14,240
+nelikvedu.
+
+994
+00:29:10,680 --> 00:29:14,240
+Porsche'i puhul.
+
+995
+00:29:14,280 --> 00:29:16,320
+Olgu, me teeme nii.
+
+996
+00:29:14,280 --> 00:29:16,320
+teisel ringrajal.
+
+997
+00:29:16,360 --> 00:29:18,320
+Noh, see viib meid teise probleemini.
+
+998
+00:29:16,360 --> 00:29:18,320
+teise probleemini.
+
+999
+00:29:18,360 --> 00:29:22,600
+Ferrari on viimased kuud…
+
+1000
+00:29:18,360 --> 00:29:22,600
+kuus kuud öelnud: "Ei,
+
+1001
+00:29:18,360 --> 00:29:22,600
+"me ei taha seda üldse teha,"
+
+1002
+00:29:22,640 --> 00:29:26,200
+-kuna me ei ole selles üldse huvitatud.
+
+1003
+00:29:22,640 --> 00:29:26,200
+– sest me ei ole selles üldse huvitatud.
+
+1004
+00:29:22,640 --> 00:29:26,200
+-Tõesti?
+
+1005
+00:29:26,240 --> 00:29:29,440
+Jah, täpselt nii nad ütlesid.
+
+1006
+00:29:26,240 --> 00:29:29,440
+aga nad on viimaste nädalate jooksul seda muutma hakanud...
+
+1007
+00:29:26,240 --> 00:29:29,440
+Ma ei ütle seda naljalt, nad on öelnud.
+
+1008
+00:29:29,480 --> 00:29:33,200
+Aga viimaste nädalate jooksul on nad hakanud pehmemaks muutuma ja öelnud, et ehk saame teile autot laenutada.
+
+1009
+00:29:29,480 --> 00:29:33,200
+aga viimaste nädalate jooksul on nad hakanud...
+
+1010
+00:29:29,480 --> 00:29:33,200
+et leebemini öelda...
+
+1011
+00:29:33,240 --> 00:29:35,960
+"Väga võimalik, et me saame."
+
+1012
+00:29:33,240 --> 00:29:35,960
+"ehk saame teile autot laenutada."
+
+1013
+00:29:36,000 --> 00:29:37,520
+Noh, siis ongi asi selge.
+
+1014
+00:29:36,000 --> 00:29:37,520
+Nüüd algab mäng!
+
+1015
+00:29:37,560 --> 00:29:39,080
+Ei. Sa näed...
+
+1016
+00:29:37,560 --> 00:29:39,080
+Seal on veel üks probleem.
+
+1017
+00:29:39,120 --> 00:29:42,640
+"McLaren ütles,"
+
+1018
+00:29:39,120 --> 00:29:42,640
+nad teevad seda ainult siis.
+
+1019
+00:29:39,120 --> 00:29:42,640
+kui kõik autod
+
+1020
+00:29:42,680 --> 00:29:45,880
+on kliendi autod, kas?
+
+1021
+00:29:42,680 --> 00:29:45,880
+need on seeriaautod.
+
+1022
+00:29:42,680 --> 00:29:45,880
+mis on juba müüdud, kas nii?
+
+1023
+00:29:45,920 --> 00:29:50,320
+Nad ei taha, et need autod muutuksid...
+
+1024
+00:29:45,920 --> 00:29:50,320
+ja et need rehvid ei oleks liimunud.
+
+1025
+00:29:45,920 --> 00:29:50,320
+Neis on kümme turboülelaadurit, kas?
+
+1026
+00:29:50,360 --> 00:29:55,720
+Ferrari ütles, et nad teevad seda ainult siis, kui autod tulevad otse tehase juurest.
+
+1027
+00:29:50,360 --> 00:29:55,720
+kas nad need autod ikkagi siia toovad?
+
+1028
+00:29:50,360 --> 00:29:55,720
+otseselt tehase poolt valmistatud.
+
+1029
+00:29:55,760 --> 00:29:59,480
+Noh... Olgu siis.
+
+1030
+00:29:55,760 --> 00:29:59,480
+Me leiame kellegi, kellel see on.
+
+1031
+00:29:55,760 --> 00:29:59,480
+üks Ferrari.
+
+1032
+00:29:59,520 --> 00:30:01,360
+ja laenutada...
+
+1033
+00:29:59,520 --> 00:30:01,360
+Ma tean kedagi.
+
+1034
+00:29:59,520 --> 00:30:01,360
+kes sellist omab!
+
+1035
+00:30:01,400 --> 00:30:04,360
+Ma tean, James.
+
+1036
+00:30:01,400 --> 00:30:04,360
+Nad on meid katma hakanud.
+
+1037
+00:30:01,400 --> 00:30:04,360
+ma pole sellest kindel.
+
+1038
+00:30:04,400 --> 00:30:10,680
+Ferrari on tegelikult öelnud, et...
+
+1039
+00:30:04,400 --> 00:30:10,680
+et kui mõni Ferrari omanik...
+
+1040
+00:30:04,400 --> 00:30:10,680
+võlakirjadest meile Ferrarit laenab.
+
+1041
+00:30:10,720 --> 00:30:13,600
+Nad on selle suhtutelt kindlad.
+
+1042
+00:30:10,720 --> 00:30:13,600
+et sellele inimesele ei lubata kunagi enam Ferrari osta.
+
+1043
+00:30:13,640 --> 00:30:16,000
+piiratud seeriatest koosnev Ferrari.
+
+1044
+00:30:13,640 --> 00:30:16,000
+kunagi enam.
+
+1045
+00:30:16,040 --> 00:30:17,320
+HAMMOND: Nad seda ütlesid?
+
+1046
+00:30:16,040 --> 00:30:17,320
+MAYA: Ma ei ole kunagi midagi sellist kuulnud…
+
+1047
+00:30:17,360 --> 00:30:19,480
+– Ma ei tülita sind. Ma tõesti ei tülita sind.
+
+1048
+00:30:17,360 --> 00:30:19,480
+– See on absurdne.
+
+1049
+00:30:19,520 --> 00:30:21,440
+Ma pole kunagi sellist asja kuulnud.
+
+1050
+00:30:19,520 --> 00:30:21,440
+Mitte midagi sellist.
+
+1051
+00:30:21,480 --> 00:30:26,480
+"Poni klubi" emadel on olnud...
+
+1052
+00:30:21,480 --> 00:30:26,480
+midagi sellise kohta inimestelt.
+
+1053
+00:30:21,480 --> 00:30:26,480
+kes need autod valmistavad.
+
+1054
+00:30:26,520 --> 00:30:30,240
+See ei loogita üldse!
+
+1055
+00:30:26,520 --> 00:30:30,240
+Kui ma ühtegi neist autodest ise ehitaksin...
+
+1056
+00:30:26,520 --> 00:30:30,240
+ükski neist.
+
+1057
+00:30:30,280 --> 00:30:33,160
+esimene asi, mida ma soovin teha.
+
+1058
+00:30:30,280 --> 00:30:33,160
+on see, kui kiiresti need autod olid.
+
+1059
+00:30:30,280 --> 00:30:33,160
+võrreldes teistega.
+
+1060
+00:30:33,200 --> 00:30:36,120
+Nende jaoks on see mõeldud!
+
+1061
+00:30:33,200 --> 00:30:36,120
+Ausalt öeldes, kui ma oleksin õpetaja...
+
+1062
+00:30:36,160 --> 00:30:40,640
+ja mul oleksid õpilased McLaren ja
+
+1063
+00:30:36,160 --> 00:30:40,640
+ja mul oleks klassis Ferrari...
+
+1064
+00:30:36,160 --> 00:30:40,640
+Ma lööks neid ära.
+
+1065
+00:30:40,680 --> 00:30:44,080
+Ma ütleksin: "Mine ja vaata..."
+
+1066
+00:30:40,680 --> 00:30:44,080
+ja kui ma oleksin olnud samas klassis McLareniga ja Ferrariga, siis ma nende kõrvad ära lööksin.
+Ma ütlen: "Minge ja vaadake."
+-Vaata.
+-CLARKSON: Mis?
+Nad on siin.
+
+ma läheksin koolipäeval direktorile juttu tegema ja tulin tagasi
+
+1067
+00:30:40,680 --> 00:30:44,080
+"Minge koolijuhataja juurde ja tulge tagasi, kui olete suureks saanud."
+
+1068
+00:30:44,120 --> 00:30:45,680
+Vaata.
+
+1069
+00:30:44,120 --> 00:30:45,680
+-KLARSON: Mis?
+
+1070
+00:30:45,720 --> 00:30:48,280
+Nad on siin.
+
+1071
+00:30:45,720 --> 00:30:48,280
+(hääletult) See on seal, jälgige teda.
+
+1072
+00:30:45,720 --> 00:30:48,280
+Teeme seda lihtsalt ära!
+
+1073
+00:30:48,320 --> 00:30:50,360
+Jah, James, nad on siin.
+
+1074
+00:30:48,320 --> 00:30:50,360
+ja need on lukustatud.
+
+1075
+00:30:50,400 --> 00:30:52,760
+ja need kaks turvameest.
+
+1076
+00:30:50,400 --> 00:30:52,760
+on on tagatud.
+
+
+1077
+00:30:52,800 --> 00:30:55,320
+et me ei teeks lihtsalt nii.
+
+1078
+00:30:52,800 --> 00:30:55,320
+– et me neid pärast etendust ei võtaks kaasa.
+
+
+1079
+00:30:52,800 --> 00:30:55,320
+pärast etendust.
+
+1080
+00:30:55,360 --> 00:30:57,160
+– Sa teed nalja?
+
+1081
+00:30:55,360 --> 00:30:57,160
+– Ma ei peta sind.
+
+1082
+00:30:57,200 --> 00:30:59,400
+Nii et, ausalt öeldes,
+
+1083
+00:30:57,200 --> 00:30:59,400
+see on kõik, see lõpeb siin.
+
+1084
+00:30:57,200 --> 00:30:59,400
+Kas see ei juhtu?
+
+1085
+00:30:59,440 --> 00:31:01,000
+Ei, ei, ei, ei, ei.
+
+1086
+00:30:59,440 --> 00:31:01,000
+Me ei anna alla.
+
+1087
+00:31:01,040 --> 00:31:03,280
+Oleme seda tegelikult kuulnud.
+
+1088
+00:31:01,040 --> 00:31:03,280
+selle nädala jooksul ühest mehest.
+
+1089
+00:31:01,040 --> 00:31:03,280
+Lähi-Idas.
+
+1090
+00:31:03,320 --> 00:31:08,000
+kes omab ühte igast mudelist.
+
+1091
+00:31:03,320 --> 00:31:08,000
+ja tal võib olla neid autosid.
+
+1092
+00:31:03,320 --> 00:31:08,000
+ta on valmis need meile laenama.
+
+1093
+00:31:08,040 --> 00:31:09,680
+Nüüd on teil see teada!
+
+1094
+00:31:08,040 --> 00:31:09,680
+Andke talle helistada.
+
+1095
+00:31:09,720 --> 00:31:11,200
+Tema nimi on Bin Laden.
+
+1096
+00:31:13,200 --> 00:31:14,200
+Ma ei peta. Ta on tõesti nii.
+
+1097
+00:31:14,240 --> 00:31:16,240
+Kas sa mõtled seda "Bin Ladeni" meest?
+
+1098
+00:31:16,280 --> 00:31:19,160
+Ei, ta on surnud.
+
+1099
+00:31:16,280 --> 00:31:19,160
+See oli kindlasti uudistes.
+
+1100
+00:31:16,280 --> 00:31:19,160
+Ma nägin seda.
+
+1101
+00:31:19,200 --> 00:31:20,680
+Ta on selle inimese sugulane.
+
+1102
+00:31:20,720 --> 00:31:22,800
+Sa ei saa inimest niimoodi hinnata.
+
+1103
+00:31:20,720 --> 00:31:22,800
+oma vennapoja poolt.
+
+1104
+00:31:22,840 --> 00:31:25,680
+Sa oled täiesti õige.
+
+1105
+00:31:22,840 --> 00:31:25,680
+Hammond, sa ei saa seda teha.
+
+1106
+00:31:25,720 --> 00:31:28,360
+Aga asjad lähevad valesti.
+
+1107
+00:31:25,720 --> 00:31:28,360
+jah, "Top Gear" saates.
+
+1108
+00:31:25,720 --> 00:31:28,360
+kogu aeg.
+
+1109
+00:31:28,400 --> 00:31:30,240
+-Jah.
+
+1110
+00:31:28,400 --> 00:31:30,240
+Kas sa tahad ise selle telefonikõne sooritada?
+
+1111
+00:31:30,280 --> 00:31:32,160
+(HÄÄL KOKKUR)
+
+1112
+00:31:30,280 --> 00:31:32,160
+Tere, härra Bin Laden, ma olen alles nüüd helistanud.
+
+1113
+00:31:30,280 --> 00:31:32,160
+õnnestunud sinu Porschega kokku põrkama.
+
+1114
+00:31:32,200 --> 00:31:33,600
+oma Ferarri, mitte Poršet.
+
+1115
+00:31:33,640 --> 00:31:35,800
+Ma ei taha seda kõnet teha.
+
+1116
+00:31:33,640 --> 00:31:35,800
+Sa oled õige, ei.
+
+1117
+00:31:35,840 --> 00:31:40,000
+Seega, me oleme siin. Me pole...
+
+1118
+00:31:35,840 --> 00:31:40,000
+aga me ei ole seda teinud.
+
+1119
+00:31:35,840 --> 00:31:40,000
+aga me ei kavatse alla anda, okei?
+
+1120
+00:31:40,040 --> 00:31:42,280
+Tegelikult ongi meie soov...
+
+1121
+00:31:40,040 --> 00:31:42,280
+ja ma loodan, et teie kõik ka lootate.
+
+1122
+00:31:40,040 --> 00:31:42,280
+sama asi,
+
+1123
+00:31:42,320 --> 00:31:47,360
+et esmaspäeva hommikul...
+
+1124
+00:31:42,320 --> 00:31:47,360
+me saabuks kõne Ferrari esindajatelt.
+
+1125
+00:31:42,320 --> 00:31:47,360
+ja saadame McLarent silti.
+
+1126
+00:31:47,400 --> 00:31:49,680
+"Te teate ju, et..."
+
+1127
+00:31:47,400 --> 00:31:49,680
+Teeme seda ära.
+
+1128
+00:31:47,400 --> 00:31:49,680
+Kas te soovite seda kuulata?
+
+1129
+00:31:49,720 --> 00:31:51,440
+-KÕIK: Jah!
+
+1130
+00:31:49,720 --> 00:31:51,440
+-HAMMOND: See peab ju juhtuma.
+
+1131
+00:31:51,480 --> 00:31:54,040
+Teeme seda lihtsalt ära.
+
+1132
+00:31:51,480 --> 00:31:54,040
+Tulge!
+
+1133
+00:31:59,160 --> 00:32:02,120
+Igaljuhul, nüüd on aeg…
+
+1134
+00:32:02,160 --> 00:32:06,640
+Nüüd on aeg edasi liikuda.
+
+1135
+00:32:02,160 --> 00:32:06,640
+ja panna tähti meie jaoks.
+
+1136
+00:32:02,160 --> 00:32:06,640
+õigete hindadega auto.
+
+1137
+00:32:06,680 --> 00:32:08,920
+Tegelikult on me kogu nädala...
+
+1138
+00:32:06,680 --> 00:32:08,920
+inimestel on mulle pidevalt helistanud.
+
+1139
+00:32:08,960 --> 00:32:12,280
+"Kuidas te üldse olete seda suutnud?"
+
+1140
+00:32:08,960 --> 00:32:12,280
+ma kavatsen Will Smithi ületada.
+
+1141
+00:32:08,960 --> 00:32:12,280
+eelmise nädala saates osalenud inimene.
+
+1142
+00:32:12,320 --> 00:32:14,720
+"filmi "Ma olen legendaarne" staar."
+
+1143
+00:32:12,320 --> 00:32:14,720
+...ja Hancock ja nii edasi?
+
+1144
+00:32:14,760 --> 00:32:18,120
+No, see on lihtne.
+
+1145
+00:32:14,760 --> 00:32:18,120
+sest täna on meil külaliseks...
+
+1146
+00:32:14,760 --> 00:32:18,120
+minu külalise rollis.
+
+1147
+00:32:18,160 --> 00:32:22,920
+X Factori finaali teine koht, Olly Murs!
+
+1148
+00:32:18,160 --> 00:32:22,920
+2009. aasta X Factori võistluse teine koht.
+
+1149
+00:32:22,960 --> 00:32:25,200
+Heerlikud daamid ja härrad!
+
+1150
+00:32:22,960 --> 00:32:25,200
+Olly Murs!
+
+1151
+00:32:28,840 --> 00:32:30,880
+Järje, hea on sind näha.
+
+1152
+00:32:28,840 --> 00:32:30,880
+Kuidas läheb?
+
+1153
+00:32:30,920 --> 00:32:32,760
+-Väga hästi. Kuidas läheb?
+
+1154
+00:32:30,920 --> 00:32:32,760
+-Tere!
+
+1155
+00:32:32,800 --> 00:32:34,520
+-Hea, aitäh.
+
+1156
+00:32:32,800 --> 00:32:34,520
+- Tore sind näha.
+
+1157
+00:32:34,560 --> 00:32:36,800
+Ah!
+
+1158
+00:32:34,560 --> 00:32:36,800
+- Palun istuge maha.
+
+1159
+00:32:36,840 --> 00:32:40,000
+See on tore! Vahistus.
+
+1160
+00:32:40,040 --> 00:32:42,080
+Nüüd ma tean, et see oli...
+
+1161
+00:32:40,040 --> 00:32:42,080
+veidi jõhkra sissejuhatusega.
+
+1162
+00:32:42,120 --> 00:32:47,240
+aga tegelikult, see on...
+
+1163
+00:32:42,120 --> 00:32:47,240
+...aga teine koht "X Factoris" on parem kui mitte üldse kohale pääseda.
+
+1164
+00:32:42,120 --> 00:32:47,240
+...aga teine koht on parem kui üldse mitte võita.
+
+1165
+00:32:47,280 --> 00:32:49,800
+Ah, ma… Jah,
+
+1166
+00:32:47,280 --> 00:32:49,800
+Võib-olla on see tõsi, aga…
+
+1167
+00:32:49,840 --> 00:32:52,360
+Ilmselgelt soovisin ma...
+
+1168
+00:32:49,840 --> 00:32:52,360
+et võita saadet.
+
+1169
+00:32:49,840 --> 00:32:52,360
+Ma olen väga konkurentsivõimeline inimene, seega…
+
+1170
+00:32:52,400 --> 00:32:55,880
+No, aga kui sa võidad...
+
+1171
+00:32:52,400 --> 00:32:55,880
+"X Factor'is? No ei, aga kui sa võidad...
+
+1172
+00:32:52,400 --> 00:32:55,880
+kas sa jõuad nädalaga koju?
+
+1173
+00:32:56,960 --> 00:32:58,840
+Või kruiisilaeval.
+
+1174
+00:32:58,880 --> 00:33:01,520
+Jah, aga ma arvan, et see on õnne asi.
+
+1175
+00:32:58,880 --> 00:33:01,520
+sõltumata sellest, kus sa lõpetad.
+
+1176
+00:32:58,880 --> 00:33:01,520
+saates, teate ju.
+
+1177
+00:33:01,560 --> 00:33:02,720
+Sa ei tea, kus sa lõpetad.
+
+1178
+00:33:01,560 --> 00:33:02,720
+sa lõpetad, kus sa lõpetad.
+
+1179
+00:33:02,760 --> 00:33:04,560
+Ma mõtlesin, et pärast...
+
+1180
+00:33:02,760 --> 00:33:04,560
+umbes aasta või kaks.
+
+1181
+00:33:04,600 --> 00:33:07,080
+Tõenäoliselt oleksin… noh…
+
+1182
+00:33:04,600 --> 00:33:07,080
+...jälle helikeskuses töötamas, tegelikult.
+
+1183
+00:33:07,120 --> 00:33:10,040
+Sest see on ju…
+
+1184
+00:33:07,120 --> 00:33:10,040
+Ma lihtsalt mõtlesin, et…
+
+1185
+00:33:07,120 --> 00:33:10,040
+Üks Direction saavutas teise koha.
+
+1186
+00:33:10,080 --> 00:33:12,560
+– Jah, JLS…
+
+1187
+00:33:10,080 --> 00:33:12,560
+– JLS saavutas teise koha.
+
+1188
+00:33:12,600 --> 00:33:15,360
+Oi, ei, One Direction.
+
+1189
+00:33:12,600 --> 00:33:15,360
+sai kolmandaks kohaks.
+
+1190
+00:33:12,600 --> 00:33:15,360
+JLS saavutas teise koha.
+
+1191
+00:33:15,400 --> 00:33:18,000
+Ma oleksin seal seismas.
+
+1192
+00:33:15,400 --> 00:33:18,000
+lõpus, kui nad hindeksüsteemi kasutavad.
+
+1193
+00:33:15,400 --> 00:33:18,000
+ja fakte ning numbreid.
+
+1194
+00:33:18,040 --> 00:33:19,840
+lähen.
+
+1195
+00:33:18,040 --> 00:33:19,840
+"Palun, ärgu lubage mul võita."
+
+1196
+00:33:18,040 --> 00:33:19,840
+"Palun, ärge laske mul võita."
+
+1197
+00:33:19,880 --> 00:33:21,360
+(naerdes)
+
+1198
+00:33:21,400 --> 00:33:23,040
+Sest siis ma...
+
+1199
+00:33:21,400 --> 00:33:23,040
+kuna ma siis oleksin sinu sarnane...
+
+1200
+00:33:23,080 --> 00:33:24,560
+Aitäh, väga tore!
+
+1201
+00:33:24,600 --> 00:33:26,760
+Ma mõtlen, kui edukas sa siis oled?
+
+1202
+00:33:24,600 --> 00:33:26,760
+kumani palju albumeid?
+
+1203
+00:33:24,600 --> 00:33:26,760
+– Kuu, palju te olete nüüdseks müünud?
+
+1204
+00:33:26,800 --> 00:33:28,360
+-Hmm, ma...
+
+1205
+00:33:26,800 --> 00:33:28,360
+-kümme miljonit?
+
+1206
+00:33:28,400 --> 00:33:31,360
+– Ei, see on kümme miljonit kokku.
+
+1207
+00:33:28,400 --> 00:33:31,360
+aga, noh...
+
+1208
+00:33:28,400 --> 00:33:31,360
+- Noh, see on palju.
+
+1209
+00:33:31,400 --> 00:33:32,840
+Ja siis veel singlid,
+
+1210
+00:33:31,400 --> 00:33:32,840
+ja kõik muu kokkuvõttes.
+
+1211
+00:33:32,880 --> 00:33:34,400
+aga ma arvan, et albumite...
+
+1212
+00:33:32,880 --> 00:33:34,400
+ma arvan, umbes kolm miljonit?
+
+1213
+00:33:34,440 --> 00:33:36,320
+See on palju.
+
+1214
+00:33:34,440 --> 00:33:36,320
+aga tänapäeval on albumite arv...
+
+1215
+00:33:36,360 --> 00:33:39,080
+Nojah, ma olen väga rahul.
+
+1216
+00:33:36,360 --> 00:33:39,080
+Ma ei ütle seda nii, et...
+
+1217
+00:33:36,360 --> 00:33:39,080
+üks albumimüük.
+
+1218
+00:33:39,120 --> 00:33:43,000
+ei, ma olen väga rahul sellega.
+
+1219
+00:33:39,120 --> 00:33:43,000
+kõik on neid ostnud.
+
+1220
+00:33:39,120 --> 00:33:43,000
+Ma olen väga hea meel, et kõik on minu albumitest ostnud!
+
+1221
+00:33:43,040 --> 00:33:45,880
+Ja mida sa siis tegid?
+
+1222
+00:33:43,040 --> 00:33:45,880
+siis, enne laulmist.
+
+1223
+00:33:43,040 --> 00:33:45,880
+Simon Cowelli?
+
+1224
+00:33:45,920 --> 00:33:47,840
+Ma olin lihtsalt tööl.
+
+1225
+00:33:45,920 --> 00:33:47,840
+callikeskuses töötades.
+
+1226
+00:33:47,880 --> 00:33:50,880
+Ma andsin inimestele nõu.
+
+1227
+00:33:47,880 --> 00:33:50,880
+kuidas raha kokku hoida.
+
+1228
+00:33:47,880 --> 00:33:50,880
+nende energiatarbimise kuludega.
+
+1229
+00:33:50,920 --> 00:33:52,200
+Nii, kas sa elasid Mumbai linnas?
+
+1230
+00:33:55,320 --> 00:33:58,240
+Ei. Ei, ei, see oli lihtsalt...
+
+1231
+00:33:55,320 --> 00:33:58,240
+Essexi maakonnas, Witami linnaosas.
+
+1232
+00:33:58,280 --> 00:33:59,840
+Sa oled pärit Essexi piirkonnast.
+
+1233
+00:33:59,880 --> 00:34:01,480
+- Essexi poiss, jah.
+
+1234
+00:33:59,880 --> 00:34:01,480
+-Ah jaa, hea, noh,
+
+1235
+00:33:59,880 --> 00:34:01,480
+Seal on need numbrid.
+
+1236
+00:34:01,520 --> 00:34:03,480
+Ja mitte ainult mingi Essexi poiss.
+
+1237
+00:34:01,520 --> 00:34:03,480
+aga me räägime siin tegelikult...
+
+1238
+00:34:03,520 --> 00:34:05,480
+üks tõeline autohing.
+
+1239
+00:34:03,520 --> 00:34:05,480
+Kas me ei ole küll?
+
+1240
+00:34:05,520 --> 00:34:07,120
+Täpselt nii, jah.
+
+1241
+00:34:05,520 --> 00:34:07,120
+Ma armastan oma autosid.
+
+1242
+00:34:07,160 --> 00:34:11,280
+Ma ütleksin nii, et varem...
+
+1243
+00:34:07,160 --> 00:34:11,280
+Ma olin kuulus ja
+
+1244
+00:34:07,160 --> 00:34:11,280
+ma hakkasin seda tegema, teadsin ju.
+
+1245
+00:34:11,320 --> 00:34:12,840
+Mul polnud kõige paremat autot.
+
+1246
+00:34:11,320 --> 00:34:12,840
+ilusat autot.
+
+1247
+00:34:12,880 --> 00:34:14,560
+Mis oli teie esimene auto?
+
+1248
+00:34:14,600 --> 00:34:18,000
+Mu esimeseks autoks oli...
+
+
+1249
+00:34:14,600 --> 00:34:18,000
+Fiat Cinquecento.
+
+1250
+00:34:18,040 --> 00:34:19,800
+(publik naerab)
+
+1251
+00:34:19,840 --> 00:34:21,680
+Ma arvan, et see on "Cinquecento".
+
+1252
+00:34:21,720 --> 00:34:23,240
+– Cinquecento.
+
+1253
+00:34:21,720 --> 00:34:23,240
+– Mis, nagu ikka, on valmistatud.
+
+1254
+00:34:21,720 --> 00:34:23,240
+– Mis, muide, sai kuulsaks seriaali "The Inbetweeners" tänuž.
+
+1255
+00:34:23,280 --> 00:34:25,000
+- Täpselt!
+
+1256
+00:34:23,280 --> 00:34:25,000
+– Vaata, seal ta on!
+
+1257
+00:34:25,040 --> 00:34:27,080
+Mul on see siiani alles.
+
+1258
+00:34:25,040 --> 00:34:27,080
+See on ikka…
+
+1259
+00:34:25,040 --> 00:34:27,080
+See on praegu ikka minu juures.
+
+1260
+00:34:27,120 --> 00:34:29,480
+Kas see kuulub tegelikult sulle?
+
+1261
+00:34:27,120 --> 00:34:29,480
+-See on ikka minu omad, jah, jah.
+
+1262
+00:34:27,120 --> 00:34:29,480
+Mul on see ikka alles.
+
+1263
+00:34:29,520 --> 00:34:34,640
+Kas sa tead, aga...?
+
+1264
+00:34:29,520 --> 00:34:34,640
+Ma kulutasin rohkem raha...
+
+1265
+00:34:29,520 --> 00:34:34,640
+See auto maksis mulle 895 naela.
+
+1266
+00:34:34,680 --> 00:34:39,400
+Ja ma arvan, et ma kulutasin...
+
+1267
+00:34:34,680 --> 00:34:39,400
+950 naela.
+
+1268
+00:34:34,680 --> 00:34:39,400
+heliülekanne selle jaoks.
+
+1269
+00:34:41,200 --> 00:34:45,960
+Jäin kinni Borehamis, Essex's.
+
+1270
+00:34:41,200 --> 00:34:45,960
+"Hei, kuulge,
+
+1271
+00:34:41,200 --> 00:34:45,960
+"ma arvan, et kõik on ära müüdud, poisid."
+
+1272
+00:34:46,000 --> 00:34:47,920
+Ma eeldan samuti,
+
+1273
+00:34:46,000 --> 00:34:47,920
+kui oleksite "X Factor" võitnud.
+
+1274
+00:34:46,000 --> 00:34:47,920
+ja oleksite selle kätte saanud.
+
+1275
+00:34:47,960 --> 00:34:50,560
+See oleks olnud võimalik.
+
+1276
+00:34:47,960 --> 00:34:50,560
+päris palju vöökantidega seotud juhtumeid.
+
+1277
+00:34:47,960 --> 00:34:50,560
+seal oleks olnud päris palju püksidega seotud juhtumeid.
+
+1278
+00:34:50,600 --> 00:34:53,280
+Vabandust, jumal!
+
+1279
+00:34:50,600 --> 00:34:53,280
+Jah, noh, see üks...
+
+1280
+00:34:50,600 --> 00:34:53,280
+Oh, Jumal.
+
+1281
+00:34:55,400 --> 00:34:57,400
+Mu fännid teile ütlevad,
+
+1282
+00:34:55,400 --> 00:34:57,400
+Ma kardan alati seda.
+
+1283
+00:34:55,400 --> 00:34:57,400
+mind püksid maha.
+
+1284
+00:34:57,440 --> 00:35:02,040
+aga mitte, ühel päeval olin ma tööl.
+
+1285
+00:34:57,440 --> 00:35:02,040
+Ma olin tegelikult tööl.
+
+1286
+00:34:57,440 --> 00:35:02,040
+nii, siis ma töötasin personaliotsingu valdkonnas.
+
+1287
+00:35:02,080 --> 00:35:04,160
+Ma lihtsalt tõstsin kastid üles.
+
+1288
+00:35:02,080 --> 00:35:04,160
+umbes kell kümme hommikul.
+
+1289
+00:35:04,200 --> 00:35:07,480
+Ma läksin alla ja tõstsin karpe üles.
+
+1290
+00:35:04,200 --> 00:35:07,480
+ja ma olin tõmmanud püksid puruks.
+
+1291
+00:35:04,200 --> 00:35:07,480
+ja ma olen rebenud pükside taguosa ära.
+
+1292
+00:35:07,520 --> 00:35:11,880
+ja ma tahan koju minna.
+
+1293
+00:35:07,520 --> 00:35:11,880
+nii et ma läksin oma autosse.
+
+1294
+00:35:07,520 --> 00:35:11,880
+jõudsin välja parklaist.
+
+1295
+00:35:11,920 --> 00:35:14,560
+Ma keeran nurgast ümber.
+
+1296
+00:35:11,920 --> 00:35:14,560
+Ma tõusin ülespoole.
+
+1297
+00:35:11,920 --> 00:35:14,560
+liiklusvalgud.
+
+1298
+00:35:14,600 --> 00:35:16,640
+ja ma olin alles minna...
+
+1299
+00:35:14,600 --> 00:35:16,640
+et ma turvavöö kinnitaksin.
+
+1300
+00:35:16,680 --> 00:35:18,160
+ja siis, ootamatult.
+
+1301
+00:35:16,680 --> 00:35:18,160
+politsei auto oli äkitselt…
+
+1302
+00:35:18,200 --> 00:35:20,280
+närimine nurgast ümber.
+
+1303
+00:35:18,200 --> 00:35:20,280
+ja kui nad mu nägid seda tegemas…
+
+1304
+00:35:20,320 --> 00:35:23,960
+ja ta kihutas mu järel ära.
+
+1305
+00:35:20,320 --> 00:35:23,960
+"Oh, kuradi jutt," ütlesin ma.
+
+1306
+00:35:24,000 --> 00:35:27,440
+Nii et siis ma läksin autoga sinna.
+
+1307
+00:35:24,000 --> 00:35:27,440
+Tesco poeõu.
+
+1308
+00:35:24,000 --> 00:35:27,440
+peatasin auto.
+
+1309
+00:35:27,480 --> 00:35:30,520
+ja siis ma läksin välja ning ilmselgelt...
+
+1310
+00:35:27,480 --> 00:35:30,520
+Ma seisan seal, täpselt keset...
+
+1311
+00:35:27,480 --> 00:35:30,520
+Tesco poe parkla juures.
+
+1312
+00:35:30,560 --> 00:35:33,440
+lõuna ajal, koos...
+
+1313
+00:35:30,560 --> 00:35:33,440
+kõik mu rõivad olid peal, aga...
+
+1314
+00:35:33,480 --> 00:35:37,720
+Oi, see oli nii piinlik.
+
+1315
+00:35:33,480 --> 00:35:37,720
+ma arvan, et nad mulle...
+
+1316
+00:35:33,480 --> 00:35:37,720
+Nad määrasid mulle 60 naela trahvi.
+
+1317
+00:35:37,760 --> 00:35:39,920
+Oh, sulle määrati 60 naela trahvi.
+
+1318
+00:35:37,760 --> 00:35:39,920
+eet, sest mul olid püksid all...
+
+1319
+00:35:39,960 --> 00:35:43,600
+Ei, ei. Nad tõenäoliselt...
+
+1320
+00:35:39,960 --> 00:35:43,600
+oleksid mind selle eest karistada saanud.
+
+1321
+00:35:39,960 --> 00:35:43,600
+seda ka.
+
+1322
+00:35:43,640 --> 00:35:44,960
+Oh, turvavöö.
+
+1323
+00:35:45,000 --> 00:35:48,040
+Nojah, nad oleksid muudugi ka selle pärast minuga pahaks läinud.
+Ah, turvavöö.
+Kas keegi sooviks Olly põlvedel istumist näha?
+(Hingamine)
+Ma olin...
+
+Noh, kes siin...
+
+1324
+00:35:45,000 --> 00:35:48,040
+Kas keegi soovib Ollie põlve peale istuda?
+
+1325
+00:35:48,080 --> 00:35:49,240
+Jah!
+
+1326
+00:35:49,280 --> 00:35:50,320
+Olige vaid. Laske lindistus käima.
+
+1327
+00:35:56,720 --> 00:35:59,520
+Ah, ma olin…
+
+1328
+00:35:56,720 --> 00:35:59,520
+(naerdes)
+
+1329
+00:36:00,600 --> 00:36:02,240
+Oh, kurat küll.
+
+1330
+00:36:03,320 --> 00:36:05,200
+Vabandust, kallis.
+
+1331
+00:36:05,240 --> 00:36:08,520
+See oli kingitus.
+
+1332
+00:36:05,240 --> 00:36:08,520
+vahe kahel asjal.
+
+1333
+00:36:05,240 --> 00:36:08,520
+üks ring ja veel üks ring.
+
+1334
+00:36:08,560 --> 00:36:11,080
+Mul polnud lihtsalt aega.
+
+1335
+00:36:08,560 --> 00:36:11,080
+et ma oleksin jõudnud ennast ettevalmistada.
+
+1336
+00:36:11,120 --> 00:36:13,200
+Ma tegelikult arvasin, et see oli...
+
+1337
+00:36:11,120 --> 00:36:13,200
+see siis ma mõtlesin...
+
+1338
+00:36:11,120 --> 00:36:13,200
+(hingamine on pugenud)
+
+1339
+00:36:13,240 --> 00:36:15,200
+Jah, ei, ei, see oli…
+
+1340
+00:36:13,240 --> 00:36:15,200
+Nojah, see oli ju sinu ring.
+
+1341
+00:36:15,240 --> 00:36:17,320
+aga see ei olnud minu käte vahel.
+
+1342
+00:36:15,240 --> 00:36:17,320
+millest me räägime.
+
+1343
+00:36:17,360 --> 00:36:22,040
+– Ilmselt nüüd, kui see Fiat…
+
+1344
+00:36:17,360 --> 00:36:22,040
+on hetkel kusagil parkimiskohal...
+
+1345
+00:36:17,360 --> 00:36:22,040
+-Jah.
+
+1346
+00:36:22,080 --> 00:36:24,880
+Sa oled ikka nii palju rääkinud.
+
+1347
+00:36:22,080 --> 00:36:24,880
+autohuviliseks.
+
+1348
+00:36:22,080 --> 00:36:24,880
+osta midagi.
+
+1349
+00:36:24,920 --> 00:36:27,360
+veidi rohkem...
+
+1350
+00:36:24,920 --> 00:36:27,360
+Ma ei tea, tähtede all.
+
+1351
+00:36:27,400 --> 00:36:30,120
+Ei, ei, noh, jah, ei.
+
+1352
+00:36:27,400 --> 00:36:30,120
+Ma proovisin erinevaid BMW-sid.
+
+1353
+00:36:30,160 --> 00:36:33,200
+ja siis ma otsustasin,
+
+1354
+00:36:30,160 --> 00:36:33,200
+"Sa tead, mis?
+
+1355
+00:36:30,160 --> 00:36:33,200
+Ma kavatsen midagi suurejoonelist teha.
+
+1356
+00:36:33,240 --> 00:36:36,480
+Nii et ma läksin ja ostsin endale...
+
+1357
+00:36:33,240 --> 00:36:36,480
+üks Bentley Continental GT.
+
+1358
+00:36:36,520 --> 00:36:39,800
+Ah, see on küll midagi!
+
+1359
+00:36:36,520 --> 00:36:39,800
+See on üsna huvitav auto, tegelikult.
+
+1360
+00:36:36,520 --> 00:36:39,800
+Mis mudelil see on?
+
+1361
+00:36:40,760 --> 00:36:42,480
+See on lihtsalt Continental GT V8 mudel.
+
+1362
+00:36:42,520 --> 00:36:44,600
+- See on õige.
+
+1363
+00:36:42,520 --> 00:36:44,600
+-Jah.
+
+1364
+00:36:44,640 --> 00:36:47,440
+Kuna seal on nii palju miine.
+
+1365
+00:36:44,640 --> 00:36:47,440
+sa saad sellel sõita.
+
+1366
+00:36:44,640 --> 00:36:47,440
+teel edasi liikudes.
+
+1367
+00:36:47,480 --> 00:36:49,280
+-See ei ole.
+
+1368
+00:36:47,480 --> 00:36:49,280
+Kapiar auto, kas?"
+
+1369
+00:36:47,480 --> 00:36:49,280
+-Ei.
+
+1370
+00:36:49,320 --> 00:36:51,720
+Ei, sa aru annad, et...
+
+1371
+00:36:49,320 --> 00:36:51,720
+Ma arvan, et avariikauto...
+
+1372
+00:36:49,320 --> 00:36:51,720
+see, see, ma arvan, et avariibil on teine efekt...
+(naer)
+ja siis sa näed seda...
+aga kui sa näed sellist avariibentleyt,
+
+1373
+00:36:51,760 --> 00:36:54,520
+Jah, sest iga kord, kui sa seda näed.
+
+1374
+00:36:51,760 --> 00:36:54,520
+kaabrioogna Bentley...
+
+1375
+00:36:54,560 --> 00:36:56,520
+inimestel on alati selline tunne, et...
+
+1376
+00:36:54,560 --> 00:36:56,520
+helesinise.
+
+1377
+00:36:56,560 --> 00:36:58,360
+või on see helepunane.
+
+1378
+00:36:56,560 --> 00:36:58,360
+või see on valge.
+
+1379
+00:36:58,400 --> 00:37:01,040
+Ja neil on tavaliselt...
+
+1380
+00:36:58,400 --> 00:37:01,040
+oranžikas nägu.
+
+1381
+00:36:58,400 --> 00:37:01,040
+ja sa oled Šešeris.
+
+1382
+00:37:01,080 --> 00:37:03,160
+Või Essex!
+
+1383
+00:37:01,080 --> 00:37:03,160
+- Või Essex!
+
+1384
+00:37:03,200 --> 00:37:04,880
+Igatahes…
+
+1385
+00:37:04,920 --> 00:37:07,040
+Nüüd sa jõudsid siia alla.
+
+1386
+00:37:04,920 --> 00:37:07,040
+"kuid huvitaval kombel,"
+
+1387
+00:37:07,080 --> 00:37:09,480
+meil on olnud üks väike probleem.
+
+1388
+00:37:07,080 --> 00:37:09,480
+...täna koos "The Stigiga".
+
+1389
+00:37:09,520 --> 00:37:11,800
+Ma mõtlen, ja see on...
+
+1390
+00:37:09,520 --> 00:37:11,800
+ma ei ütle seda valetamata.
+
+1391
+00:37:11,840 --> 00:37:13,880
+meil oli seal Will Smith.
+
+1392
+00:37:11,840 --> 00:37:13,880
+siis, ma ei ütle vale,
+eelmise nädala jooksul oli meil siin Will Smith.
+
+1393
+00:37:11,840 --> 00:37:13,880
+nagu te ilmselt teate.
+
+1394
+00:37:13,920 --> 00:37:16,720
+-Stig oli seal.
+
+1395
+00:37:13,920 --> 00:37:16,720
+Ehk pole temast kuulnud.
+
+1396
+00:37:13,920 --> 00:37:16,720
+- Vaikige!
+
+1397
+00:37:16,760 --> 00:37:20,160
+Kiefer Sutherland.
+
+1398
+00:37:16,760 --> 00:37:20,160
+umbes paar nädalat tagasi?
+
+1399
+00:37:16,760 --> 00:37:20,160
+Ma pole temast kuulnud.
+
+1400
+00:37:20,200 --> 00:37:23,920
+See oli Ed Sheeran, esimesel hooajal?
+
+1401
+00:37:20,200 --> 00:37:23,920
+Ükski ettekujtus. Ta ei tea, kes ta on.
+
+1402
+00:37:20,200 --> 00:37:23,920
+Kes iganes on.
+
+1403
+00:37:23,960 --> 00:37:26,960
+Ma läksin sinna täna hommikul.
+
+1404
+00:37:23,960 --> 00:37:26,960
+"Olly Murs?"
+
+1405
+00:37:27,000 --> 00:37:31,560
+– Ta ei tea absoluutselt midagi.
+
+1406
+00:37:27,000 --> 00:37:31,560
+...täielikult armunud sinusse.
+
+1407
+00:37:27,000 --> 00:37:31,560
+-Ei! (naerab)
+
+1408
+00:37:31,600 --> 00:37:34,480
+Stig on tema jaoks…
+
+1409
+00:37:31,600 --> 00:37:34,480
+Peale The Carpenteri...
+
+1410
+00:37:31,600 --> 00:37:34,480
+ilmselgelt,
+
+1411
+00:37:34,520 --> 00:37:36,640
+tema absoluutne lemmikartist.
+
+1412
+00:37:36,680 --> 00:37:38,720
+Te teate ju, et...
+
+1413
+00:37:36,680 --> 00:37:38,720
+Kas ma saan lihtsalt öelda...?
+
+1414
+00:37:38,760 --> 00:37:41,360
+See, tema absoluutne lemmikartist.
+Kas te teate?
+Ma pean ütlema...
+Ma tahan seda infot,
+aga ma olen õnnelik, et siin viibin.
+Ma läksin sinna,
+ja astusin tualetti.
+
+
+
+1415
+00:37:38,760 --> 00:37:41,360
+soovivad seda infot teada saada,
+
+1416
+00:37:38,760 --> 00:37:41,360
+aga ma olen väga õel, et siin olla.
+
+1417
+00:37:41,400 --> 00:37:46,040
+Ma läksin.
+
+1418
+00:37:41,400 --> 00:37:46,040
+Ma läksin tualetti.
+
+1419
+00:37:41,400 --> 00:37:46,040
+et see juhtuks, teate ju.
+
+1420
+00:37:46,080 --> 00:37:48,200
+-Ta oli seal sees.
+
+1421
+00:37:46,080 --> 00:37:48,200
+nagu ma sinna läksin.
+
+1422
+00:37:46,080 --> 00:37:48,200
+-Oled sa tema penist näinud?
+
+1423
+00:37:48,240 --> 00:37:49,520
+No, ta oli…
+
+1424
+00:37:48,240 --> 00:37:49,520
+No, ta oli seal...
+
+1425
+00:37:53,040 --> 00:37:55,080
+Ta kandis.
+
+
+1426
+00:37:53,040 --> 00:37:55,080
+tema kiiver oli ikka peas.
+
+1427
+00:37:53,040 --> 00:37:55,080
+seega see ei olnud...
+
+1428
+00:37:57,920 --> 00:38:00,600
+Ta ei olnud...
+
+1429
+00:37:57,920 --> 00:38:00,600
+Ma arvasin, et ta on...
+
+1430
+00:37:57,920 --> 00:38:00,600
+ta hoidis oma kiivrit käes.
+
+1431
+00:38:00,640 --> 00:38:01,640
+aga ma arvan, et...
+
+1432
+00:38:07,640 --> 00:38:09,480
+See on väga oluline uudis!
+
+1433
+00:38:09,520 --> 00:38:11,080
+Aga hetkeks, hetkeks, hetkeks, hetkeks.
+
+1434
+00:38:11,120 --> 00:38:14,120
+Noh, minu senise parima loo kohta...
+
+1435
+00:38:11,120 --> 00:38:14,120
+minu seni parim kuulujutt oli, noh...
+
+1436
+00:38:14,160 --> 00:38:15,720
+Sa ei saa sellele midagi vastu!
+
+1437
+00:38:15,760 --> 00:38:17,440
+Ei, see pole võimalik.
+
+1438
+00:38:15,760 --> 00:38:17,440
+veel üks juhtum seoses tualetiga.
+
+1439
+00:38:15,760 --> 00:38:17,440
+...koos Gary Barlowga.
+
+1440
+00:38:17,480 --> 00:38:18,840
+mis oli...
+
+1441
+00:38:20,240 --> 00:38:22,160
+(IMITAB BARLOWT)
+
+1442
+00:38:20,240 --> 00:38:22,160
+Täiesti fantastiline, jah.
+
+1443
+00:38:24,280 --> 00:38:27,680
+Aga nüüd ma olen olnud...
+
+1444
+00:38:24,280 --> 00:38:27,680
+... koos Stigiga tualetti.
+
+1445
+00:38:24,280 --> 00:38:27,680
+See on üsna imeline.
+
+1446
+00:38:27,720 --> 00:38:29,160
+– Igatahes…
+
+1447
+00:38:27,720 --> 00:38:29,160
+- Jah.
+
+1448
+00:38:29,200 --> 00:38:33,560
+Ilmselt käisid sa seal väljas.
+
+1449
+00:38:29,200 --> 00:38:33,560
+Vauxhall Astraga?
+
+1450
+00:38:29,200 --> 00:38:33,560
+Kas see on tehniline abi?
+
+1451
+00:38:33,600 --> 00:38:35,560
+-Jah.
+
+1452
+00:38:33,600 --> 00:38:35,560
+– Palju ringe, palju treeninguid?
+
+1453
+00:38:35,600 --> 00:38:39,240
+Ma proovisin päris mitmeid ringe.
+
+1454
+00:38:35,600 --> 00:38:39,240
+ja ma tegin neid päris palju.
+
+1455
+00:38:35,600 --> 00:38:39,240
+"No ikka!", ma ütlesin.
+
+1456
+00:38:39,280 --> 00:38:42,480
+Ma tundsin seda.
+
+1457
+00:38:39,280 --> 00:38:42,480
+Sa tead, millal see tabab sind.
+
+1458
+00:38:39,280 --> 00:38:42,480
+"Anna minna!"
+
+1459
+00:38:42,520 --> 00:38:45,360
+Kas te soovite seda näha?
+
+1460
+00:38:42,520 --> 00:38:45,360
+päris, tõeline ring.
+
+1461
+00:38:42,520 --> 00:38:45,360
+autoga?
+
+1462
+00:38:45,400 --> 00:38:46,480
+Jah!
+
+1463
+00:38:46,520 --> 00:38:47,520
+Siin me läheme, vaatame natuke lähemalt.
+
+1464
+00:38:48,720 --> 00:38:50,600
+[rehvid hõikavad]
+
+1465
+00:38:50,640 --> 00:38:51,640
+CLARKSON: Me läheme!
+
+1466
+00:38:52,520 --> 00:38:56,360
+Anna minna, mu kallis.
+
+1467
+00:38:52,520 --> 00:38:56,360
+Nurise koos minuga!
+
+1468
+00:38:56,400 --> 00:38:57,960
+Sa näed välja...
+
+1469
+00:38:56,400 --> 00:38:57,960
+Seal on Val Kilmer.
+
+1470
+00:38:59,440 --> 00:39:01,840
+Ah jaa, see on...
+
+1471
+00:38:59,440 --> 00:39:01,840
+agressiivne pöörde.
+
+1472
+00:39:03,760 --> 00:39:07,840
+Sama rida, et...
+
+1473
+00:39:03,760 --> 00:39:07,840
+Ricciardo kasutas...
+
+1474
+00:39:03,760 --> 00:39:07,840
+teisel päeval, väga hea.
+
+1475
+00:39:07,880 --> 00:39:14,080
+♪ Ärge nuta minu pärast.
+
+1476
+00:39:07,880 --> 00:39:14,080
+Argentina.
+
+1477
+00:39:14,120 --> 00:39:16,760
+-CLARKSON : Ärge laulke.
+
+1478
+00:39:14,120 --> 00:39:16,760
+seal, täpselt.
+
+1479
+00:39:14,120 --> 00:39:16,760
+(MURNA NAER)
+
+1480
+00:39:18,240 --> 00:39:19,840
+Seal me oleme.
+
+1481
+00:39:18,240 --> 00:39:19,840
+hea töö, aga...
+
+1482
+00:39:19,880 --> 00:39:23,560
+Vabandage mu sõnade pärast, ema.
+
+1483
+00:39:19,880 --> 00:39:23,560
+Ma vabandust palun.
+
+1484
+00:39:19,880 --> 00:39:23,560
+Ma ei tahtnud solvavat keelt kasutada.
+
+1485
+00:39:23,600 --> 00:39:24,640
+KLARKSUN: Sa ei ole veel sõnaõigust kaotanud.
+
+1486
+00:39:25,560 --> 00:39:27,040
+Mina pean see lihtsalt ära tegema!
+
+1487
+00:39:27,080 --> 00:39:30,440
+Ei, sa vandusid just nüüd.
+
+1488
+00:39:27,080 --> 00:39:30,440
+See oli siiski lubadus.
+
+1489
+00:39:30,480 --> 00:39:32,200
+(rehvid hõikavad)
+
+1490
+00:39:32,240 --> 00:39:37,400
+OK, see ongi kõik.
+
+1491
+00:39:32,240 --> 00:39:37,400
+peaaegu täiuslik.
+
+1492
+00:39:32,240 --> 00:39:37,400
+nagu see käib, teisisõnu öeldes.
+
+1493
+00:39:37,440 --> 00:39:40,600
+Just sell on.
+
+1494
+00:39:37,440 --> 00:39:40,600
+ei mingit ülereageringut.
+
+1495
+00:39:37,440 --> 00:39:40,600
+see on tore.
+
+1496
+00:39:40,640 --> 00:39:44,480
+70... 80...
+
+1497
+00:39:46,760 --> 00:39:49,560
+Jah, täpselt nii.
+
+1498
+00:39:46,760 --> 00:39:49,560
+See oli ühtlane.
+
+1499
+00:39:49,600 --> 00:39:51,880
+Jah, mul oli hea tunne.
+
+1500
+00:39:49,600 --> 00:39:51,880
+lähen seal läbi.
+
+1501
+00:39:51,920 --> 00:39:55,040
+Ma panin neljanda käiku sisse.
+
+1502
+00:39:51,920 --> 00:39:55,040
+just nagu ma rehvidele jõudsin.
+
+1503
+00:39:55,840 --> 00:39:57,360
+See on kurv.
+
+1504
+00:39:57,400 --> 00:39:59,000
+See ongi see kurv.
+
+1505
+00:39:57,400 --> 00:39:59,000
+Oh, vaata teda!
+
+1506
+00:39:57,400 --> 00:39:59,000
+ta on seal natuke ebakindlalt.
+
+1507
+00:39:59,040 --> 00:40:00,840
+See on väga hea juhtimine.
+
+1508
+00:40:00,880 --> 00:40:03,280
+See on hea šassii.
+
+1509
+00:40:00,880 --> 00:40:03,280
+aga sa hakkad seda juba omandama.
+
+1510
+00:40:00,880 --> 00:40:03,280
+ja te lähete sellest maksimumi saavutama.
+
+1511
+00:40:03,320 --> 00:40:07,240
+ja see on ka täpselt nii.
+
+1512
+00:40:03,320 --> 00:40:07,240
+ja siin me oleme.
+
+1513
+00:40:03,320 --> 00:40:07,240
+ületatud piiri.
+
+1514
+00:40:07,280 --> 00:40:08,360
+Ah!
+
+1515
+00:40:09,560 --> 00:40:10,920
+KLARKSUN: Olge siis valmis.
+
+1516
+00:40:09,560 --> 00:40:10,920
+Nüüd oleme jõudnud siiani.
+
+1517
+00:40:15,560 --> 00:40:18,720
+Kuhu sa arvad, et?
+
+1518
+00:40:15,560 --> 00:40:18,720
+kus sa arvad, et ta praegu on?
+
+1519
+00:40:18,760 --> 00:40:22,880
+Minu eesmärk oli 1:46.
+
+1520
+00:40:18,760 --> 00:40:22,880
+Ma lihtsalt tahtsin…
+
+1521
+00:40:22,920 --> 00:40:26,200
+CLARKSON: Tahtsin…
+
+1522
+00:40:22,920 --> 00:40:26,200
+kas sa soovisid Hugi Jackmani edestada?
+
+1523
+00:40:22,920 --> 00:40:26,200
+1:46 on üsna ambitsiooniline aeg...
+
+1524
+00:40:26,240 --> 00:40:28,520
+(MURDAB HÄNGALTE)
+
+1525
+00:40:26,240 --> 00:40:28,520
+-CLARKSON: Väga ambitsioonikas.
+
+1526
+00:40:28,560 --> 00:40:30,800
+Oh, Jumal, vabastage mind sellest.
+
+1527
+00:40:28,560 --> 00:40:30,800
+ma vabaneks sellest piinast.
+
+1528
+00:40:30,840 --> 00:40:33,920
+Kuid seni, kuni ma olen Jacki lühendanud...
+
+1529
+00:40:30,840 --> 00:40:33,920
+See on ainus asi, mis mind huvitab.
+
+1530
+00:40:30,840 --> 00:40:33,920
+Tulge, tulege.
+
+1531
+00:40:33,960 --> 00:40:35,280
+Kõik saavad Jacki lüüa.
+
+1532
+00:40:35,320 --> 00:40:36,560
+Ma ei taha vaadata.
+
+1533
+00:40:35,320 --> 00:40:36,560
+Ära vaata. Ütle mulle, millal.
+
+1534
+00:40:36,600 --> 00:40:38,320
+Stevie Wonder esineb järgmisel nädalal.
+
+1535
+00:40:36,600 --> 00:40:38,320
+Ta saab Jacki võita.
+
+1536
+00:40:41,680 --> 00:40:42,680
+Sa tegid ühe ümber.
+
+1537
+00:40:45,320 --> 00:40:46,360
+nelikümmend…
+
+1538
+00:40:47,800 --> 00:40:49,200
+Nüüd sa tahad, et ma ütlen "kuus".
+
+1539
+00:40:47,800 --> 00:40:49,200
+kas sa ei usu seda?
+
+1540
+00:40:50,320 --> 00:40:51,480
+Ma ütlen: "neli".
+
+1541
+00:40:52,040 --> 00:40:53,560
+(publik on šokeeritud)
+
+1542
+00:40:53,600 --> 00:40:54,640
+Ei!
+
+1543
+00:40:57,080 --> 00:41:01,280
+Nii et tegelikult, sa oled seal ees.
+
+1544
+00:40:57,080 --> 00:41:01,280
+koos ainult Aaron Pauliga.
+
+1545
+00:40:57,080 --> 00:41:01,280
+nagu sarjas "Breaking Bad".
+
+1546
+00:41:01,320 --> 00:41:03,360
+\- 1 minut ja 44,7 sekundit.
+
+1547
+00:41:01,320 --> 00:41:03,360
+- Vaikseks!
+
+1548
+00:41:04,240 --> 00:41:05,640
+Ta on meie parim seni.
+
+1549
+00:41:05,680 --> 00:41:09,640
+Nii et kui see on väiksem kui seitse,
+
+1550
+00:41:05,680 --> 00:41:09,640
+sa oled kõige kiiremini kunagi olnud.
+
+1551
+00:41:12,680 --> 00:41:15,040
+-See on kuus.
+
+1552
+00:41:12,680 --> 00:41:15,040
+-Jah!
+
+1553
+00:41:15,080 --> 00:41:17,680
+-Oleks siis mina?
+
+1554
+00:41:15,080 --> 00:41:17,680
+Sa tegid seda!
+
+1555
+00:41:17,720 --> 00:41:20,680
+Ma tegin seda!
+
+1556
+00:41:17,720 --> 00:41:20,680
+Vabandust, jumal!
+
+1557
+00:41:20,720 --> 00:41:23,560
+See on kõige kiirem...
+
+1558
+00:41:20,720 --> 00:41:23,560
+– Me oleme kunagi varem nii kiiret meest näinud.
+
+1559
+00:41:23,600 --> 00:41:27,800
+-Kõige kiiremini sõitnud mees.
+
+1560
+00:41:23,600 --> 00:41:27,800
+– Olly Murs, ta on maailma kiireim!
+
+1561
+00:41:23,600 --> 00:41:27,800
+- Aitäh!
+
+1562
+00:41:28,680 --> 00:41:31,640
+Ma ei tulnud ju teiseks!
+
+1563
+00:41:31,680 --> 00:41:34,280
+-See on kõige kiirem.
+
+1564
+00:41:31,680 --> 00:41:34,280
+– Meil on siin kunagi sellist meest polnud.
+
+1565
+00:41:31,680 --> 00:41:34,280
+-Vabandust jumal.
+
+1566
+00:41:34,320 --> 00:41:37,200
+Daamide ja härrad!
+
+1567
+00:41:34,320 --> 00:41:37,200
+teatagem temale.
+
+
+1568
+00:41:37,240 --> 00:41:41,320
+Olly Murs, meie trassil kunagi varem olnud kiireim mees.
+
+1569
+00:41:37,240 --> 00:41:41,320
+kõige kiirem mees meie ringrajal!
+
+1570
+00:41:41,360 --> 00:41:43,000
+MURS: Aitäh, Jeremy!
+
+1571
+00:41:45,960 --> 00:41:50,560
+Nüüd on neid palju.
+
+1572
+00:41:45,960 --> 00:41:50,560
+päris suured autotootjad.
+
+1573
+00:41:50,600 --> 00:41:53,040
+kõikidel on rikkalik ajalugu.
+
+1574
+00:41:50,600 --> 00:41:53,040
+ja kõigi rikkalik ajalugu.
+
+1575
+00:41:53,080 --> 00:41:59,200
+Seal on Ferrari, Jaguar ja nii edasi.
+
+1576
+00:41:53,080 --> 00:41:59,200
+Lancia, Maserati...
+
+1577
+00:41:53,080 --> 00:41:59,200
+ja nii edasi, ja nii edasi.
+
+1578
+00:41:59,240 --> 00:42:03,600
+Jah, täpselt nii, aga täna õhtul...
+
+1579
+00:41:59,240 --> 00:42:03,600
+James ja mina läheme...
+
+1580
+00:41:59,240 --> 00:42:03,600
+vaatame nüüd läbi ajaloo.
+
+1581
+00:42:03,640 --> 00:42:08,040
+kõige geniaalsem,
+
+1582
+00:42:03,640 --> 00:42:08,040
+kõige leidlikum.
+
+1583
+00:42:03,640 --> 00:42:08,040
+nendest kõigist kõige parema autotootja ajalugu.
+
+1584
+00:42:08,640 --> 00:42:09,640
+Peugeot.
+
+1585
+00:42:17,880 --> 00:42:20,600
+CLARKSON: Tuhandete aastate jooksul.
+
+1586
+00:42:17,880 --> 00:42:20,600
+tuhandete aastate jooksul oli
+
+1587
+00:42:17,880 --> 00:42:20,600
+ainult üks võimalus.
+
+1588
+00:42:20,640 --> 00:42:23,400
+et seda ületada.
+
+1589
+00:42:20,640 --> 00:42:23,400
+Spardalik maastik.
+
+
+1590
+00:42:23,440 --> 00:42:27,520
+suures, tolmuses ja kuumas.
+
+1591
+00:42:23,440 --> 00:42:27,520
+Põhja-Aafrikast.
+
+1592
+00:42:29,240 --> 00:42:32,240
+See oli see hetk.
+
+1593
+00:42:32,280 --> 00:42:36,200
+Seda kasutasid...
+
+1594
+00:42:32,280 --> 00:42:36,200
+kreeklased, roomlased.
+
+1595
+00:42:32,280 --> 00:42:36,200
+berbeerlased, fönikislased.
+
+1596
+00:42:36,240 --> 00:42:39,520
+sandaleedlased, araablased,
+
+1597
+00:42:36,240 --> 00:42:39,520
+kartaaglased.
+
+1598
+00:42:36,240 --> 00:42:39,520
+ootmanid,
+
+1599
+00:42:39,560 --> 00:42:42,000
+prantslased, tuaregid.
+
+1600
+00:42:39,560 --> 00:42:42,000
+itaallased.
+
+1601
+00:42:42,560 --> 00:42:44,040
+ja britid.
+
+1602
+00:42:46,320 --> 00:42:52,520
+Aga siis, aastal 1968...
+
+1603
+00:42:46,320 --> 00:42:52,520
+jne.
+(häsina)
+...Peugeot 504 mudel lõpetas selle monopoli.
+Paljud inimesed kujutlevad
+
+1604
+00:42:46,320 --> 00:42:52,520
+...monopool lõpetati.
+
+1605
+00:42:52,560 --> 00:42:54,120
+(karjub)
+
+1606
+00:42:54,160 --> 00:42:56,560
+...kuni Peugeot 504 sellele lõppu panna ei suutnud.
+
+1607
+00:43:03,880 --> 00:43:07,080
+Paljud inimesed kujutavad ette...
+
+1608
+00:43:03,880 --> 00:43:07,080
+See olid kas Land Rover või Jeep.
+
+1609
+00:43:07,120 --> 00:43:09,200
+mis viis
+
+1610
+00:43:07,120 --> 00:43:09,200
+sisepõlemismootor.
+
+
+1611
+00:43:09,240 --> 00:43:12,600
+maailma kõige...
+
+1612
+00:43:09,240 --> 00:43:12,600
+peaaegu võimatutest kohtadest.
+
+1613
+00:43:12,640 --> 00:43:14,520
+aga tegelikult oli see siiski see.
+
+1614
+00:43:16,040 --> 00:43:18,840
+Aafrika kuningas,
+
+1615
+00:43:16,040 --> 00:43:18,840
+nagu seda kutsuti.
+
+1616
+00:43:21,080 --> 00:43:25,160
+Jah, see oli nii.
+
+1617
+00:43:21,080 --> 00:43:25,160
+hea ma klirens.
+
+1618
+00:43:21,080 --> 00:43:25,160
+ja varuosad olid odavad.
+
+1619
+00:43:25,200 --> 00:43:28,840
+aga mis tegelikult sellele autole meeldisi.
+
+1620
+00:43:25,200 --> 00:43:28,840
+seda vägevat Peugeoti on kantud ka Aafrikasse.
+
+1621
+00:43:28,880 --> 00:43:30,880
+oli selle vastupidavus ja töökindlus.
+
+1622
+00:43:32,520 --> 00:43:35,600
+Seda kuulete tihti.
+
+1623
+00:43:32,520 --> 00:43:35,600
+siin kandis.
+
+1624
+00:43:35,640 --> 00:43:38,920
+millest on kuulda lugusid, mis jutustavad...
+
+1625
+00:43:35,640 --> 00:43:38,920
+üks miljon kilomeetrit.
+
+1626
+00:43:38,960 --> 00:43:43,320
+ja mis on jõudnud paljudesse paikadesse.
+
+1627
+00:43:38,960 --> 00:43:43,320
+kuhu ükski Range Rover ei jõua.
+
+1628
+00:43:43,360 --> 00:43:44,760
+ilma et see puruks läheks.
+
+1629
+00:43:46,200 --> 00:43:49,240
+Nelikümmend aastat tagasi, siis.
+
+1630
+00:43:46,200 --> 00:43:49,240
+Peugeot oli tuntud oma vastupidavuse ja mõistlikkuse poolest.
+
+1631
+00:43:49,280 --> 00:43:52,360
+olles tugev ja vastupidav.
+
+1632
+00:43:49,280 --> 00:43:52,360
+ja terve mõistus.
+
+1633
+00:43:54,040 --> 00:43:57,960
+Aga siis, aastal 1983...
+
+1634
+00:43:54,040 --> 00:43:57,960
+Peugeot otsustas.
+
+1635
+00:43:58,000 --> 00:44:03,120
+see ei tahtnud enam valmistada tugevdatud ja praakliku välimusega autosid.
+
+1636
+00:43:58,000 --> 00:44:03,120
+aga siis, aastal 1983, otsustas Peugeot, et ei soovi enam valmistada tugevaid ja vastupidavaid, beežtoones autosid.
+
+1637
+00:44:03,160 --> 00:44:05,920
+Tahtis sellest lahti saada.
+
+1638
+00:44:03,160 --> 00:44:05,920
+oma õhukesed pesukleebised.
+
+1639
+00:44:05,960 --> 00:44:09,120
+ja olla sportlik.
+
+1640
+00:44:05,960 --> 00:44:09,120
+ja kergekäeline ja lõbus.
+
+1641
+00:44:09,160 --> 00:44:11,520
+nii et see otsustas täiesti...
+
+1642
+00:44:09,160 --> 00:44:11,520
+muutus suund.
+
+1643
+00:44:15,040 --> 00:44:17,680
+See kasutas geniaalset.
+
+1644
+00:44:15,040 --> 00:44:17,680
+vedrustuse spetsialist.
+
+1645
+00:44:17,720 --> 00:44:20,040
+ja see muutis täielikult suunda.
+
+
+1646
+00:44:17,720 --> 00:44:20,040
+nii nagu need autod.
+
+1647
+00:44:20,080 --> 00:44:25,480
+505 GTi – sportlik sedaan.
+
+1648
+00:44:20,080 --> 00:44:25,480
+et konkureerida igasuguste BMW mudelitega.
+
+1649
+00:44:28,600 --> 00:44:34,000
+Ja siis oli veel see...
+
+1650
+00:44:28,600 --> 00:44:34,000
+mis tegi muljet.
+
+1651
+00:44:28,600 --> 00:44:34,000
+nagu oleks see kuulipilduja.
+
+1652
+00:44:34,040 --> 00:44:35,400
+ja see käitus nagu niimoodi.
+
+1653
+00:44:38,320 --> 00:44:40,880
+Aga kõige parem oli see...
+
+1654
+00:44:38,320 --> 00:44:40,880
+Peugeot kinkis meile selle auto.
+
+1655
+00:44:41,920 --> 00:44:45,040
+…märkimisväärne 205 GTi mudel…
+
+1656
+00:44:45,080 --> 00:44:46,560
+Auto, mis oli kiire.
+
+1657
+00:44:48,440 --> 00:44:50,400
+isegi koos James Mayga.
+
+1658
+00:44:48,440 --> 00:44:50,400
+roolis.
+
+1659
+00:44:51,800 --> 00:44:54,040
+MAI: Kas see oli parim?
+
+1660
+00:44:51,800 --> 00:44:54,040
+Kas see oli 80ndate parim sportauto?
+
+1661
+00:44:54,080 --> 00:44:56,000
+Nojah, see oli kindlasti...
+
+1662
+00:44:54,080 --> 00:44:56,000
+oligi ju üks parimaid, kas pole?
+
+1663
+00:44:58,800 --> 00:45:00,800
+(Naerab.) See on ikka hea.
+
+1664
+00:45:02,840 --> 00:45:04,360
+See on ikka raske uskuda.
+
+1665
+00:45:02,840 --> 00:45:04,360
+et see on tehtud.
+
+1666
+00:45:04,400 --> 00:45:07,200
+sama inimeste poolt.
+
+1667
+00:45:04,400 --> 00:45:07,200
+kes tegid 504 mudeli.
+
+1668
+00:45:07,240 --> 00:45:09,040
+mis on valmistatud samade inimeste poolt.
+
+1669
+00:45:07,240 --> 00:45:09,040
+isegi liigid.
+
+1670
+00:45:11,640 --> 00:45:15,800
+Aga see ei olnud esimene kord.
+
+1671
+00:45:11,640 --> 00:45:15,800
+"et Peugeot oli täielikult..."
+
+
+1672
+00:45:11,640 --> 00:45:15,800
+muutnud oma meelt.
+
+1673
+00:45:15,840 --> 00:45:17,760
+millest see tegelikult soovis saada.
+
+1674
+00:45:19,880 --> 00:45:22,800
+Ettevõte asutati aastal 1810.
+
+1675
+00:45:19,880 --> 00:45:22,800
+terase tootmist.
+
+1676
+00:45:22,840 --> 00:45:25,600
+Ja see juhtus nii.
+
+1677
+00:45:22,840 --> 00:45:25,600
+aga see tegi seda väga, väga hästi.
+
+1678
+00:45:25,640 --> 00:45:30,400
+Nii hea, et aastal 1840...
+
+1679
+00:45:25,640 --> 00:45:30,400
+selle tõttu otsustas ta alustada tootmist.
+
+1680
+00:45:25,640 --> 00:45:30,400
+puidust piprajaoturid.
+
+1681
+00:45:30,440 --> 00:45:34,120
+Nüüd need...
+
+1682
+00:45:30,440 --> 00:45:34,120
+Need olid parimad.
+
+1683
+00:45:30,440 --> 00:45:34,120
+maailmas.
+
+1684
+00:45:34,160 --> 00:45:39,440
+Seega oli loomulik, et aastal 1852...
+
+1685
+00:45:34,160 --> 00:45:39,440
+Peugeot hakkas tootma.
+
+1686
+00:45:34,160 --> 00:45:39,440
+valmistama korsette.
+
+1687
+00:45:39,480 --> 00:45:41,800
+Ja siis, 30 aastat hiljem...
+
+1688
+00:45:39,480 --> 00:45:41,800
+ta mõtles,
+
+1689
+00:45:41,840 --> 00:45:46,640
+"Ei. Tegelikult me soovime..."
+
+1690
+00:45:41,840 --> 00:45:46,640
+"Me tahame valmistada jalgrattaid."
+
+1691
+00:45:46,680 --> 00:45:49,080
+Ja see ongi see, mida...
+
+1692
+00:45:46,680 --> 00:45:49,080
+nende mõtted olid.
+
+1693
+00:45:49,120 --> 00:45:51,280
+Ja see on lihtsalt imeline.
+
+1694
+00:45:49,120 --> 00:45:51,280
+(Kella helk).
+
+1695
+00:45:51,320 --> 00:45:53,280
+See on suurepärane jalgratas.
+
+1696
+00:45:53,320 --> 00:45:56,120
+Kuid loomulikult, kui see on tehtud...
+
+1697
+00:45:53,320 --> 00:45:56,120
+kõrgekvaliteediline jalgratas.
+
+1698
+00:45:56,160 --> 00:46:01,160
+järgmine loomulik samm oli...
+
+1699
+00:45:56,160 --> 00:46:01,160
+et hakata tootjaks.
+
+1700
+00:45:56,160 --> 00:46:01,160
+sõjatarvete tootjana.
+
+1701
+00:46:01,200 --> 00:46:04,480
+Need valmistatud suurtükkid on olnud suurepärased. Kõrgeima klassi.
+
+
+1702
+00:46:01,200 --> 00:46:04,480
+Need olid suurepärased. Maailma tipptasemel.
+
+1703
+00:46:04,520 --> 00:46:08,480
+Aga siis juhtus teine asi.
+
+1704
+00:46:04,520 --> 00:46:08,480
+Teine maailmasõda algas.
+
+1705
+00:46:04,520 --> 00:46:08,480
+sakslased saabusid.
+
+1706
+00:46:08,520 --> 00:46:12,400
+ja härra Peugeot otsustas.
+
+1707
+00:46:08,520 --> 00:46:12,400
+ta ei tahtnud enam midagi valmistada.
+
+1708
+00:46:08,520 --> 00:46:12,400
+tema ei tahtnud enam relvavarustust toota.
+
+1709
+00:46:12,440 --> 00:46:14,680
+Tegelikult ta ei tahtnud.
+
+1710
+00:46:12,440 --> 00:46:14,680
+ta ei tahtnud midagi valmistada.
+
+1711
+00:46:14,720 --> 00:46:17,920
+Nii et ühel õhtul ta…
+
+1712
+00:46:14,720 --> 00:46:17,920
+tema tehast lõhkekainetega.
+
+1713
+00:46:17,960 --> 00:46:21,440
+ja lõhkus kogu tehase.
+
+1714
+00:46:17,960 --> 00:46:21,440
+…ja lõhkus kogu tehase tükkideks.
+
+1715
+00:46:22,680 --> 00:46:24,400
+Sellise mitmekülgse ajaloo järel...
+
+1716
+00:46:24,440 --> 00:46:27,920
+see ei ole üldse üllatav, et...
+
+1717
+00:46:24,440 --> 00:46:27,920
+Peugeot peaks tegema.
+
+1718
+00:46:24,440 --> 00:46:27,920
+see äkiline pöörde.
+
+1719
+00:46:27,960 --> 00:46:30,360
+ehitamisest kuni...
+
+1720
+00:46:27,960 --> 00:46:30,360
+usaldusväärsed ja töökindlad autod.
+
+1721
+00:46:30,400 --> 00:46:33,920
+nüüd ka põnevate ja sportlike autode tootjaks.
+
+1722
+00:46:30,400 --> 00:46:33,920
+nagu näiteks 205 GTi.
+
+1723
+00:46:33,960 --> 00:46:36,840
+Ja see ei ole ka üllatav.
+
+1724
+00:46:33,960 --> 00:46:36,840
+arvestades selle kvaliteeti.
+
+1725
+00:46:33,960 --> 00:46:36,840
+nende terase kohta.
+
+1726
+00:46:36,880 --> 00:46:38,360
+ja nende lihvijad.
+
+1727
+00:46:36,880 --> 00:46:38,360
+ja nende korsetid.
+
+1728
+00:46:38,400 --> 00:46:40,240
+ja nende jalgratastega.
+
+1729
+00:46:38,400 --> 00:46:40,240
+ja nende relvastus.
+
+1730
+00:46:40,280 --> 00:46:43,280
+et nad olid
+
+1731
+00:46:40,280 --> 00:46:43,280
+ja nad olid selles uskumatult head.
+
+1732
+00:46:47,920 --> 00:46:51,160
+ turboülelaaditud,
+
+1733
+00:46:47,920 --> 00:46:51,160
+nelikveduversioon.
+
+1734
+00:46:47,920 --> 00:46:51,160
+...205 mudeli turboga ning nelikveduga versioonist.
+
+1735
+00:46:51,200 --> 00:46:52,600
+– seda kutsutakse T16-ks.
+
+1736
+00:46:52,640 --> 00:46:55,680
+võitis 16 etappi.
+
+1737
+00:46:52,640 --> 00:46:55,680
+rallisõidu meistrivõistlustel...
+
+1738
+00:46:56,760 --> 00:46:58,960
+(KAAMERA KLIKATUSED)
+
+1739
+00:46:59,000 --> 00:47:03,400
+…võitis Fordi nagu ka kõik teised.
+
+1740
+00:46:59,000 --> 00:47:03,400
+Audi ja Lancia.
+
+1741
+00:47:03,440 --> 00:47:06,080
+...kahe järjestikuse maailmameistritiitliga.
+
+1742
+00:47:03,440 --> 00:47:06,080
+maailmameistrivõidud.
+
+1743
+00:47:08,800 --> 00:47:10,040
+Ja, tagasi müügisalongis...
+
+1744
+00:47:10,080 --> 00:47:12,280
+needlikud autod.
+
+1745
+00:47:10,080 --> 00:47:12,280
+ja uued sportautod tulid juurde.
+
+1746
+00:47:13,200 --> 00:47:14,800
+Peugeot oli väga edukas.
+
+1747
+00:47:16,680 --> 00:47:20,520
+Aga siis, ühel päeval Pariisis...
+
+1748
+00:47:16,680 --> 00:47:20,520
+seal toimus koosolek.
+
+1749
+00:47:21,520 --> 00:47:23,600
+(AKORDEONIMUUSIKA)
+
+1750
+00:47:26,880 --> 00:47:28,200
+- Härrad.
+
+1751
+00:47:26,880 --> 00:47:28,200
+-MAY: Hmm.
+
+1752
+00:47:29,560 --> 00:47:31,320
+(prantsuse aktsendiga)
+
+1753
+00:47:29,560 --> 00:47:31,320
+Nüüd on meie aeg.
+
+1754
+00:47:31,360 --> 00:47:32,960
+kellelgi enam seda sportautot valmistada.
+
+1755
+00:47:31,360 --> 00:47:32,960
+seda sportautot.
+
+1756
+00:47:33,760 --> 00:47:35,160
+OH, jumal!
+
+1757
+00:47:35,200 --> 00:47:37,680
+Oh, kurja.
+
+1758
+00:47:37,720 --> 00:47:39,880
+(prantsuse aktsendiga)
+
+1759
+00:47:37,720 --> 00:47:39,880
+Aga mis me siis teeme?
+
+1760
+00:47:37,720 --> 00:47:39,880
+aga mida me selle asemel teeme?
+
+1761
+00:47:40,800 --> 00:47:44,480
+Üks hetk, riidepuud ja vihmavari.
+
+1762
+00:47:44,520 --> 00:47:46,000
+Kas see plaan on hea?
+
+1763
+00:47:47,840 --> 00:47:49,320
+Me valmistame kohutavaid autosid.
+
+1764
+00:47:50,640 --> 00:47:52,680
+-Hmm.
+
+1765
+00:47:50,640 --> 00:47:52,680
+– Igal võimalikul moel kohutav.
+
+1766
+00:47:53,520 --> 00:47:55,200
+Võib-olla on see väga ilus idee.
+
+1767
+00:47:55,240 --> 00:47:56,520
+Ah, jah, jah, jah.
+
+1768
+00:47:56,560 --> 00:47:59,200
+Mootor on väga kohutav.
+
+1769
+00:47:59,240 --> 00:48:02,320
+– Oh, kole. Ebastabiilne.
+
+1770
+00:47:59,240 --> 00:48:02,320
+-MÄRTHA: (häälikult kähedalt) Jah.
+
+1771
+00:48:02,360 --> 00:48:07,960
+Ebamugav. Ja ka sisemus.
+
+1772
+00:48:02,360 --> 00:48:07,960
+valmistatud spidi ja paberrätikust.
+
+1773
+00:48:08,000 --> 00:48:10,280
+– Süljekeed ja paberrätikud.
+
+1774
+00:48:08,000 --> 00:48:10,280
+Jah. Jah. Jah.
+
+1775
+00:48:08,000 --> 00:48:10,280
+- Jah, jah, jah.
+
+1776
+00:48:10,320 --> 00:48:12,360
+(vestlus prantsuse keeles)
+
+1777
+00:48:21,840 --> 00:48:24,640
+(kõik rõõmustavad)
+
+1778
+00:48:24,680 --> 00:48:28,440
+Ja too sinna peakoka.
+
+1779
+00:48:24,680 --> 00:48:28,440
+siin, et saaksime...
+
+1780
+00:48:24,680 --> 00:48:28,440
+– vallandage ta kohe.
+
+1781
+00:48:28,480 --> 00:48:30,040
+-Ah, jah.
+
+1782
+00:48:28,480 --> 00:48:30,040
+-Ah... ah.
+
+1783
+00:48:30,080 --> 00:48:32,760
+See hommikusöögikohtumine.
+
+1784
+00:48:30,080 --> 00:48:32,760
+see paneb Peugeoti kaardile.
+
+1785
+00:48:32,800 --> 00:48:35,600
+veel paljudele aastatele.
+
+1786
+00:48:32,800 --> 00:48:35,600
+Ärge kahtlege.
+
+1787
+00:48:37,360 --> 00:48:39,480
+See on...
+
+1788
+00:48:37,360 --> 00:48:39,480
+mis sellest kogemustest tekkis,
+
+1789
+00:48:39,520 --> 00:48:42,480
+nagu näiteks see õdi "1007".
+
+1790
+00:48:42,520 --> 00:48:46,440
+absurdne 407,
+
+1791
+00:48:42,520 --> 00:48:46,440
+ning vilets 607.
+
+1792
+00:48:46,480 --> 00:48:49,720
+ja šokeerivalt kehva 3008 mudel.
+
+1793
+00:48:49,760 --> 00:48:54,480
+Odavalt tehtud, kehvapõhja kvaliteet.
+
+1794
+00:48:49,760 --> 00:48:54,480
+odav ja halvasti tehtud auto.
+
+1795
+00:48:49,760 --> 00:48:54,480
+kogu see jura.
+
+1796
+00:48:57,720 --> 00:48:59,800
+Reklaamid muutusid samuti.
+
+1797
+00:48:59,840 --> 00:49:03,840
+Küllap läks ära.
+
+1798
+00:48:59,840 --> 00:49:03,840
+põlemas olevad maisipõllud.
+
+1799
+00:48:59,840 --> 00:49:03,840
+ja need pidevalt hüppavad 205-sed autod.
+
+1800
+00:49:03,880 --> 00:49:07,400
+ja selle asemel tuli selline reklaam.
+
+1801
+00:49:07,440 --> 00:49:11,400
+ANNOUNCER: Ostate auto...
+
+1802
+00:49:07,440 --> 00:49:11,400
+neli ratast ja paar istekohta.
+
+1803
+00:49:07,440 --> 00:49:11,400
+ainult 99 naela kuus.
+
+1804
+00:49:11,440 --> 00:49:15,120
+koos 1000-eurose tagasimaksuga.
+
+1805
+00:49:11,440 --> 00:49:15,120
+veel lisaks 2000 naela tagasi.
+
+1806
+00:49:15,160 --> 00:49:16,800
+Lihtne finantseerimine ja tasuta,
+
+1807
+00:49:16,840 --> 00:49:20,160
+jah, lukustav kaas on tasuta.
+
+1808
+00:49:16,840 --> 00:49:20,160
+bensiinikork.
+
+1809
+00:49:20,200 --> 00:49:23,520
+-(TRUUVI HELI)
+
+1810
+00:49:20,200 --> 00:49:23,520
+– APR 29,4%, tingimustega.
+
+1811
+00:49:20,200 --> 00:49:23,520
+tingimused ja piirangud.
+
+1812
+00:49:23,560 --> 00:49:25,360
+Te peate suutma alla kirjutada.
+
+1813
+00:49:23,560 --> 00:49:25,360
+et autot saada, peate oma nime allkirjastama.
+
+1814
+00:49:25,400 --> 00:49:28,160
+Teie põlvkoned võivad olla ohus.
+
+1815
+00:49:25,400 --> 00:49:28,160
+kui te ei suuda makseid tähtaega järgida.
+
+1816
+00:49:25,400 --> 00:49:28,160
+tagastused.
+
+1817
+00:49:30,720 --> 00:49:33,200
+CLARKSON: Tulemused.
+
+1818
+00:49:30,720 --> 00:49:33,200
+olid kohedased.
+
+1819
+00:49:33,240 --> 00:49:35,600
+Müügiprügised tõusid läbi katuse.
+
+1820
+00:49:35,640 --> 00:49:39,800
+Võib-olla oli Peugeot hea...
+
+1821
+00:49:35,640 --> 00:49:39,800
+ja ehitati kvaliteetseid autosid.
+
+1822
+00:49:35,640 --> 00:49:39,800
+ja ka sportauto tüüpi autod.
+
+1823
+00:49:39,840 --> 00:49:46,080
+aga see tundus…
+
+1824
+00:49:39,840 --> 00:49:46,080
+nad olid lihtsalt suurepärased.
+
+1825
+00:49:39,840 --> 00:49:46,080
+ja nad olid üsna haledad autod.
+
+1826
+00:49:46,120 --> 00:49:48,320
+Jah, ja et seda tõestada,
+
+1827
+00:49:46,120 --> 00:49:48,320
+kui suurepärased nad olid...
+
+1828
+00:49:48,360 --> 00:49:50,560
+Jeremy ja mina läheme.
+
+1829
+00:49:48,360 --> 00:49:50,560
+et teha üks katse.
+
+1830
+00:49:50,600 --> 00:49:54,440
+Ta on selle ostnud.
+
+1831
+00:49:50,600 --> 00:49:54,440
+veidi tulekahjustatud 307 CC mudel.
+
+1832
+00:49:54,480 --> 00:49:56,200
+Sa näed.
+
+1833
+00:49:54,480 --> 00:49:56,200
+Tulekahju oli siin, täpselt nendes kohastes.
+
+1834
+00:49:56,240 --> 00:49:58,160
+Nüüd on see juba ees, nii et see pole probleem.
+
+1835
+00:49:58,200 --> 00:49:59,520
+Oluline, jah.
+
+1836
+00:49:59,560 --> 00:50:03,520
+Ja ma olen ostnud.
+
+1837
+00:49:59,560 --> 00:50:03,520
+seda täiesti igavale 407 mudelile.
+
+1838
+00:50:03,560 --> 00:50:05,640
+Ja nüüd…
+
+1839
+00:50:03,560 --> 00:50:05,640
+me kavatseme neid katsetada.
+
+1840
+00:50:05,680 --> 00:50:08,920
+nagu me poleks sellest huvitatud.
+
+1841
+00:50:05,680 --> 00:50:08,920
+üldse autodes.
+
+1842
+00:50:12,680 --> 00:50:15,600
+CLARKSON: Nendes.
+
+1843
+00:50:12,680 --> 00:50:15,600
+nendes kohutavalt halbades autodeta.
+
+1844
+00:50:12,680 --> 00:50:15,600
+meil ei läinud see palju aega.
+
+1845
+00:50:15,640 --> 00:50:18,760
+et sellega hakkama saada.
+
+1846
+00:50:15,640 --> 00:50:18,760
+kaasaegsete Peugeot'side juhtimise.
+
+1847
+00:50:25,240 --> 00:50:26,800
+Hullult!
+
+1848
+00:50:29,280 --> 00:50:31,400
+Ja pöörata.
+
+1849
+00:50:35,640 --> 00:50:41,080
+Miks, ometi miks need idioodid?
+
+1850
+00:50:35,640 --> 00:50:41,080
+...kuidas need idioodid
+
+
+1851
+00:50:41,120 --> 00:50:43,440
+Ma mõtlen, vaadake ise.
+
+1852
+00:50:41,120 --> 00:50:43,440
+kuuekäiguline käigukast.
+
+1853
+00:50:44,440 --> 00:50:46,240
+See on.
+
+1854
+00:50:44,440 --> 00:50:46,240
+eriti suurepärane.
+
+1855
+00:50:46,280 --> 00:50:50,720
+Sa jõudsid oma lülitini.
+
+1856
+00:50:46,280 --> 00:50:50,720
+siin on "väljas" ja siis siin,
+
+1857
+00:50:46,280 --> 00:50:50,720
+"Eriti "väljas"."
+
+1858
+00:50:55,240 --> 00:50:56,760
+Nii, kaks…
+
+1859
+00:50:57,920 --> 00:51:00,120
+Kaks ja pool pööret.
+
+1860
+00:50:57,920 --> 00:51:00,120
+Järgmine käik.
+
+1861
+00:51:00,720 --> 00:51:02,240
+(käigud krõbisevad).
+
+1862
+00:51:02,280 --> 00:51:04,560
+Oi, ei.
+
+1863
+00:51:02,280 --> 00:51:04,560
+sa peaksid vajutama...
+
+1864
+00:51:05,680 --> 00:51:06,720
+(kohin)
+
+1865
+00:51:06,760 --> 00:51:07,800
+See ongi kõik.
+
+1866
+00:51:11,880 --> 00:51:14,320
+PEATSARKKONNA: Varsti, James.
+
+1867
+00:51:11,880 --> 00:51:14,320
+tema juhtus õnnetusesse.
+
+1868
+00:51:20,720 --> 00:51:22,160
+Nõjatöövärk ja saast.
+
+1869
+00:51:23,160 --> 00:51:24,520
+Oh, kurwa.
+
+1870
+00:51:25,440 --> 00:51:27,240
+Oh, kurvalt, kurvalt, kurvalt.
+
+1871
+00:51:29,720 --> 00:51:30,720
+(auto signaal)
+
+1872
+00:51:36,400 --> 00:51:38,480
+- Sa krahhisid jälle?
+
+1873
+00:51:36,400 --> 00:51:38,480
+Jah.
+
+1874
+00:51:39,720 --> 00:51:41,680
+Sa kukkusid taas selle nurgaga kokku.
+
+1875
+00:51:39,720 --> 00:51:41,680
+täna hommikul.
+
+1876
+00:51:41,720 --> 00:51:42,840
+Jah.
+
+1877
+00:51:42,880 --> 00:51:44,520
+Ma pole sellele veel jõudnud.
+
+1878
+00:51:42,880 --> 00:51:44,520
+kord juba.
+
+1879
+00:51:44,560 --> 00:51:47,160
+See on keeruline, kuidas...
+
+1880
+00:51:44,560 --> 00:51:47,160
+Ma ei tea, miks nad.
+
+1881
+00:51:44,560 --> 00:51:47,160
+Ma ei saa aru, miks nad selliseid nurgi sinna panid.
+
+1882
+00:51:47,200 --> 00:51:48,600
+Ma ei saa aru, miks sa seda teeksid.
+
+1883
+00:51:48,640 --> 00:51:50,360
+Ma tean.
+
+1884
+00:51:48,640 --> 00:51:50,360
+No, ma kihutasin päris kõvasti.
+
+1885
+00:51:50,400 --> 00:51:53,880
+-Ma olin kolmandas käigus.
+
+1886
+00:51:50,400 --> 00:51:53,880
+-Ah.
+
+1887
+00:51:53,920 --> 00:51:56,960
+"Ma tean."
+"No, ma kihutasin päris kõvasti."
+"-Ma olin kolmandal kohal."
+"-Oh."
+
+(autot tõmmati) kraavist välja,
+ja ma kasutan seda võimalust,
+et näidata...
+
+CLARKSON: Kuigi Jamesi auto
+
+1888
+00:51:53,920 --> 00:51:56,960
+oli teel alt tõmmatavaks ettevalmistustel.
+
+1889
+00:51:53,920 --> 00:51:56,960
+ettevajatest kraavist välja tõmmati.
+
+1890
+00:51:57,000 --> 00:51:58,840
+Ma kasutasin seda võimalust ära.
+
+1891
+00:51:57,000 --> 00:51:58,840
+et näidata.
+
+1892
+00:51:58,880 --> 00:52:03,320
+veel üks uskumatu asi.
+
+1893
+00:51:58,880 --> 00:52:03,320
+see on minu auto standardvarustus.
+
+1894
+00:52:03,360 --> 00:52:06,360
+Kui soovite akent alla lasta...
+
+1895
+00:52:03,360 --> 00:52:06,360
+esiselja akna jaoks.
+
+1896
+00:52:03,360 --> 00:52:06,360
+sa võid seda teha.
+
+1897
+00:52:06,400 --> 00:52:09,760
+nupuga.
+
+1898
+00:52:06,400 --> 00:52:09,760
+juhiukse küljel.
+
+1899
+00:52:09,800 --> 00:52:11,960
+Aga kui sa selle kätte saada tahad…
+
+1900
+00:52:09,800 --> 00:52:11,960
+kui sa tahad seda uuesti kasutada.
+
+1901
+00:52:12,880 --> 00:52:14,120
+sa ei saa seda teha.
+
+1902
+00:52:14,160 --> 00:52:17,560
+Seega peate ümber ringi minema.
+
+1903
+00:52:14,160 --> 00:52:17,560
+teised kohalt üritama.
+
+1904
+00:52:17,600 --> 00:52:21,000
+Olge ettevaatlik ja kasutage siin olevat nuppu.
+
+1905
+00:52:21,040 --> 00:52:23,880
+Aga kui sa nii teed,
+
+1906
+00:52:23,920 --> 00:52:27,920
+sa paned oma käe sinna vahele.
+
+1907
+00:52:23,920 --> 00:52:27,920
+nii, siinsesse vahesse.
+
+1908
+00:52:27,960 --> 00:52:29,320
+Nüüd, Peugeoti mõtted...
+
+1909
+00:52:27,960 --> 00:52:29,320
+olgem sellest kindlad, ok?
+
+1910
+00:52:29,360 --> 00:52:30,840
+Ilmselgelt,
+
+1911
+00:52:29,360 --> 00:52:30,840
+te ei saa seda ust avada.
+
+1912
+00:52:30,880 --> 00:52:33,040
+Vaata, siin pole mingit ukse lukku.
+
+1913
+00:52:30,880 --> 00:52:33,040
+See on turvalisuse huvides.
+
+1914
+00:52:33,080 --> 00:52:35,360
+Seega, sa võid siia tagasi tulla.
+
+1915
+00:52:36,800 --> 00:52:39,040
+ja see on lihtsalt hämmastav.
+
+1916
+00:52:39,080 --> 00:52:40,360
+Lihtsalt vajutage seda lülitust…
+
+1917
+00:52:41,560 --> 00:52:43,840
+Olge ettevaatlikud, kõik aknad langevad nüüd alla.
+
+1918
+00:52:45,360 --> 00:52:47,160
+Katus on eemaldatav.
+
+1919
+00:52:47,200 --> 00:52:50,040
+Ja nüüd… Vaata minna.
+
+1920
+00:52:50,960 --> 00:52:54,440
+Ma saan akent üles tõsta, ilma et...
+
+1921
+00:52:55,880 --> 00:52:57,000
+kui ma ei pane käsi vahele.
+
+1922
+00:52:57,040 --> 00:52:59,320
+Kas te näete? See on suurepärane.
+
+1923
+00:53:03,000 --> 00:53:08,840
+Jamesi autoga juhtuma pidanud asjadest hoolimata…
+
+1924
+00:53:03,000 --> 00:53:08,840
+nüüd, kui Jamesi auto ei olnud enam esimese silma peal, lõõgastusime.
+
+1925
+00:53:03,000 --> 00:53:08,840
+ja kuulame koos raadio Peugeot't.
+
+1926
+00:53:10,560 --> 00:53:12,680
+DŽEREMI VAIN: (RAADIOS)
+
+1927
+00:53:10,560 --> 00:53:12,680
+BBC raadiojaam number 2.
+
+1928
+00:53:12,720 --> 00:53:15,240
+Kas Suurbritanniast on kõik kohad täis?
+
+1929
+00:53:12,720 --> 00:53:15,240
+kui me selle algusse saime.
+
+1930
+00:53:15,280 --> 00:53:17,760
+Alison, kes elab Warfieldis.
+
+1931
+00:53:15,280 --> 00:53:17,760
+Berkshire'ist saabus meile sõnum.
+
+1932
+00:53:17,800 --> 00:53:20,040
+"Ma ei saa Waitrose'i juures parkida."
+
+1933
+00:53:20,080 --> 00:53:21,840
+Nii, jah, meil on liiga palju pagasit.
+
+1934
+00:53:22,480 --> 00:53:23,800
+"Hea helistaja."
+
+1935
+00:53:26,360 --> 00:53:27,800
+(löök)
+
+1936
+00:53:27,840 --> 00:53:28,840
+KLARKSON:
+
+1937
+00:53:27,840 --> 00:53:28,840
+See on väga kena tema poolt.
+
+1938
+00:53:28,880 --> 00:53:30,280
+Ta lihtsalt andis mulle.
+
+1939
+00:53:28,880 --> 00:53:30,280
+väike hoog.
+
+1940
+00:53:30,320 --> 00:53:32,520
+et ta mulle sellest teataks.
+
+1941
+00:53:30,320 --> 00:53:32,520
+ta oli seal käimas.
+
+1942
+00:53:35,000 --> 00:53:36,360
+Kurv. Kurv.
+
+1943
+00:53:38,120 --> 00:53:39,640
+(rehvid hõljuvad)
+
+1944
+00:53:50,040 --> 00:53:51,800
+Ma olen selle ära teinud, ma olen siin.
+
+1945
+00:53:54,360 --> 00:53:57,440
+Vaatamata rahustavatele toonidele
+
+1946
+00:53:54,360 --> 00:53:57,440
+"Radio Peugeot'lt"...
+
+1947
+00:53:57,480 --> 00:54:00,160
+VINE (raadios): Kas sa arvad?
+
+1948
+00:53:57,480 --> 00:54:00,160
+teie vee võib olla kõige halvema maitsega.
+
+1949
+00:53:57,480 --> 00:54:00,160
+...kas teil on Britan-nias kõige halvema maitsega vesi?
+
+1950
+00:54:00,200 --> 00:54:02,880
+Kui nii on, siis helistage meile.
+
+1951
+00:54:00,200 --> 00:54:02,880
+0-500-288-299…
+
+1952
+00:54:02,920 --> 00:54:05,200
+...me avastasime.
+
+1953
+00:54:02,920 --> 00:54:05,200
+see sõit oli väga pingestatud.
+
+1954
+00:54:05,240 --> 00:54:07,400
+...tänu valesti asetatud märkidele.
+
+1955
+00:54:05,240 --> 00:54:07,400
+teede märke tõttu...
+
+1956
+00:54:07,440 --> 00:54:09,040
+[mootori pöörded tõusevad]
+
+1957
+00:54:10,480 --> 00:54:11,960
+...ja tihedad ristmikud.
+
+1958
+00:54:13,840 --> 00:54:15,160
+Hullult kihutav tüüp.
+
+1959
+00:54:15,720 --> 00:54:16,960
+Hullumeel.
+
+1960
+00:54:17,800 --> 00:54:19,040
+Hullumeel!
+
+1961
+00:54:19,600 --> 00:54:21,000
+Idioot.
+
+1962
+00:54:21,040 --> 00:54:22,400
+Hullumeel.
+
+1963
+00:54:22,440 --> 00:54:25,520
+Hullumees! Hetkeks, ma arvan, et...
+
+1964
+00:54:22,440 --> 00:54:25,520
+Siin on võimalus.
+
+1965
+00:54:27,840 --> 00:54:29,440
+Oi!
+
+1966
+00:54:29,480 --> 00:54:31,000
+Saast!
+
+1967
+00:54:31,040 --> 00:54:32,960
+(KUULUTAJAGA RAADIOS):
+
+1968
+00:54:31,040 --> 00:54:32,960
+Sa said ju selle "Johnny Foreigner"i koha.
+
+1969
+00:54:31,040 --> 00:54:32,960
+siin kohale tulemas.
+
+1970
+00:54:33,000 --> 00:54:35,080
+nende eest nad midagi ei maksa.
+
+1971
+00:54:39,520 --> 00:54:42,200
+Saastunud kohaliku omavalduse ametnikud!
+
+1972
+00:54:39,520 --> 00:54:42,200
+ja nende imelikud teed.
+
+1973
+00:54:47,120 --> 00:54:49,360
+(RAADIOSSE):
+
+1974
+00:54:47,120 --> 00:54:49,360
+James, seal on kurv.
+
+1975
+00:54:47,120 --> 00:54:49,360
+Üks kurvi tuleb peagi ette. Kurv.
+
+1976
+00:54:49,400 --> 00:54:52,720
+Seal on silt, mis ütleb.
+
+1977
+00:54:49,400 --> 00:54:52,720
+"Kurv on ees. Olge ettevaatlikud."
+
+1978
+00:54:49,400 --> 00:54:52,720
+sel korral, okei?
+
+1979
+00:54:54,480 --> 00:54:57,000
+(rehvid hõikavad).
+
+1980
+00:54:57,040 --> 00:55:00,200
+Ausalt öeldes,
+
+1981
+00:54:57,040 --> 00:55:00,200
+Ma ei märganud.
+
+1982
+00:54:57,040 --> 00:55:00,200
+Jaamessi uus õnnetus.
+
+1983
+00:55:00,240 --> 00:55:04,520
+kuna ma olin selle juba märganud.
+
+1984
+00:55:00,240 --> 00:55:04,520
+veel ühte funktsiooni.
+
+1985
+00:55:00,240 --> 00:55:04,520
+oma imelises autos.
+
+1986
+00:55:04,560 --> 00:55:09,120
+Kui ma vajutan seda nuppu siin.
+
+1987
+00:55:04,560 --> 00:55:09,120
+mis suurendab
+
+1988
+00:55:04,560 --> 00:55:09,120
+temperatuuri.
+
+1989
+00:55:09,160 --> 00:55:12,520
+ja siis hoia seda all.
+
+1990
+00:55:09,160 --> 00:55:12,520
+hetkeeks.
+
+1991
+00:55:12,560 --> 00:55:15,200
+(krõbinad ja prõksud)
+
+1992
+00:55:12,560 --> 00:55:15,200
+-Jah, nüüd on kõik korras.
+
+1993
+00:55:15,240 --> 00:55:19,120
+Tore. Tore.
+
+1994
+00:55:15,240 --> 00:55:19,120
+Hmm-hmm. Suits.
+
+1995
+00:55:19,160 --> 00:55:21,560
+Ilmselgelt on siin üsna palju...
+
+1996
+00:55:19,160 --> 00:55:21,560
+...keda see võib lämmatada.
+
+1997
+00:55:19,160 --> 00:55:21,560
+et läbi elada.
+
+1998
+00:55:21,600 --> 00:55:22,680
+aga… no…
+
+1999
+00:55:22,720 --> 00:55:24,680
+Vaata, mis välja tuli!
+
+2000
+00:55:25,640 --> 00:55:28,120
+(köhimine) Inimesed armastavad seda...
+
+2001
+00:55:28,160 --> 00:55:30,120
+Tegelikult on nende kodudes tulekahju.
+
+2002
+00:55:30,160 --> 00:55:31,760
+Mul on üks ka autoga.
+
+2003
+00:55:31,800 --> 00:55:33,320
+(JÄTKAB köhimist)
+
+2004
+00:55:33,360 --> 00:55:35,480
+See on hea asi.
+
+2005
+00:55:33,360 --> 00:55:35,480
+Selle autol on suitsutoru.
+
+2006
+00:55:35,520 --> 00:55:38,120
+Ilmselgelt on see väga hea asi.
+
+2007
+00:55:35,520 --> 00:55:38,120
+disainielement.
+
+2008
+00:55:40,320 --> 00:55:42,200
+Kui ma temaga kohtusin,
+
+2009
+00:55:40,320 --> 00:55:42,200
+koos Jamesiga uuesti kohtudes,
+
+2010
+00:55:42,240 --> 00:55:46,080
+see oli Peugeoti autojuhtide jaoks...
+
+2011
+00:55:42,240 --> 00:55:46,080
+kõige suurem õudusunenägu.
+
+2012
+00:55:46,120 --> 00:55:48,160
+kahekordne, pisike ringristmik.
+
+2013
+00:55:51,600 --> 00:55:52,800
+Nüüd…
+
+2014
+00:55:59,640 --> 00:56:01,800
+Oh, Jumal. Nüüd on see selge.
+
+2015
+00:56:09,280 --> 00:56:11,880
+(Tuulesõiduki sarve kõmin).
+
+2016
+00:56:18,280 --> 00:56:19,320
+Ma ei tea.
+
+2017
+00:56:23,920 --> 00:56:24,960
+Seal on kaks.
+
+2018
+00:56:27,720 --> 00:56:29,400
+(Tuuled jätkuvad.)
+
+2019
+00:56:38,520 --> 00:56:39,560
+KLARKSAN: Hullu!
+
+2020
+00:56:41,640 --> 00:56:43,000
+Tema.
+
+2021
+00:56:43,040 --> 00:56:44,080
+(hingatseb sügavalt).
+
+2022
+00:56:44,760 --> 00:56:46,040
+Oh, Jumal.
+
+2023
+00:56:46,080 --> 00:56:48,200
+Ei midagi sellist enam.
+
+2024
+00:56:46,080 --> 00:56:48,200
+Palun, enam kunagi selliseid ringristmiku autosõite.
+
+2025
+00:56:50,480 --> 00:56:52,560
+Sellise kogemuse järel...
+
+2026
+00:56:50,480 --> 00:56:52,560
+sellise hirmutava kogemuse järel,
+
+2027
+00:56:52,600 --> 00:56:55,920
+meil oli vaja kuuma, magusat teed.
+
+2028
+00:56:52,600 --> 00:56:55,920
+et rahuneda.
+
+2029
+00:56:55,960 --> 00:56:59,560
+seega läksime lähimasse
+
+2030
+00:56:55,960 --> 00:56:59,560
+aianduskeskusse.
+
+2031
+00:56:59,600 --> 00:57:03,200
+(RAADIOS KUULDA:)
+
+2032
+00:56:59,600 --> 00:57:03,200
+"Ma soovitaksin..."
+
+2033
+00:56:59,600 --> 00:57:03,200
+me peaksime töökoju taasavamisel mõtlema.
+
+2034
+00:57:03,240 --> 00:57:05,200
+"See takistaks inimesi."
+
+2035
+00:57:03,240 --> 00:57:05,200
+ja kes tahavad juurde sünnitada."
+Oh, seal on ruumi sissepääsu lähedal.
+
+2036
+00:57:05,240 --> 00:57:06,520
+"ja et inimestel oleks võimalikult palju lapsi."
+
+2037
+00:57:05,240 --> 00:57:06,520
+nagu nad soovivad."
+
+2038
+00:57:06,560 --> 00:57:09,400
+Ah, seal on vaba ruumi.
+
+2039
+00:57:06,560 --> 00:57:09,400
+ukse lähedal.
+
+2040
+00:57:10,400 --> 00:57:11,440
+(kõksatamine)
+
+2041
+00:57:16,600 --> 00:57:17,640
+(löök)
+
+2042
+00:57:19,520 --> 00:57:21,080
+Ma pean selle ära tegema.
+
+2043
+00:57:19,520 --> 00:57:21,080
+Ma pean teid sisse minema ajama.
+
+2044
+00:57:31,800 --> 00:57:32,840
+(koputamine)
+
+2045
+00:57:37,720 --> 00:57:40,360
+Üks tassi teed.
+
+2046
+00:57:37,720 --> 00:57:40,360
+Ah, täitsa tore.
+
+2047
+00:57:53,400 --> 00:57:55,400
+- Kas sa oled see näinud, James?
+
+2048
+00:57:53,400 --> 00:57:55,400
+-Mis?
+
+2049
+00:57:55,440 --> 00:57:57,200
+Porru aitab vähki ennetada.
+
+2050
+00:57:55,440 --> 00:57:57,200
+– Sul saab sellest vähk.
+
+2051
+00:57:57,840 --> 00:57:59,640
+-Tõesti?
+
+2052
+00:57:57,840 --> 00:57:59,640
+-Jah.
+
+2053
+00:57:59,680 --> 00:58:01,840
+Aga ajaleht "Mail" ütles...
+
+2054
+00:57:59,680 --> 00:58:01,840
+see olid vanad tomatid.
+
+2055
+00:58:01,880 --> 00:58:04,400
+või oli see ikka maja hindade tõttu?
+
+2056
+00:58:01,880 --> 00:58:04,400
+Kas tomatid võivad vähki põhjustada?
+
+2057
+00:58:04,440 --> 00:58:08,200
+Ma arvasin, et Diana...
+
+2058
+00:58:04,440 --> 00:58:08,200
+või kas see oli siiski maja hindade küsimus?
+
+2059
+00:58:04,440 --> 00:58:08,200
+või olid see maja hinnad?
+
+2060
+00:58:08,240 --> 00:58:12,680
+Immigrandid, nad ju tõstavad eluasemete hindu...
+
+2061
+00:58:08,240 --> 00:58:12,680
+Ma lähen segadusse.
+
+2062
+00:58:12,720 --> 00:58:16,000
+Pärastlõunane tee on läbi.
+
+2063
+00:58:12,720 --> 00:58:16,000
+me jõudsime taas teele.
+
+2064
+00:58:23,880 --> 00:58:24,880
+Hullumeel!
+
+2065
+00:58:28,160 --> 00:58:30,240
+Pärast pingelisest päevast.
+
+2066
+00:58:28,160 --> 00:58:30,240
+me sõitsime koju.
+
+2067
+00:58:30,280 --> 00:58:32,840
+Ja sinna jõudmiseks…
+
+2068
+00:58:30,280 --> 00:58:32,840
+me paigaldasime oma autodele...
+
+2069
+00:58:32,880 --> 00:58:37,080
+millessegi, mida nimetatakse
+
+2070
+00:58:32,880 --> 00:58:37,080
+"satelliitnavigatsioon."
+
+2071
+00:58:37,120 --> 00:58:40,160
+Usaldamatu seade. See oli...
+
+2072
+00:58:37,120 --> 00:58:40,160
+kingitus, mille mu lapsed mulle andsid.
+
+2073
+00:58:40,200 --> 00:58:42,720
+See teab, kus ma viibin.
+
+2074
+00:58:40,200 --> 00:58:42,720
+planeedil.
+
+2075
+00:58:42,760 --> 00:58:45,600
+ja siis see suudab.
+
+2076
+00:58:42,760 --> 00:58:45,600
+viia mind koju.
+
+2077
+00:58:45,640 --> 00:58:47,800
+Mul pole muud teha, kui…
+
+2078
+00:58:45,640 --> 00:58:47,800
+nagu mulle öeldakse.
+
+2079
+00:58:48,760 --> 00:58:50,520
+Nii et ma keeran siin vasakule.
+
+2080
+00:58:52,120 --> 00:58:53,160
+Jah.
+
+2081
+00:58:55,080 --> 00:58:58,440
+Aga elektrilise kaardi järgi...
+
+2082
+00:58:55,080 --> 00:58:58,440
+Ma lähen paremale.
+
+2083
+00:58:59,920 --> 00:59:01,280
+(taimed murduvad)
+
+2084
+00:59:01,320 --> 00:59:03,840
+See on, umm...
+
+2085
+00:59:03,880 --> 00:59:07,640
+See on... ülevoolav. Vallavalduse…
+
+2086
+00:59:03,880 --> 00:59:07,640
+nende peaks tõesti midagi ette võtma.
+
+2087
+00:59:03,880 --> 00:59:07,640
+"Oh, ma sõitsin lihtsalt selle tee ääres."
+
+2088
+00:59:09,880 --> 00:59:13,360
+See on küll veider, kas pole?
+
+2089
+00:59:09,880 --> 00:59:13,360
+Sa kuuleb lugusid.
+
+2090
+00:59:09,880 --> 00:59:13,360
+kõige aeg ajast, kes on idioodid.
+
+2091
+00:59:13,400 --> 00:59:15,560
+"Oi, ma jätsin lihtsalt."
+
+2092
+00:59:13,400 --> 00:59:15,560
+satelliidnavigatsiooniga.
+
+2093
+00:59:15,600 --> 00:59:18,040
+"ja ma sõitsin üle kuru."
+
+2094
+00:59:15,600 --> 00:59:18,040
+või otse kanalisse."
+
+2095
+00:59:18,080 --> 00:59:19,800
+Sa mõtled, mis rumalusega ma täna tegelesin!
+
+2096
+00:59:24,800 --> 00:59:26,040
+Peab olema mingi kiirteed asemik."
+
+2097
+00:59:26,960 --> 00:59:27,960
+Väga oivaliselt tehtud.
+
+2098
+00:59:33,160 --> 00:59:37,160
+JA nüüd oleme siin.
+
+2099
+00:59:33,160 --> 00:59:37,160
+hea olla kodus.
+
+2100
+00:59:37,200 --> 00:59:39,120
+Oi, rõõm.
+
+2101
+00:59:42,160 --> 00:59:45,160
+Nüüd oleme jõudnud siiani. Peugeot.
+
+2102
+00:59:45,200 --> 00:59:48,360
+Nad olid väga head.
+
+2103
+00:59:45,200 --> 00:59:48,360
+ja nad olid väga head tugevate autode valmistamisel.
+
+2104
+00:59:48,400 --> 00:59:50,000
+Nad olid suurepärased.
+
+2105
+00:59:48,400 --> 00:59:50,000
+ja viimase kümneaasta jooksul on nad olnud väga head halva kvaliteediga autode tootmisel.
+
+
+2106
+00:59:50,040 --> 00:59:52,960
+ja viimase kümne aasta jooksul.
+
+2107
+00:59:50,040 --> 00:59:52,960
+nad olid suurepärased.
+
+2108
+00:59:53,000 --> 00:59:55,280
+ja nad olid väga head halva kvaliteediga autode tootmises.
+
+2109
+00:59:55,320 --> 00:59:58,240
+See on tõesti ideaalne auto.
+
+2110
+00:59:58,280 --> 01:00:01,320
+maailmale.
+
+2111
+00:59:58,280 --> 01:00:01,320
+e perfektne auto maailma kõige kehvematele juhtidele.
+
+2112
+01:00:01,360 --> 01:00:03,360
+(RAADIOS KUULDA:)
+
+2113
+01:00:01,360 --> 01:00:03,360
+"Kõige lihtsam viis...
+
+2114
+01:00:01,360 --> 01:00:03,360
+et kiiruseületamist ära hoida.
+
+2115
+01:00:03,400 --> 01:00:06,160
+"on anda liiklennuvõre rikkujatele vanglakaristus."
+
+2116
+01:00:03,400 --> 01:00:06,160
+kõigile, kes sellega vahele jäävad.
+
+2117
+01:00:03,400 --> 01:00:06,160
+kiiruseületamine.
+
+2118
+01:00:06,200 --> 01:00:07,960
+"ja see lahendab probleemi."
+
+2119
+01:00:06,200 --> 01:00:07,960
+\- See aitab probleemi lahendada.
+
+2120
+01:00:08,000 --> 01:00:09,560
+Jenny, Ramsgate'ist, Kentist.
+
+2121
+01:00:09,600 --> 01:00:11,640
+(autoga toru)
+
+2122
+01:00:09,600 --> 01:00:11,640
+(auto signaal heliseb)
+
+2123
+01:00:13,640 --> 01:00:16,200
+Aga siin on probleem.
+
+2124
+01:00:13,640 --> 01:00:16,200
+Varsti tuleb see aeg.
+
+2125
+01:00:16,240 --> 01:00:18,440
+et Peugeot muutuks.
+
+2126
+01:00:16,240 --> 01:00:18,440
+ja nad mõtlevad uuesti midagi välja.
+
+2127
+01:00:18,480 --> 01:00:22,440
+ja mõelda millelegi uuele.
+
+2128
+01:00:18,480 --> 01:00:22,440
+Ja kes teab, mis see on.
+
+2129
+01:00:18,480 --> 01:00:22,440
+kumb see on.
+
+2130
+01:00:22,480 --> 01:00:26,120
+Arvestades Peugeoti, see võib olla...
+
+2131
+01:00:22,480 --> 01:00:26,120
+inertne gaas.
+
+2132
+01:00:27,320 --> 01:00:30,280
+Peugeot'i üheksaliikmeline ansambel.
+
+2133
+01:00:27,320 --> 01:00:30,280
+rütmi- ja bluusi ansambel.
+
+2134
+01:00:30,960 --> 01:00:33,000
+Aeg annab selle kohta vastuse.
+
+2135
+01:00:35,880 --> 01:00:36,920
+(lehm ammuseleb)
+
+2136
+01:00:44,480 --> 01:00:46,680
+Hammond: Kaks idiooti.
+
+2137
+01:00:44,480 --> 01:00:46,680
+Tõesti?
+
+2138
+01:00:46,720 --> 01:00:49,240
+CLARKSON: Kõige hullema on veel ees.
+
+2139
+01:00:46,720 --> 01:00:49,240
+ilmselt see, kuidas ma ei saanud hingata.
+
+2140
+01:00:49,280 --> 01:00:52,480
+Ma pole kunagi varem...
+
+2141
+01:00:49,280 --> 01:00:52,480
+olen kunagi midagi seda halvemat kogenud...
+
+2142
+01:00:52,520 --> 01:00:54,760
+- Hetke!
+
+2143
+01:00:52,520 --> 01:00:54,760
+...kui see, et mind käega ära surmata.
+
+2144
+01:00:52,520 --> 01:00:54,760
+...kui auto põleb.
+
+2145
+01:00:54,800 --> 01:00:56,720
+- Hetk, hetke.
+
+2146
+01:00:54,800 --> 01:00:56,720
+-Mis?
+
+2147
+01:00:56,760 --> 01:01:01,080
+Kas te kaks olete sellega nõus?
+
+2148
+01:00:56,760 --> 01:01:01,080
+Peugeot on kulutanud kümme aastat.
+
+2149
+01:01:01,120 --> 01:01:03,240
+tahtlikult kehvemaid autosid tootmas?
+
+2150
+01:01:01,120 --> 01:01:03,240
+halbu autosid?
+
+2151
+01:01:03,800 --> 01:01:05,280
+Jah, umbes nii.
+
+2152
+01:01:05,320 --> 01:01:07,960
+Sa ei saa autodesid selliseks teha.
+
+2153
+01:01:05,320 --> 01:01:07,960
+mis pidevalt halvad on.
+
+2154
+01:01:05,320 --> 01:01:07,960
+juhtumisi.
+
+2155
+01:01:08,000 --> 01:01:09,600
+Aga mõelge natuke järele.
+
+2156
+01:01:08,000 --> 01:01:09,600
+Hammond, mõtle sellele juurde.
+
+2157
+01:01:09,640 --> 01:01:11,600
+Mis asi see on?
+
+2158
+01:01:09,640 --> 01:01:11,600
+miks üldse auto teha.
+
+2159
+01:01:11,640 --> 01:01:13,960
+komplikeeritud piduritega.
+
+2160
+01:01:11,640 --> 01:01:13,960
+ja kalli vedrustusega?
+
+2161
+01:01:14,000 --> 01:01:15,320
+kui sa lihtsalt...
+
+2162
+01:01:14,000 --> 01:01:15,320
+müüa see kellelegi.
+
+2163
+01:01:15,360 --> 01:01:18,200
+kes soovib ainult Jeremy Vinet.
+
+2164
+01:01:15,360 --> 01:01:18,200
+ja lihtsad järelmaksed?
+
+2165
+01:01:18,240 --> 01:01:20,240
+Täpselt nii. Sa teed autosid.
+
+2166
+01:01:18,240 --> 01:01:20,240
+niihästi kui võimalik, võimalikult odavalt.
+
+2167
+01:01:20,280 --> 01:01:22,240
+ja siis neid müüa.
+
+2168
+01:01:20,280 --> 01:01:22,240
+inimestele, kes seda ei pruugi märgata.
+
+2169
+01:01:22,280 --> 01:01:23,800
+Ma mõtlen, lihtsalt mõelge sellele.
+
+2170
+01:01:22,280 --> 01:01:23,800
+nii, ok?
+
+2171
+01:01:23,840 --> 01:01:27,960
+Praegu, isegi kui me praegu räägime…
+
+2172
+01:01:23,840 --> 01:01:27,960
+Üheksa miljonit inimest Suurbritannias.
+
+2173
+01:01:28,000 --> 01:01:31,680
+ja nad on täiesti autosid suhtes ükskõiksed.
+
+2174
+01:01:28,000 --> 01:01:31,680
+nad vaatavad seda - ämmaemanda seriaali.
+
+2175
+01:01:28,000 --> 01:01:31,680
+midagi seal teisel pool.
+
+2176
+01:01:31,720 --> 01:01:34,320
+Ja sa ütled, et...
+
+2177
+01:01:31,720 --> 01:01:34,320
+kas nad kõik sõidavad Peugeot'sid?
+
+2178
+01:01:34,360 --> 01:01:38,200
+Jah, ma olen. Ja nemad on...
+
+2179
+01:01:34,360 --> 01:01:38,200
+kõik lähevad sinna teisele poole.
+Ja sa väidad, et
+nad kõik on Peugeot' kontrollijad?
+Jah, ma ütlen seda. Ja nad on...
+täiesti šokeeritud, kui Peugeot hakkab lehmade valmistamist.
+Ja sellega ongi kõik.
+
+2180
+01:01:34,360 --> 01:01:38,200
+täielikult südames murdunud.
+
+2181
+01:01:38,240 --> 01:01:41,360
+Kui Peugeot käivitatakse.
+
+2182
+01:01:38,240 --> 01:01:41,360
+ja nad kõik on sellest väga haavatud.
+
+2183
+01:01:41,400 --> 01:01:43,280
+Ja nüüd ongi kõik.
+
+2184
+01:01:41,400 --> 01:01:43,280
+nüüd on aeg lõpetada.
+
+2185
+01:01:43,320 --> 01:01:44,880
+Suur tänu.
+
+
+2186
+01:01:43,320 --> 01:01:44,880
+Täname, et vaatasite.
+
+2187
+01:01:44,920 --> 01:01:46,440
+Kohtumiseni järgmisel nädalal.
+
+2188
+01:01:44,920 --> 01:01:46,440
+Head ööd!
+

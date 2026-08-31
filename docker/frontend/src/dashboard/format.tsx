@@ -19,7 +19,7 @@ export const labelForState = (state: unknown) => {
 
 export const operationLabel = (operation: unknown) => ({
   translation: "Translation", cue_repair: "Cue repair", format_repair: "Format repair",
-  validation: "Validation", quarantine: "Quarantine", deletion: "Deletion",
+  validation: "Validation", language_validation: "Language validation", quarantine: "Quarantine", deletion: "Deletion",
   undersized_detection: "Undersized detection", sidecar_pruning: "Sidecar pruning",
   bazarr_sync: "Bazarr synchronization", existing_library_scan: "Existing-library scan",
   startup: "Startup", retention: "Retention",

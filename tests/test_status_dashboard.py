@@ -821,6 +821,61 @@ class StatusDashboardTests(unittest.TestCase):
             )
             self.assertEqual(finished["history"]["1h"]["accepted"], 0)
 
+    def test_maintenance_completion_is_retryable_after_snapshot_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = StatusTracker(
+                Path(directory) / "status.json",
+                Path(directory) / "history.jsonl",
+            )
+            job_id = tracker.create_maintenance_job(
+                "cue_repair", {"title": "Retryable repair"}, state="repairing"
+            )
+            with patch.object(
+                tracker, "_write_snapshot_locked", side_effect=OSError("disk busy")
+            ):
+                with self.assertRaises(OSError):
+                    tracker.complete_maintenance(job_id, "repaired")
+
+            active = tracker.snapshot()["maintenance"]["activeJobs"]
+            self.assertEqual([job["statusJobId"] for job in active], [job_id])
+            self.assertTrue(tracker.complete_maintenance(job_id, "repaired"))
+            snapshot = tracker.snapshot()
+            events = [
+                event for event in snapshot["maintenance"]["recentOutcomes"]
+                if event["statusJobId"] == job_id
+            ]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(snapshot["maintenance"]["activeJobs"], [])
+
+    def test_language_validation_outcome_exposes_only_typed_detection_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = StatusTracker(
+                Path(directory) / "status.json",
+                Path(directory) / "history.jsonl",
+            )
+            tracker.record_maintenance_outcome(
+                "language_validation",
+                "quarantined",
+                {
+                    "title": "Shameless (US)",
+                    "episodeCode": "S09E12",
+                    "targetLanguage": "sv",
+                },
+                reason="expected sv; detected ENGLISH 1.00",
+            )
+            tracker.record_maintenance_outcome(
+                "language_validation",
+                "quarantined",
+                {"title": "Unsafe reason", "targetLanguage": "sv"},
+                reason="expected sv; detected /media/private/file.srt",
+            )
+
+            outcomes = tracker.snapshot()["maintenance"]["recentOutcomes"]
+            safe = next(event for event in outcomes if event["title"] == "Shameless (US)")
+            unsafe = next(event for event in outcomes if event["title"] == "Unsafe reason")
+            self.assertEqual(safe["reason"], "expected sv; detected ENGLISH 1.00")
+            self.assertIsNone(unsafe["reason"])
+
     def test_startup_job_remains_active_through_backend_lifecycle_states(self):
         with tempfile.TemporaryDirectory() as directory:
             tracker = StatusTracker(
@@ -946,7 +1001,7 @@ class StatusDashboardTests(unittest.TestCase):
     def test_dashboard_assets_render_maintenance_and_adaptive_refresh(self):
         source_root = REPO_ROOT / "docker" / "frontend" / "src" / "dashboard"
         script = "\n".join(path.read_text(encoding="utf-8") for path in source_root.glob("*.tsx"))
-        for text in ("maintenance.activeJobs", "Latest maintenance scan", "Health & history", "Waiting for capacity", "Calling Lingarr", "Validating returned cue", "ACTIVE_REFRESH_MS = 3_000", "IDLE_REFRESH_MS = 20_000", "MAX_BACKOFF_MS = 60_000", "/api/status", "mergeRecentOutcomes", "Retry queue", "retryMaxAttempts", "Unlimited", "eligibleCompletedCycle"):
+        for text in ("maintenance.activeJobs", "Latest maintenance scan", "Health & history", "Waiting for capacity", "Calling Lingarr", "Validating returned cue", "Language validation", "ACTIVE_REFRESH_MS = 3_000", "IDLE_REFRESH_MS = 20_000", "MAX_BACKOFF_MS = 60_000", "/api/status", "mergeRecentOutcomes", "Retry queue", "retryMaxAttempts", "Unlimited", "eligibleCompletedCycle"):
             self.assertIn(text, script)
         app = (source_root / "App.tsx").read_text(encoding="utf-8")
         self.assertLess(app.index("\n      <Overview"), app.index("\n      <Work"))

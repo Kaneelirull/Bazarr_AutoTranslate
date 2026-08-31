@@ -2,9 +2,11 @@ import sys
 import tempfile
 import unittest
 import json
+import hashlib
 import os
 import time
 import threading
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -70,6 +72,23 @@ def make_timed_srt(cue_count: int, final_second: int, text: str = "Dialogue line
 
 
 class SubtitleValidationTests(unittest.TestCase):
+    def test_shameless_wrong_language_fixture_reproduces_sw_validation_failure(self):
+        fixture_root = REPO_ROOT / "examples" / "LanguageValidationFailure" / "Shameless-S09E12"
+        detector = build_detector()
+        expected = {"en": True, "et": True, "sv": False}
+        for language, valid in expected.items():
+            path = next(fixture_root.glob(f"*.{language}.srt"))
+            report = validate_subtitle_without_source(
+                path, detector, target_language_for_code(language),
+                target_lang=language,
+            )
+            self.assertEqual(report.valid, valid, language)
+            if language == "sv":
+                self.assertIn(
+                    ("target_file_invalid", "detected ENGLISH 1.00"),
+                    {(issue.rule, issue.detail) for issue in report.issues},
+                )
+
     def test_failure_classification_prefers_structural_safety(self):
         cue_only = ValidationReport([
             ValidationIssue("garbage", "bad", cue_index=0, cue_number=1)
@@ -1164,6 +1183,44 @@ class SubtitleValidationTests(unittest.TestCase):
 
             self.assertTrue(result.success, result.reason)
             provider.assert_not_called()
+
+    def test_missing_repair_manifest_matches_captured_receipts_and_payloads(self):
+        fixture_root = REPO_ROOT / "examples" / "MissingRepair"
+        manifest = json.loads(
+            (fixture_root / "manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(manifest["attempts"]), 22)
+        self.assertEqual(
+            [entry["suffix"] for entry in manifest["attempts"]], list(range(22))
+        )
+
+        missing_payloads = []
+        canonical_target = None
+        for attempt in manifest["attempts"]:
+            suffix = attempt["suffix"]
+            suffix_token = "" if suffix == 0 else f".{suffix}"
+            payload = fixture_root / f'{manifest["baseName"]}{suffix_token}.srt'
+            receipt_path = Path(f"{payload}.validation.json")
+            self.assertTrue(receipt_path.exists(), receipt_path.name)
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["sourceHash"], manifest["sourceHash"])
+            canonical_target = canonical_target or receipt["targetPath"]
+            self.assertEqual(receipt["targetPath"], canonical_target)
+            actual_rules = Counter(
+                issue["rule"] for issue in receipt["validation"]["issues"]
+            )
+            self.assertEqual(actual_rules, Counter(attempt["rules"]))
+            if attempt["payload"]:
+                self.assertTrue(payload.exists(), payload.name)
+                normalized = payload.read_bytes().replace(b"\r\n", b"\n")
+                self.assertEqual(
+                    hashlib.sha256(normalized).hexdigest(), receipt["targetHash"]
+                )
+            else:
+                missing_payloads.append(suffix)
+                self.assertFalse(payload.exists(), payload.name)
+
+        self.assertEqual(missing_payloads, [1])
 
 
 if __name__ == "__main__":
