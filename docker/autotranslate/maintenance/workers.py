@@ -13,7 +13,7 @@ from typing import Callable, Iterable, Iterator
 
 
 STABLE_CACHE_ACTIONS = frozenset({
-    "valid", "valid-warning", "reported", "dry-run", "formatted", "repaired",
+    "valid", "valid-warning", "dry-run", "formatted", "repaired",
 })
 _DETECTOR = None
 

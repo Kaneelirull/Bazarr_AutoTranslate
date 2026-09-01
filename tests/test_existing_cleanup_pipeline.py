@@ -2055,29 +2055,44 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             target = root / "show.sv.srt"
             video.write_bytes(b"video")
             target.write_text(
-                make_multi_srt(*(["This is clearly an English dialogue sentence."] * 10)),
+                make_timed_srt(
+                    150, 3500, "This is clearly an English dialogue sentence."
+                ),
                 encoding="utf-8",
             )
-            with (
-                patch.multiple(
-                    app,
-                    LANGUAGES=["sv"],
-                    CLEANUP_LANGUAGES=set(),
-                    CLEANUP_ROOTS=[root],
-                    CLEANUP_QUARANTINE_DIR=quarantine,
-                    CLEANUP_SCAN_EXISTING=True,
-                    CLEANUP_SCAN_DRY_RUN=False,
-                    CLEANUP_ACTION="quarantine",
-                    CLEANUP_UNDERSIZED_ENABLED=False,
-                ),
-                patch.object(app, "_tracked_bazarr_sync") as sync,
+            with patch.multiple(
+                app,
+                LANGUAGES=["sv"],
+                CLEANUP_LANGUAGES=set(),
+                CLEANUP_ROOTS=[root],
+                CLEANUP_QUARANTINE_DIR=quarantine,
+                CLEANUP_SCAN_EXISTING=True,
+                CLEANUP_SCAN_DRY_RUN=False,
+                CLEANUP_ACTION="quarantine",
+                CLEANUP_UNDERSIZED_ENABLED=True,
             ):
-                stats = app.run_existing_cleanup_scan()
+                with (
+                    patch.object(app, "_probe_media_duration", return_value=None),
+                    patch.object(app, "_tracked_bazarr_sync") as sync,
+                ):
+                    first = app.run_existing_cleanup_scan()
 
-            self.assertTrue(target.exists())
-            self.assertFalse(quarantine.exists())
-            self.assertEqual(stats["reported_files"], 1)
-            sync.assert_not_called()
+                self.assertTrue(target.exists())
+                self.assertFalse(quarantine.exists())
+                self.assertEqual(first["reported_files"], 1)
+                sync.assert_not_called()
+
+                with (
+                    patch.object(app, "_probe_media_duration", return_value=3600.0),
+                    patch.object(app, "_tracked_bazarr_sync", return_value=True) as sync,
+                ):
+                    second = app.run_existing_cleanup_scan()
+
+            self.assertEqual(second["cache_hits"], 0)
+            self.assertEqual(second["quarantined_files"], 1)
+            self.assertFalse(target.exists())
+            self.assertTrue((quarantine / target.name).exists())
+            sync.assert_called_once_with(True, True, app.SYNC_TIMEOUT)
 
     def test_source_less_managed_language_is_validated_when_ai_scope_is_empty(self):
         with tempfile.TemporaryDirectory() as directory:
