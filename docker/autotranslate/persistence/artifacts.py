@@ -1052,9 +1052,14 @@ class ArtifactsRepositoryMixin:
                 "DELETE FROM timing_samples WHERE created_at < ?",
                 (cutoff_timestamp,),
             ).rowcount
+            maintenance_cache = db.execute(
+                "DELETE FROM maintenance_validation_cache WHERE updated_at < ?",
+                (cutoff_timestamp,),
+            ).rowcount
         return int(
             recovery_events + donor_events + provider_events
             + admission_events + maintenance_runs + repair_jobs
             + failure_fingerprints + cue_recoveries
             + partial_candidates + validations + holds + attempts + timings
+            + maintenance_cache
         )

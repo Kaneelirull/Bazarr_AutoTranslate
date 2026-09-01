@@ -135,6 +135,22 @@ class MigrationsRepositoryMixin:
                 CREATE INDEX IF NOT EXISTS idx_validation_latest
                     ON validation_results(artifact_id, id DESC);
 
+                CREATE TABLE IF NOT EXISTS maintenance_validation_cache (
+                    target_path TEXT PRIMARY KEY,
+                    target_size INTEGER NOT NULL,
+                    target_modified_ns INTEGER NOT NULL,
+                    dependency_fingerprint_json TEXT NOT NULL,
+                    validator_version TEXT NOT NULL,
+                    config_fingerprint TEXT NOT NULL,
+                    validation_result TEXT NOT NULL,
+                    action_result TEXT NOT NULL,
+                    target_hash TEXT,
+                    details_json TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_maintenance_cache_updated
+                    ON maintenance_validation_cache(updated_at);
+
                 CREATE TABLE IF NOT EXISTS quarantine_holds (
                     identity TEXT NOT NULL,
                     target_hash TEXT NOT NULL,
@@ -603,6 +619,7 @@ class MigrationsRepositoryMixin:
                 14: "successful translation source readiness",
                 15: "manual review actions and state normalization",
                 16: "atomic manual recovery and fair scan outbox",
+                17: "incremental parallel maintenance validation cache",
             }
             timestamp = time.time()
             for version, name in migration_names.items():

@@ -35,6 +35,7 @@ from .lifecycle import LifecycleController, ShutdownController
 from .maintenance.coordinator import MaintenanceCoordinator, MaintenanceOperation
 from .maintenance.library import ExistingLibraryMaintenance
 from .maintenance.retention import run_retention
+from .maintenance.workers import MaintenanceWorkerPool
 from .status.facade import StatusFacade
 GREEN = YELLOW = RED = CYAN = BOLD = RESET = ''
 _logging_resource = None
@@ -96,6 +97,9 @@ def configure(config, logging_resource=None) -> None:
         'openCycles': config.circuit_open_cycles,
     }, sort_keys=True).encode('utf-8')).hexdigest()[:16]
     globals()['_VALIDATION_CONFIG_FINGERPRINT'] = hashlib.sha256(json.dumps({
+        'minChars': config.cleanup_min_chars,
+        'minConfidence': config.cleanup_min_confidence,
+        'maxUniqueRatio': config.cleanup_max_unique_ratio,
         'maxCueLines': config.cleanup_max_cue_lines,
         'maxCueChars': config.cleanup_max_cue_chars,
         'maxExpansionRatio': config.cleanup_max_expansion_ratio,
@@ -104,6 +108,7 @@ def configure(config, logging_resource=None) -> None:
         'maxCyrillicRatio': config.cleanup_max_cyrillic_ratio,
         'maxCjkRatio': config.cleanup_max_cjk_ratio,
         'maxLatinRatio': config.cleanup_max_latin_ratio,
+        'minLettersForScript': config.cleanup_min_letters_for_script,
         'minMediaDuration': config.cleanup_min_media_duration,
         'minCuesPerMinute': config.cleanup_min_cues_per_minute,
         'minTextCharsPerMinute': config.cleanup_min_text_chars_per_minute,
@@ -112,6 +117,24 @@ def configure(config, logging_resource=None) -> None:
         'undersizedRequiredSignals': config.cleanup_undersized_required_signals,
         'donorEnabled': config.donor_recovery_enabled,
         'donorSimilarity': 0.95, 'donorTimestampToleranceMs': 500,
+    }, sort_keys=True).encode('utf-8')).hexdigest()[:16]
+    globals()['_MAINTENANCE_CONFIG_FINGERPRINT'] = hashlib.sha256(json.dumps({
+        'validator': globals()['_VALIDATION_CONFIG_FINGERPRINT'],
+        'languages': config.languages,
+        'cleanupLanguages': sorted(config.cleanup_languages),
+        'cleanupAction': config.cleanup_action,
+        'scanDryRun': config.cleanup_scan_dry_run,
+        'formatRepair': config.cleanup_format_repair_enabled,
+        'repairEnabled': config.cleanup_repair_enabled,
+        'maxRepairAttempts': config.cleanup_max_repair_attempts,
+        'repairContextLines': config.cleanup_repair_context_lines,
+        'undersized': config.cleanup_undersized_enabled,
+        'ffprobeTimeout': config.cleanup_ffprobe_timeout,
+        'pruneExtra': config.cleanup_prune_extra_languages,
+        'pruneAction': config.cleanup_prune_action,
+        'pruneSpecial': config.cleanup_prune_special_sidecars,
+        'pruneUnknown': config.cleanup_prune_unknown_sidecars,
+        'sourceLessAction': config.cleanup_sourceless_line_only_action,
     }, sort_keys=True).encode('utf-8')).hexdigest()[:16]
     _logging_resource = logging_resource
     _config = config
@@ -143,3 +166,4 @@ _runtime_resources_lock = threading.Lock()
 _active_state_store: StateStore | None = None
 _active_status_server = None
 _manual_review_service = None
+_maintenance_worker_pool: MaintenanceWorkerPool | None = None

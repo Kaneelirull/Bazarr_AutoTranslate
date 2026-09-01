@@ -10,6 +10,7 @@ from .circuits import CircuitsRepositoryMixin
 from .repairs import RepairsRepositoryMixin
 from .operations import OperationsRepositoryMixin
 from .manual_reviews import ManualReviewsRepositoryMixin
+from .maintenance_cache import MaintenanceCacheRepositoryMixin
 
 
 class StateStore(
@@ -21,6 +22,7 @@ class StateStore(
     RepairsRepositoryMixin,
     OperationsRepositoryMixin,
     ManualReviewsRepositoryMixin,
+    MaintenanceCacheRepositoryMixin,
     DatabaseState,
 ):
     """Package-owned aggregate composed from focused SQLite repositories."""

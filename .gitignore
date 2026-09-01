@@ -8,6 +8,7 @@
 !.claude/.context.md
 !.claude/.changes.md
 !.claude/.memory.md
+!.claude/.architecture.md
 .agents/
 
 # Python caches, tooling, and virtual environments

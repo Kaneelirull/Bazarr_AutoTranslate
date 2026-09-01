@@ -51,6 +51,7 @@ MEDIA_PATH=/mnt/tank/media
 
 LANGUAGES=en,et,sv
 PARALLEL_TRANSLATES=1
+MAINTENANCE_WORKERS=4
 TZ=Europe/Tallinn
 ```
 
@@ -79,6 +80,7 @@ docker run -d \
   -e LINGARR_API_KEY= \
   -e LANGUAGES=en,et,sv \
   -e PARALLEL_TRANSLATES=1 \
+  -e MAINTENANCE_WORKERS=4 \
   -e TZ=Europe/Tallinn \
   -v /mnt/tank/media:/media \
   -v bazarr-autotranslate-data:/config \
@@ -97,6 +99,7 @@ docker run -d \
 | `LINGARR_API_KEY` | No | empty | Lingarr API key when authentication is enabled |
 | `LANGUAGES` | No | `en,et,sv` | Managed languages in source-priority order |
 | `PARALLEL_TRANSLATES` | No | `1` | Shared maximum for active full-file translations and cue repairs; repairs have admission priority |
+| `MAINTENANCE_WORKERS` | No | `4` | CPU processes for non-AI maintenance analysis; valid range 1–32 |
 | `CHECK_INTERVAL` | No | `1200` | Seconds between wanted-queue cycles |
 | `CONNECT_TIMEOUT` | No | `10` | External API timeout in seconds |
 | `POLL_INTERVAL` | No | `20` | Lingarr job polling interval |
@@ -108,6 +111,8 @@ docker run -d \
 API connection failures are retried with bounded backoff. Bazarr category
 failures are reported as degraded cycles instead of empty queues, and Lingarr
 capacity failures defer work instead of submitting without a verified slot.
+
+Maintenance discovery and mutations remain serialized in one coordinator, while subtitle parsing, hashing, language validation, completeness analysis, pruning preflight, and startup cue counting run in a bounded process pool. Stable scan results are cached by file/dependency metadata and validation policy, so unchanged files bypass repeated CPU analysis.
 
 ## Cleanup settings
 

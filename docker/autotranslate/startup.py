@@ -156,6 +156,36 @@ def _requeue_persisted_repairs(state_store: _runtime.StateStore) -> int:
                 state_store.settle_circuit_trial_for_retry(retry_plan_id, lease_generation=trial_generation, outcome='deferred', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES, reason=f'restarted repair finished with {action}')
     return queued
 
+
+def _backfill_retry_sizes_parallel(state_store: _runtime.StateStore) -> int:
+    """Count missing retry cue sizes in the maintenance process pool."""
+    from .maintenance.workers import ValidationTask
+    plans = [
+        plan for plan in state_store.retry_plans(include_terminal=False)
+        if plan.get('sourceCueCount') is None and plan.get('sourcePath')
+    ]
+    tasks = [
+        ValidationTask(
+            sequence=index,
+            target_path=plan['sourcePath'],
+            target_language=plan.get('targetLanguage') or '',
+            operation='count_cues',
+        )
+        for index, plan in enumerate(plans)
+    ]
+    updated = 0
+    if _runtime._maintenance_worker_pool is None:
+        return updated
+    for result in _runtime._maintenance_worker_pool.map_ordered(
+        tasks, stop_requested=lambda: _runtime.shutdown_requested,
+    ):
+        plan = plans[result.sequence]
+        if result.cue_count and state_store.set_retry_source_cue_count(
+            plan['id'], result.cue_count
+        ):
+            updated += 1
+    return updated
+
 def main(config=None) -> int:
     if config is not None and config != _runtime._config:
         mismatched = sorted(
@@ -179,13 +209,7 @@ def main(config=None) -> int:
     reconciled_trials = _runtime._reconcile_circuit_trial_leases(state_store)
     _runtime._manual_review_service = _runtime.build_manual_review_service(state_store)
     pending_manual_scans = _runtime._manual_review_service.dispatch_pending_scans(limit=10)
-    backfilled_retry_sizes = 0
-    for plan in state_store.retry_plans(include_terminal=False):
-        if plan.get('sourceCueCount') is not None or not plan.get('sourcePath'):
-            continue
-        cue_count = _runtime._count_srt_cues(plan['sourcePath'])
-        if cue_count and state_store.set_retry_source_cue_count(plan['id'], cue_count):
-            backfilled_retry_sizes += 1
+    backfilled_retry_sizes = _runtime._backfill_retry_sizes_parallel(state_store)
     print(f'[CYCLE] Restored completed-cycle sequence {_runtime._completed_cycle}; released {recovered_claims} orphaned retry claim(s); re-enabled {recovered_end_cycle_repairs} stale end-cycle repair(s); persisted {recovered_repairs} repair job(s) for restart; reactivated {reactivated_manual_reviews} changed manual review(s); reconciled {reconciled_retry_claims} submitted retry claim(s); released {recovered_trials} unbound circuit trial(s); reconciled {reconciled_trials} bound circuit trial(s); backfilled {backfilled_retry_sizes} retry size(s); trusted {backfilled_source_readiness} proven source hash(es); dispatched {pending_manual_scans["dispatched"]}/{pending_manual_scans["examined"]} pending manual scan(s)')
     status_server = None
     if _runtime.STATUS_ENABLED:
@@ -222,6 +246,7 @@ def main(config=None) -> int:
     print(f'  Max cue lines     : {_runtime.CLEANUP_MAX_CUE_LINES}')
     print(f"  Format recovery   : {('ON' if _runtime.CLEANUP_FORMAT_REPAIR_ENABLED else 'off')}")
     print(f'  Shared capacity   : {_runtime.PARALLEL_TRANSLATES} (translations + repairs; repairs first)')
+    print(f'  Maintenance CPUs  : {_runtime.MAINTENANCE_WORKERS}')
     print(f'  Repair queue max  : {_runtime.CLEANUP_REPAIR_QUEUE_MAX}')
     print(f"  Size validation   : {('ON' if _runtime.CLEANUP_UNDERSIZED_ENABLED else 'off')} ({_runtime.CLEANUP_UNDERSIZED_REQUIRED_SIGNALS}/4 signals, media >= {_runtime.CLEANUP_MIN_MEDIA_DURATION:.0f}s)")
     print(f'  Size thresholds   : {_runtime.CLEANUP_MIN_CUES_PER_MINUTE:g} cues/min, {_runtime.CLEANUP_MIN_TEXT_CHARS_PER_MINUTE:g} chars/min, {_runtime.CLEANUP_MIN_BYTES_PER_MINUTE:g} bytes/min, {_runtime.CLEANUP_MIN_TIMELINE_COVERAGE:.0%} timeline')
@@ -364,5 +389,6 @@ EXPORTS = {
     name: globals()[name] for name in (
         '_reconcile_retry_claims', '_reconcile_circuit_trial_leases',
         '_requeue_persisted_repairs', 'main',
+        '_backfill_retry_sizes_parallel',
     )
 }

@@ -94,12 +94,12 @@ class ManualReviewTests(unittest.TestCase):
             reopened = self.make_store(root)
             try:
                 migrated = reopened.manual_review_plan(plan["id"])
-                self.assertEqual(SCHEMA_VERSION, 16)
+                self.assertEqual(SCHEMA_VERSION, 17)
                 self.assertEqual(migrated["state"], "regeneration_waiting")
                 self.assertEqual(migrated["lastDeferralClass"], "manual_review")
                 self.assertIsNone(migrated["finalOutcome"])
                 self.assertEqual(
-                    reopened._connection.execute("PRAGMA user_version").fetchone()[0], 16
+                    reopened._connection.execute("PRAGMA user_version").fetchone()[0], 17
                 )
                 self.assertIsNotNone(reopened._fetchone(
                     "SELECT name FROM sqlite_master WHERE type='table' "

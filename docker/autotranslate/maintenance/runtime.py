@@ -7,8 +7,10 @@ def _scan_undersized_sidecars(stats: dict) -> bool:
         return False
     from ..subtitles.foundation import file_sha256, validate_srt_structure
     from ..subtitles.sources import is_extracted_sidecar
+    from .workers import MaintenanceFileStat, ValidationTask
     changed = False
     seen: set[_runtime.Path] = set()
+    candidates: list[tuple[_runtime.Path, _runtime.Path, str]] = []
     for root in _runtime.CLEANUP_ROOTS:
         if not root.exists():
             continue
@@ -29,49 +31,96 @@ def _scan_undersized_sidecars(stats: dict) -> bool:
                 _runtime.dbg(f'Completeness exempt {subtitle.name}: explicit {exempt_token} track')
                 continue
             stats['undersized_checked'] += 1
+            tokens = _runtime._sidecar_tokens(video, subtitle)
+            language = next((token for token in tokens if len(token) in (2, 3) and token.isalpha()), 'unknown')
+            candidates.append((subtitle, video, language))
+
+    tasks = [
+        ValidationTask(
+            sequence=sequence,
+            operation='structure',
+            target_path=str(subtitle),
+            target_language=language,
+            video_path=str(video),
+            completeness_kwargs=_runtime._completeness_kwargs(),
+            ffprobe_timeout=_runtime.CLEANUP_FFPROBE_TIMEOUT,
+        )
+        for sequence, (subtitle, video, language) in enumerate(candidates)
+    ]
+    analyses = {
+        _maintenance_path_key(result.target_path): result
+        for result in _runtime._maintenance_worker_pool.map_ordered(
+            tasks, stop_requested=lambda: _runtime.shutdown_requested,
+        )
+        if result.target_path
+    } if tasks and _runtime._maintenance_worker_pool is not None else {}
+    stats['tasks_submitted'] += len(tasks) if _runtime._maintenance_worker_pool is not None else 0
+    stats['tasks_completed'] += len(analyses)
+    stats['worker_failures'] += sum(bool(result.error) for result in analyses.values())
+
+    for subtitle, video, language in candidates:
+        if _runtime.shutdown_requested:
+            return changed
+        prepared = analyses.get(_maintenance_path_key(subtitle))
+        current_stat = MaintenanceFileStat.capture(subtitle)
+        reusable = bool(
+            prepared is not None and prepared.error is None
+            and prepared.target_stat == current_stat
+        )
+        if reusable:
+            report = prepared.report
+            completeness = prepared.completeness
+            subtitle_hash = prepared.target_hash
+            if completeness is None:
+                duration = _runtime._probe_media_duration(video)
+                if duration is None:
+                    stats['undersized_duration_unavailable'] += 1
+                    continue
+                completeness = _runtime._evaluate_completeness(subtitle, duration)
+                _runtime._add_completeness_issue(report, completeness)
+        else:
             duration = _runtime._probe_media_duration(video)
             if duration is None:
                 stats['undersized_duration_unavailable'] += 1
                 continue
             report = validate_srt_structure(subtitle)
-            if not report.valid:
-                _runtime.dbg(f'Completeness deferred {subtitle.name}: structural validation must handle {report.summary()}')
-                continue
             completeness = _runtime._evaluate_completeness(subtitle, duration)
             _runtime._add_completeness_issue(report, completeness)
-            if completeness is not None and completeness.undersized:
-                stats['undersized_detected'] += 1
-                tokens = _runtime._sidecar_tokens(video, subtitle)
-                language = next((token for token in tokens if len(token) in (2, 3) and token.isalpha()), 'unknown')
-                _runtime._status_record_maintenance_outcome('undersized_detection', 'undersized', _runtime._maintenance_file_identity(subtitle, language))
-                print(f"{_runtime.YELLOW}[SIZE] Undersized {subtitle.name}: {completeness.cue_count} cues, {completeness.subtitle_bytes} bytes, {completeness.media_duration_seconds / 60:.1f} min, failed={','.join(completeness.failed_signals)}{_runtime.RESET}")
-            if report.valid:
-                continue
             try:
                 subtitle_hash = file_sha256(subtitle)
             except OSError:
                 subtitle_hash = None
-            origin = _runtime._get_validation_state().matching_origin(subtitle, subtitle_hash) if subtitle_hash is not None else None
-            tokens = _runtime._sidecar_tokens(video, subtitle)
-            language = next((token for token in tokens if len(token) in (2, 3) and token.isalpha()), 'unknown')
-            action = _runtime._apply_cleanup_action(subtitle, None, language, report, expected_target_hash=subtitle_hash, completeness=completeness, origin=origin, lingarr_outcome='not attempted: whole-file completeness failure', dry_run=_runtime.CLEANUP_SCAN_DRY_RUN)
-            if action == 'quarantined':
-                if completeness is not None and completeness.undersized:
-                    stats['undersized_quarantined'] += 1
-                else:
-                    stats['quarantined_files'] += 1
-                changed = True
-            elif action == 'deleted':
-                stats['deleted_files'] += 1
-                changed = True
-            elif action == 'reported':
-                stats['reported_files'] += 1
-            elif action == 'dry-run':
-                stats['dry_run_files'] += 1
-            elif action == 'action-failed':
-                stats['action_failures'] += 1
-            if action in ('quarantined', 'deleted', 'action-failed'):
-                _runtime._status_record_maintenance_outcome('quarantine' if action == 'quarantined' else 'deletion' if action == 'deleted' else 'validation', action if action in ('quarantined', 'deleted') else 'failed', _runtime._maintenance_file_identity(subtitle, language), reason='validation action failed' if action == 'action-failed' else None)
+        structural_invalid = any(
+            issue.rule != 'undersized_subtitle' for issue in report.issues
+        )
+        if structural_invalid:
+            _runtime.dbg(f'Completeness deferred {subtitle.name}: structural validation must handle {report.summary()}')
+            continue
+        if completeness is not None and completeness.undersized:
+            stats['undersized_detected'] += 1
+            _runtime._status_record_maintenance_outcome('undersized_detection', 'undersized', _runtime._maintenance_file_identity(subtitle, language))
+            print(f"{_runtime.YELLOW}[SIZE] Undersized {subtitle.name}: {completeness.cue_count} cues, {completeness.subtitle_bytes} bytes, {completeness.media_duration_seconds / 60:.1f} min, failed={','.join(completeness.failed_signals)}{_runtime.RESET}")
+        if report.valid:
+            continue
+        origin = _runtime._get_validation_state().matching_origin(subtitle, subtitle_hash) if subtitle_hash is not None else None
+        action = _runtime._apply_cleanup_action(subtitle, None, language, report, expected_target_hash=subtitle_hash, completeness=completeness, origin=origin, lingarr_outcome='not attempted: whole-file completeness failure', dry_run=_runtime.CLEANUP_SCAN_DRY_RUN)
+        if action == 'quarantined':
+            if completeness is not None and completeness.undersized:
+                stats['undersized_quarantined'] += 1
+            else:
+                stats['quarantined_files'] += 1
+            changed = True
+        elif action == 'deleted':
+            stats['deleted_files'] += 1
+            changed = True
+        elif action == 'reported':
+            stats['reported_files'] += 1
+        elif action == 'dry-run':
+            stats['dry_run_files'] += 1
+        elif action == 'action-failed':
+            stats['action_failures'] += 1
+        if action in ('quarantined', 'deleted', 'action-failed'):
+            _runtime._status_record_maintenance_outcome('quarantine' if action == 'quarantined' else 'deletion' if action == 'deleted' else 'validation', action if action in ('quarantined', 'deleted') else 'failed', _runtime._maintenance_file_identity(subtitle, language), reason='validation action failed' if action == 'action-failed' else None)
     return changed
 
 def _video_sidecars(video: _runtime.Path) -> list[_runtime.Path]:
@@ -100,6 +149,149 @@ def _video_has_pending_repair(video: _runtime.Path) -> bool:
 def _prune_stats() -> dict:
     return {'prune_videos_checked': 0, 'prune_ready': 0, 'prune_deferred': 0, 'prune_missing_languages': 0, 'prune_invalid_languages': 0, 'prune_duration_unavailable': 0, 'prune_retained_unknown': 0, 'prune_candidates': 0, 'prune_quarantined': 0, 'prune_deleted': 0, 'prune_reported': 0, 'prune_failures': 0, 'prune_bazarr_rescan_batches': 0}
 
+
+def _merge_prune_stats(stats: dict, prune_stats: dict) -> None:
+    worker_keys = {'maintenance_workers', 'tasks_submitted', 'tasks_completed', 'worker_failures'}
+    for key in worker_keys - {'maintenance_workers'}:
+        stats[key] = stats.get(key, 0) + prune_stats.get(key, 0)
+    stats.update({
+        key: value for key, value in prune_stats.items() if key not in worker_keys
+    })
+
+
+def _maintenance_path_key(path: str | _runtime.Path) -> str:
+    return _runtime.os.path.normcase(_runtime.os.path.abspath(str(path)))
+
+
+def _maintenance_preflight_source(candidate, video):
+    """Resolve a read-only source candidate before worker submission."""
+    from ..subtitles.library import find_preferred_source
+    receipt = None
+    if video is not None:
+        from ..subtitles.sources import discover_extracted_sources, extracted_receipt_path
+        receipt = extracted_receipt_path(video)
+        extracted, _error = discover_extracted_sources(
+            video, _runtime._LANGUAGE_ALIASES, _runtime.LANGUAGES
+        )
+        preferred_variants = (candidate.variant, '') if candidate.variant else ('',)
+        for variant in preferred_variants:
+            source = next((
+                item for item in extracted
+                if item.canonical_language != candidate.target_lang
+                and item.variant == variant
+            ), None)
+            if source is not None:
+                return source.path, source.canonical_language, receipt
+    source_path, source_language = find_preferred_source(candidate)
+    return source_path, source_language, receipt
+
+
+def _maintenance_preflight(candidates: list) -> tuple[dict[str, object], set[str], int]:
+    """Skip metadata-stable files and analyze changed files in worker processes."""
+    from .workers import (
+        MaintenanceFileStat, ValidationTask, cache_entry_matches,
+    )
+    state = _runtime._get_validation_state()
+    cached = state.maintenance_cache_entries(candidate.path for candidate in candidates)
+    tasks = []
+    cache_hits: set[str] = set()
+    for sequence, candidate in enumerate(candidates):
+        target_stat = MaintenanceFileStat.capture(candidate.path)
+        video = _runtime._find_sidecar_video(candidate.path)
+        source_path, _source_language, receipt = _maintenance_preflight_source(
+            candidate, video
+        )
+        source_stat = MaintenanceFileStat.capture(source_path)
+        video_stat = MaintenanceFileStat.capture(video)
+        receipt_stat = MaintenanceFileStat.capture(receipt)
+        dependencies = {
+            'source': source_stat.to_dict() if source_stat else None,
+            'video': video_stat.to_dict() if video_stat else None,
+            'receipt': receipt_stat.to_dict() if receipt_stat else None,
+        }
+        key = _maintenance_path_key(candidate.path)
+        entry = cached.get(key)
+        if cache_entry_matches(
+            entry,
+            target_stat=target_stat,
+            dependency_fingerprint=dependencies,
+            validator_version=state.validator_version,
+            config_fingerprint=_runtime._MAINTENANCE_CONFIG_FINGERPRINT,
+        ):
+            cache_hits.add(key)
+            continue
+        same_inputs = bool(
+            entry and target_stat
+            and entry.get('targetSize') == target_stat.size
+            and entry.get('targetModifiedNs') == target_stat.modified_ns
+            and entry.get('dependencyFingerprint') == dependencies
+            and entry.get('validatorVersion') == state.validator_version
+        )
+        tasks.append(ValidationTask(
+            sequence=sequence,
+            target_path=str(candidate.path),
+            target_language=candidate.target_lang,
+            source_path=str(source_path) if source_path is not None else None,
+            source_aligned=bool(
+                same_inputs and (entry.get('details') or {}).get('sourceAligned')
+            ),
+            video_path=str(video) if video is not None else None,
+            receipt_path=str(receipt) if receipt is not None else None,
+            validation_kwargs=_runtime._validation_kwargs(),
+            completeness_kwargs=_runtime._completeness_kwargs(),
+            undersized_enabled=_runtime.CLEANUP_UNDERSIZED_ENABLED,
+            ffprobe_timeout=_runtime.CLEANUP_FFPROBE_TIMEOUT,
+        ))
+    results = {
+        _maintenance_path_key(result.target_path): result
+        for result in _runtime._maintenance_worker_pool.map_ordered(
+            tasks,
+            stop_requested=lambda: _runtime.shutdown_requested,
+        )
+        if result.target_path
+    } if tasks and _runtime._maintenance_worker_pool is not None else {}
+    failures = sum(bool(getattr(result, 'error', None)) for result in results.values())
+    return results, cache_hits, failures
+
+
+def _maintenance_cache_update(
+    *, target_path, source_path, video_path, receipt_path, action, report,
+    source_aligned: bool, prepared,
+) -> dict | None:
+    from .workers import MaintenanceFileStat, STABLE_CACHE_ACTIONS
+    if action not in STABLE_CACHE_ACTIONS:
+        return None
+    target_stat = MaintenanceFileStat.capture(target_path)
+    if target_stat is None:
+        return None
+    dependencies = {
+        'source': (stat.to_dict() if (stat := MaintenanceFileStat.capture(source_path)) else None),
+        'video': (stat.to_dict() if (stat := MaintenanceFileStat.capture(video_path)) else None),
+        'receipt': (stat.to_dict() if (stat := MaintenanceFileStat.capture(receipt_path)) else None),
+    }
+    target_hash = getattr(prepared, 'target_hash', None)
+    if getattr(prepared, 'target_stat', None) != target_stat:
+        target_hash = _runtime._file_hash_or_none(target_path)
+    return {
+        'targetPath': str(target_path),
+        'targetSize': target_stat.size,
+        'targetModifiedNs': target_stat.modified_ns,
+        'dependencyFingerprint': dependencies,
+        'validatorVersion': _runtime._get_validation_state().validator_version,
+        'configFingerprint': _runtime._MAINTENANCE_CONFIG_FINGERPRINT,
+        'validationResult': (
+            'valid' if action in ('valid', 'formatted', 'repaired')
+            else 'valid_with_warnings' if action == 'valid-warning'
+            else 'reported'
+        ),
+        'actionResult': action,
+        'targetHash': target_hash,
+        'details': {
+            'sourceAligned': bool(source_aligned),
+            'validation': report.to_dict() if report is not None else {},
+        },
+    }
+
 def _candidate_videos() -> list[_runtime.Path]:
     videos: set[_runtime.Path] = set()
     for root in _runtime.CLEANUP_ROOTS:
@@ -110,7 +302,7 @@ def _candidate_videos() -> list[_runtime.Path]:
                 videos.add(path)
     return sorted(videos, key=lambda path: str(path).casefold())
 
-def _managed_sidecar_is_valid(classification: _runtime.SidecarClassification, duration: float, detector) -> tuple[bool, dict]:
+def _managed_sidecar_is_valid(classification: _runtime.SidecarClassification, duration: float, detector, prepared=None) -> tuple[bool, dict]:
     from ..subtitles.foundation import file_sha256, target_language_for_code, validate_srt_structure
     from ..subtitles.library import validate_subtitle_without_source
     language = classification.language
@@ -123,14 +315,28 @@ def _managed_sidecar_is_valid(classification: _runtime.SidecarClassification, du
         evidence['reason'] = 'unsupported_language'
         return (False, evidence)
     try:
-        target_hash = file_sha256(classification.path)
+        from .workers import MaintenanceFileStat
+        current_stat = MaintenanceFileStat.capture(classification.path)
+        reusable = bool(
+            prepared is not None and prepared.error is None
+            and prepared.target_stat == current_stat
+            and prepared.validation_mode == 'target-only'
+        )
+        target_hash = (
+            prepared.target_hash if reusable and prepared.target_hash
+            else file_sha256(classification.path)
+        )
     except OSError as exc:
         evidence['reason'] = 'hash_unavailable'
         return (False, evidence)
     evidence['hash'] = target_hash
-    completeness = _runtime._evaluate_completeness(classification.path, duration)
-    structure = validate_srt_structure(classification.path)
-    _runtime._add_completeness_issue(structure, completeness)
+    completeness = (
+        prepared.completeness if reusable and prepared.completeness is not None
+        else _runtime._evaluate_completeness(classification.path, duration)
+    )
+    structure = prepared.report if reusable else validate_srt_structure(classification.path)
+    if not reusable:
+        _runtime._add_completeness_issue(structure, completeness)
     evidence['completeness'] = completeness.to_dict() if completeness is not None else None
     if not structure.valid:
         evidence['reason'] = 'undersized' if any((issue.rule == 'undersized_subtitle' for issue in structure.issues)) else 'structure_invalid'
@@ -147,8 +353,12 @@ def _managed_sidecar_is_valid(classification: _runtime.SidecarClassification, du
     if detector is None:
         evidence['reason'] = 'language_detector_unavailable'
         return (False, evidence)
-    report = validate_subtitle_without_source(classification.path, detector, target_language, target_lang=language, **_runtime._validation_kwargs())
-    _runtime._add_completeness_issue(report, completeness)
+    report = (
+        prepared.report if reusable
+        else validate_subtitle_without_source(classification.path, detector, target_language, target_lang=language, **_runtime._validation_kwargs())
+    )
+    if not reusable:
+        _runtime._add_completeness_issue(report, completeness)
     evidence['validation'] = report.to_dict()
     if completeness is None:
         evidence['reason'] = 'completeness_unavailable'
@@ -181,6 +391,7 @@ def _apply_prune_action(video: _runtime.Path, classification: _runtime.SidecarCl
     except OSError as exc:
         print(f'{_runtime.RED}[PRUNE] Could not hash {subtitle}: {exc}{_runtime.RESET}')
         return 'failed'
+
     audit = {'reason': 'unmanaged subtitle sidecar', 'videoPath': str(video), 'videoPathHash': video_path_hash, 'videoSize': video_stat.st_size, 'videoModifiedNs': video_stat.st_mtime_ns, 'targetPath': str(subtitle), 'targetHash': subtitle_hash, 'classification': {'kind': classification.kind, 'language': classification.language, 'tokens': list(classification.tokens)}, 'managedLanguages': _runtime.LANGUAGES, 'managedLanguageReadiness': readiness, 'action': 'dry-run' if dry_run else _runtime.CLEANUP_PRUNE_ACTION, 'recordedAt': _runtime.time.strftime('%Y-%m-%dT%H:%M:%SZ', _runtime.time.gmtime())}
     if dry_run or _runtime.CLEANUP_PRUNE_ACTION == 'report':
         print(f"[PRUNE] {('DRYRUN' if dry_run else 'REPORT')}: would remove {subtitle}")
@@ -206,6 +417,43 @@ def _apply_prune_action(video: _runtime.Path, classification: _runtime.SidecarCl
         print(f'{_runtime.RED}[PRUNE] Could not delete {subtitle}: {exc}{_runtime.RESET}')
         return 'failed'
 
+
+def _prune_parallel_analyses(
+    requested: list[tuple[_runtime.Path, str | None]],
+) -> tuple[dict[str, object], int, int]:
+    from .workers import ValidationTask
+    tasks = []
+    sequence = 0
+    for video, _item_type in requested:
+        for path in _runtime._video_sidecars(video):
+            classification = _runtime._classify_sidecar(video, path)
+            if classification.kind != 'managed' or classification.language is None:
+                continue
+            if _runtime._explicit_non_full_sidecar(video, path) is not None:
+                continue
+            tasks.append(ValidationTask(
+                sequence=sequence,
+                target_path=str(path),
+                target_language=classification.language,
+                video_path=str(video),
+                validation_kwargs=_runtime._validation_kwargs(),
+                completeness_kwargs=_runtime._completeness_kwargs(),
+                undersized_enabled=_runtime.CLEANUP_UNDERSIZED_ENABLED,
+                ffprobe_timeout=_runtime.CLEANUP_FFPROBE_TIMEOUT,
+            ))
+            sequence += 1
+    if not tasks or _runtime._maintenance_worker_pool is None:
+        return {}, 0, 0
+    analyses = {
+        _maintenance_path_key(result.target_path): result
+        for result in _runtime._maintenance_worker_pool.map_ordered(
+            tasks, stop_requested=lambda: _runtime.shutdown_requested,
+        )
+        if result.target_path
+    }
+    failures = sum(bool(result.error) for result in analyses.values())
+    return analyses, len(tasks), failures
+
 def run_extra_sidecar_prune(videos: list[tuple[_runtime.Path, str | None]] | None=None, *, already_locked: bool=False, status_job_id: str | None=None) -> tuple[dict, bool, bool]:
     """Prune recognized unmanaged sidecars after all managed languages are ready."""
     stats = _runtime._prune_stats()
@@ -215,6 +463,11 @@ def run_extra_sidecar_prune(videos: list[tuple[_runtime.Path, str | None]] | Non
     def run() -> tuple[dict, bool, bool]:
         detector = _runtime._get_cleanup_detector()
         requested = videos if videos is not None else [(video, None) for video in _runtime._candidate_videos()]
+        analyses, tasks_submitted, worker_failures = _prune_parallel_analyses(requested)
+        stats['maintenance_workers'] = _runtime.MAINTENANCE_WORKERS
+        stats['tasks_submitted'] = tasks_submitted
+        stats['tasks_completed'] = len(analyses)
+        stats['worker_failures'] = worker_failures
         changed_episodes = False
         changed_movies = False
         for video, item_type in requested:
@@ -244,7 +497,14 @@ def run_extra_sidecar_prune(videos: list[tuple[_runtime.Path, str | None]] | Non
                 evidence = []
                 language_ready = False
                 for entry in full_candidates:
-                    valid, candidate_evidence = _runtime._managed_sidecar_is_valid(entry, duration, detector)
+                    prepared = analyses.get(_maintenance_path_key(entry.path))
+                    validator = _runtime._managed_sidecar_is_valid
+                    if prepared is not None and validator is _managed_sidecar_is_valid:
+                        valid, candidate_evidence = validator(
+                            entry, duration, detector, prepared,
+                        )
+                    else:
+                        valid, candidate_evidence = validator(entry, duration, detector)
                     evidence.append(candidate_evidence)
                     language_ready = language_ready or valid
                 reasons = sorted({str(candidate.get('reason') or 'language_validation_failed') for candidate in evidence if not candidate.get('valid')})
@@ -317,13 +577,13 @@ def run_extra_sidecar_prune(videos: list[tuple[_runtime.Path, str | None]] | Non
         if owns_status_job:
             _runtime._status_complete_maintenance(prune_job_id, 'failed', reason='validation action failed')
         raise
-    prune_details = {'filesDiscovered': result[0]['prune_candidates'], 'filesChecked': result[0]['prune_videos_checked'], 'failures': result[0]['prune_failures'], 'quarantines': result[0]['prune_quarantined']}
+    prune_details = {'filesDiscovered': result[0]['prune_candidates'], 'filesChecked': result[0]['prune_videos_checked'], 'maintenanceWorkers': result[0].get('maintenance_workers', 1), 'tasksSubmitted': result[0].get('tasks_submitted', 0), 'tasksCompleted': result[0].get('tasks_completed', 0), 'workerFailures': result[0].get('worker_failures', 0), 'failures': result[0]['prune_failures'] + result[0].get('worker_failures', 0), 'quarantines': result[0]['prune_quarantined']}
     if owns_status_job:
         _runtime._status_complete_maintenance(prune_job_id, 'accepted', details=prune_details)
     return result
 
 def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
-    stats = {'files_checked': 0, 'skipped_unchanged': 0, 'excessive_line_cues': 0, 'other_invalid_cues': 0, 'formatted_files': 0, 'repaired_files': 0, 'repair_failures': 0, 'repair_queued': 0, 'repair_deferred': 0, 'quarantined_files': 0, 'deleted_files': 0, 'reported_files': 0, 'dry_run_files': 0, 'without_source': 0, 'source_less_warnings': 0, 'recovered_pending_outputs': 0, 'repeat_quarantines': 0, 'ai_repairs_suppressed': 0, 'action_failures': 0, 'undersized_checked': 0, 'undersized_forced_exempt': 0, 'undersized_duration_unavailable': 0, 'undersized_detected': 0, 'undersized_quarantined': 0, **_runtime._prune_stats()}
+    stats = {'files_checked': 0, 'skipped_unchanged': 0, 'maintenance_workers': _runtime.MAINTENANCE_WORKERS, 'cache_hits': 0, 'tasks_submitted': 0, 'tasks_completed': 0, 'worker_failures': 0, 'excessive_line_cues': 0, 'other_invalid_cues': 0, 'formatted_files': 0, 'repaired_files': 0, 'repair_failures': 0, 'repair_queued': 0, 'repair_deferred': 0, 'quarantined_files': 0, 'deleted_files': 0, 'reported_files': 0, 'dry_run_files': 0, 'without_source': 0, 'source_less_warnings': 0, 'recovered_pending_outputs': 0, 'repeat_quarantines': 0, 'ai_repairs_suppressed': 0, 'action_failures': 0, 'undersized_checked': 0, 'undersized_forced_exempt': 0, 'undersized_duration_unavailable': 0, 'undersized_detected': 0, 'undersized_quarantined': 0, **_runtime._prune_stats()}
     if maintenance_scan_job_id:
         with _runtime._maintenance_scan_contexts_lock:
             context = _runtime._maintenance_scan_contexts.get(maintenance_scan_job_id)
@@ -345,13 +605,23 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
         if detector is None or not managed_validation_languages:
             prune_stats, prune_episodes, prune_movies = _runtime.run_extra_sidecar_prune(already_locked=True, status_job_id=maintenance_scan_job_id)
             prune_stats['prune_bazarr_rescan_batches'] = int(prune_episodes or prune_movies)
-            stats.update(prune_stats)
+            _merge_prune_stats(stats, prune_stats)
             changed = changed or prune_episodes or prune_movies
             if changed and (not _runtime.shutdown_requested):
                 _runtime._tracked_bazarr_sync(True, True, _runtime.SYNC_TIMEOUT)
             return stats
         candidates = discover_target_subtitles(
             _runtime.CLEANUP_ROOTS, managed_validation_languages
+        )
+        analyses, cache_hits, worker_failures = _maintenance_preflight(candidates)
+        stats['cache_hits'] = len(cache_hits)
+        stats['tasks_submitted'] += len(candidates) - len(cache_hits)
+        stats['tasks_completed'] += len(analyses)
+        stats['worker_failures'] += worker_failures
+        cache_updates: list[dict] = []
+        state.delete_maintenance_cache_entries(
+            candidate.path for candidate in candidates
+            if _maintenance_path_key(candidate.path) not in cache_hits
         )
         if maintenance_scan_job_id:
             with _runtime._maintenance_scan_contexts_lock:
@@ -371,6 +641,12 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                     context = _runtime._maintenance_scan_contexts.get(maintenance_scan_job_id)
                     if context is not None:
                         context['files_checked'] += 1
+            candidate_key = _maintenance_path_key(candidate.path)
+            if candidate_key in cache_hits:
+                stats['skipped_unchanged'] += 1
+                _runtime._publish_scan_progress(maintenance_scan_job_id)
+                continue
+            prepared_analysis = analyses.get(candidate_key)
             target_language = target_language_for_code(candidate.target_lang)
             if target_language is None:
                 print(f'{_runtime.YELLOW}[SCAN] Unsupported target language for {candidate.path}{_runtime.RESET}')
@@ -379,9 +655,11 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
             source_path = None
             source_lang = None
             candidate_video = _runtime._find_sidecar_video(candidate.path)
+            receipt_path = None
             if candidate_video is not None:
                 from ..subtitles.foundation import normalize_managed_file
-                from ..subtitles.sources import discover_extracted_sources, prepare_extracted_source
+                from ..subtitles.sources import discover_extracted_sources, extracted_receipt_path, prepare_extracted_source
+                receipt_path = extracted_receipt_path(candidate_video)
                 extracted, receipt_error = discover_extracted_sources(candidate_video, _runtime._LANGUAGE_ALIASES, _runtime.LANGUAGES)
                 if receipt_error:
                     _runtime.dbg(f'Ignored extracted-subtitle receipt for {candidate.path.name}: {receipt_error}')
@@ -408,7 +686,15 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
             if source_path is not None and candidate.variant:
                 print(f'[SCAN] Paired {candidate.path.name} with variant-aware source {source_path.name}')
             try:
-                target_hash = file_sha256(candidate.path)
+                from .workers import MaintenanceFileStat
+                current_target_stat = MaintenanceFileStat.capture(candidate.path)
+                target_hash = (
+                    prepared_analysis.target_hash
+                    if prepared_analysis is not None
+                    and prepared_analysis.target_stat == current_target_stat
+                    and prepared_analysis.target_hash is not None
+                    else file_sha256(candidate.path)
+                )
             except OSError as e:
                 print(f'{_runtime.YELLOW}[SCAN] Could not hash {candidate.path}: {e}{_runtime.RESET}')
                 _runtime._publish_scan_progress(maintenance_scan_job_id)
@@ -439,7 +725,15 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                         stats['recovered_pending_outputs'] += 1
                         print(f'[SCAN] Recovered pending Lingarr output {candidate.path.name} with source {source_path.name}')
             try:
-                source_hash = file_sha256(source_path) if source_path is not None else None
+                current_source_stat = MaintenanceFileStat.capture(source_path)
+                source_hash = (
+                    prepared_analysis.source_hash
+                    if source_path is not None
+                    and prepared_analysis is not None
+                    and prepared_analysis.source_stat == current_source_stat
+                    and prepared_analysis.source_hash is not None
+                    else file_sha256(source_path) if source_path is not None else None
+                )
             except OSError as e:
                 print(f'{_runtime.YELLOW}[SCAN] Could not hash {source_path}: {e}{_runtime.RESET}')
                 source_path = None
@@ -453,20 +747,46 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                     validation_item_id = plan['itemId']
             if state.is_unchanged_valid(candidate.path, source_hash, target_hash):
                 stats['skipped_unchanged'] += 1
+                cache_entry = _maintenance_cache_update(
+                    target_path=candidate.path,
+                    source_path=source_path,
+                    video_path=candidate_video,
+                    receipt_path=receipt_path,
+                    action='valid',
+                    report=None,
+                    source_aligned=False,
+                    prepared=prepared_analysis,
+                )
+                if cache_entry is not None:
+                    cache_updates.append(cache_entry)
                 _runtime._publish_scan_progress(maintenance_scan_job_id)
                 continue
             stats['files_checked'] += 1
             if source_path is not None and source_lang is not None:
-                action, report = _runtime._validate_translated_file(str(source_path), str(candidate.path), source_lang, candidate.target_lang, validation_item_id, title=candidate.path.name, dry_run=_runtime.CLEANUP_SCAN_DRY_RUN, defer_repair=not _runtime.CLEANUP_SCAN_DRY_RUN, item_type=validation_item_type, media_duration=_runtime._probe_media_duration(candidate_video) if candidate_video is not None else None, origin=validation_origin, provenance_source_hash=validation_source_hash, maintenance_scan_job_id=maintenance_scan_job_id)
+                action, report = _runtime._validate_translated_file(str(source_path), str(candidate.path), source_lang, candidate.target_lang, validation_item_id, title=candidate.path.name, dry_run=_runtime.CLEANUP_SCAN_DRY_RUN, defer_repair=not _runtime.CLEANUP_SCAN_DRY_RUN, item_type=validation_item_type, media_duration=_runtime._probe_media_duration(candidate_video) if candidate_video is not None else None, origin=validation_origin, provenance_source_hash=validation_source_hash, maintenance_scan_job_id=maintenance_scan_job_id, prepared_analysis=prepared_analysis)
             else:
                 stats['without_source'] += 1
-                report = validate_subtitle_without_source(candidate.path, detector, target_language, target_lang=candidate.target_lang, **_runtime._validation_kwargs())
-                completeness = _runtime._evaluate_completeness(
-                    candidate.path,
-                    _runtime._probe_media_duration(candidate_video)
-                    if candidate_video is not None else None,
+                reusable = bool(
+                    prepared_analysis is not None
+                    and prepared_analysis.error is None
+                    and prepared_analysis.validation_mode == 'target-only'
+                    and prepared_analysis.target_stat == MaintenanceFileStat.capture(candidate.path)
                 )
-                _runtime._add_completeness_issue(report, completeness)
+                report = (
+                    prepared_analysis.report if reusable
+                    else validate_subtitle_without_source(candidate.path, detector, target_language, target_lang=candidate.target_lang, **_runtime._validation_kwargs())
+                )
+                completeness = (
+                    prepared_analysis.completeness if reusable
+                    else None
+                )
+                if completeness is None:
+                    completeness = _runtime._evaluate_completeness(
+                        candidate.path,
+                        _runtime._probe_media_duration(candidate_video)
+                        if candidate_video is not None else None,
+                    )
+                    _runtime._add_completeness_issue(report, completeness)
                 if report.valid:
                     print(f'[SCAN] OK {candidate.path.name} (target-only validation passed)')
                     _runtime._record_validation_result(candidate.path, None, target_hash, 'valid', report, sourceAvailable=False)
@@ -533,6 +853,18 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
             elif action == 'action-failed':
                 stats['action_failures'] += 1
             wrong_language = getattr(report, 'wrong_language_evidence', None)
+            cache_entry = _maintenance_cache_update(
+                target_path=candidate.path,
+                source_path=source_path,
+                video_path=candidate_video,
+                receipt_path=receipt_path,
+                action=action,
+                report=report,
+                source_aligned=bool(getattr(report, 'source_aligned', False)),
+                prepared=prepared_analysis,
+            )
+            if cache_entry is not None:
+                cache_updates.append(cache_entry)
             operation_outcomes = {'valid': ('validation', 'validated'), 'valid-warning': ('validation', 'validated'), 'formatted': ('format_repair', 'formatted'), 'quarantined': ('language_validation' if wrong_language is not None else 'quarantine', 'quarantined'), 'deleted': ('language_validation' if wrong_language is not None else 'deletion', 'deleted'), 'action-failed': ('validation', 'failed')}
             if action in operation_outcomes:
                 operation, outcome = operation_outcomes[action]
@@ -543,14 +875,17 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 )
                 _runtime._status_record_maintenance_outcome(operation, outcome, _runtime._maintenance_file_identity(candidate.path, candidate.target_lang), reason=reason)
             _runtime._publish_scan_progress(maintenance_scan_job_id)
+        state.upsert_maintenance_cache_entries(cache_updates)
         _runtime._publish_scan_progress(maintenance_scan_job_id, force=True)
         prune_stats, prune_episodes, prune_movies = _runtime.run_extra_sidecar_prune(already_locked=True, status_job_id=maintenance_scan_job_id)
         prune_stats['prune_bazarr_rescan_batches'] = int(prune_episodes or prune_movies)
-        stats.update(prune_stats)
+        _merge_prune_stats(stats, prune_stats)
         changed = changed or prune_episodes or prune_movies
         print('[SCAN] Existing subtitle cleanup summary:')
         print(f"  Checked             : {stats['files_checked']}")
         print(f"  Skipped unchanged   : {stats['skipped_unchanged']}")
+        print(f"  Cache hits          : {stats['cache_hits']}")
+        print(f"  Worker tasks/failures: {stats['tasks_completed']}/{stats['worker_failures']}")
         print(f"  Excessive-line cues : {stats['excessive_line_cues']}")
         print(f"  Other invalid cues  : {stats['other_invalid_cues']}")
         print(f"  Source-less warnings: {stats['source_less_warnings']}")

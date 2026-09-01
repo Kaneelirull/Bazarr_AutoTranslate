@@ -90,6 +90,7 @@ docker compose up -d
 | `LINGARR_API_KEY` | empty | Optional Lingarr API key |
 | `LANGUAGES` | `en,et,sv` | Managed languages in source-priority order |
 | `PARALLEL_TRANSLATES` | `1` | Shared maximum for active full-file translations and cue repairs |
+| `MAINTENANCE_WORKERS` | `4` | CPU processes for non-AI validation, hashing, completeness checks, pruning preflight, and startup cue counting (1–32) |
 | `CHECK_INTERVAL` | `1200` | Seconds between wanted-subtitle cycles |
 | `POLL_TIMEOUT` | `900` | Minimum per-file translation timeout |
 | `REPAIR_SHUTDOWN_GRACE_SECONDS` | `30` | Maximum graceful drain for active repair workers during shutdown |
@@ -100,6 +101,8 @@ docker compose up -d
 ## Subtitle validation, repair, and cleanup
 
 Existing-library cleanup runs after startup synchronization and then on its own interval. New translations are validated immediately. Quarantine is the default action; permanent deletion must be selected explicitly.
+
+CPU-heavy maintenance analysis uses a bounded process pool so Python validation can use multiple cores. File discovery, SQLite writes, status updates, quarantine/deletion, Bazarr rescans, and AI-backed repair remain in the coordinator process. Top-level maintenance jobs stay serialized, and results are applied in discovery order. Stable validation outcomes are cached by target metadata plus source/video/receipt metadata, validator version, and cleanup configuration; unchanged files skip hashing and validation on later scans.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -226,10 +229,10 @@ A source-less subtitle whose only validation issue is `excessive_lines` is retai
 
 Quarantine retention and retry eligibility are independent. Invalid artifacts and reports remain available for audit for `QUARANTINE_ARTIFACT_RETENTION_DAYS`, including after a later success. Cue-local failures use the bounded repair path and may receive one end-of-cycle retry. Structurally unsafe target output is regenerated from the current source after persistent completed-cycle backoff. Service failures use normal cooldown and circuit protection and do not create subtitle quarantine plans. Retry state survives restart, unchanged failed hashes do not consume attempts, and exhausted plans remain visible for manual review.
 
-The application schema is v16 and SQLite `user_version=16` is authoritative.
-The upgrade preserves v15 submissions, validation, retry, manual-review,
-quarantine, and audit data while dropping obsolete pre-SQLite recovery state and
-adding the durable manual-scan outbox. It includes retry admission rotation,
+The application schema is v17 and SQLite `user_version=17` is authoritative.
+The upgrade preserves v16 submissions, validation, retry, manual-review,
+quarantine, and audit data and adds the incremental maintenance-validation cache.
+It includes retry admission rotation,
 durable repair and cue recovery state, provider and donor events, canonical series aliases,
 no-progress deferrals, and owned half-open circuit leases. Existing attempts,
 eligibility, circuit history, and quarantine files remain untouched. Retry claims
@@ -238,7 +241,7 @@ translation attempt, preventing the same no-progress batch from starving later
 work. Half-open protection is claimed only immediately before submission, bound
 to the Lingarr job, and released when no job was created. Before upgrading, back
 up `/config/bazarr-autotranslate.sqlite3`. This is a breaking, non-rollback-compatible
-database upgrade; older images must not open a v16 database. Keep the backup as an
+database upgrade; older images must not open a v17 database. Keep the backup as an
 operational safeguard.
 
 ## Code layout and import policy

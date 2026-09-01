@@ -1358,22 +1358,24 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             validate = Mock(return_value=("valid", SimpleNamespace(issues=[])))
             stats = defaultdict(int)
             stats["translations"] = []
-            with patch.multiple(
-                app,
-                LANGUAGES=["en", "et"], CLEANUP_UNDERSIZED_ENABLED=False,
-                _validation_state=store,
-                fetch_subtitles=lambda *_args: (str(video), []),
-                lingarr_resolve_media_id=lambda *_args: 99,
-                lingarr_get_active_translations=lambda: [],
-                lingarr_submit_file=submit,
-                _record_pending_lingarr_output=pending,
-                _validate_translated_file=validate,
-            ):
-                app.process_item(
-                    {"radarrId": 7, "title": "Movie", "missing_subtitles": [{"code2": "et"}]},
-                    "movies", "radarrId", stats, threading.Lock(),
-                )
-            store.close()
+            try:
+                with patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et"], CLEANUP_UNDERSIZED_ENABLED=False,
+                    _validation_state=store,
+                    fetch_subtitles=lambda *_args: (str(video), []),
+                    lingarr_resolve_media_id=lambda *_args: 99,
+                    lingarr_get_active_translations=lambda: [],
+                    lingarr_submit_file=submit,
+                    _record_pending_lingarr_output=pending,
+                    _validate_translated_file=validate,
+                ):
+                    app.process_item(
+                        {"radarrId": 7, "title": "Movie", "missing_subtitles": [{"code2": "et"}]},
+                        "movies", "radarrId", stats, threading.Lock(),
+                    )
+            finally:
+                store.close()
 
             self.assertTrue(canonical.exists())
             self.assertFalse(orphan.exists())
@@ -1874,12 +1876,13 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             )
             self.assertEqual(audit["origin"], "lingarr")
 
-    def test_existing_valid_file_is_scanned_then_skipped_by_hash(self):
+    def test_existing_hash_validation_seeds_metadata_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "media"
             root.mkdir()
             (root / "show.eng.srt").write_text(make_srt("Good evening"), encoding="utf-8")
-            (root / "show.et.srt").write_text(make_srt("Tere õhtust"), encoding="utf-8")
+            target = root / "show.et.srt"
+            target.write_text(make_srt("Tere õhtust"), encoding="utf-8")
             state = app._validation_state
 
             with patch.multiple(
@@ -1893,11 +1896,16 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 _validation_state=state,
             ):
                 first = app.run_existing_cleanup_scan()
+                state.delete_maintenance_cache_entries([target])
                 second = app.run_existing_cleanup_scan()
+                third = app.run_existing_cleanup_scan()
 
             self.assertEqual(first["files_checked"], 2)
             self.assertEqual(second["files_checked"], 0)
             self.assertEqual(second["skipped_unchanged"], 2)
+            self.assertEqual(second["cache_hits"], 1)
+            self.assertEqual(third["skipped_unchanged"], 2)
+            self.assertEqual(third["cache_hits"], 2)
 
     def test_wrong_language_managed_sidecar_is_quarantined_outside_ai_scope(self):
         fixture_root = REPO_ROOT / "examples" / "LanguageValidationFailure" / "Shameless-S09E12"
@@ -2148,7 +2156,6 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(stats["skipped_unchanged"], 0)
             self.assertFalse(target.exists())
             self.assertTrue((quarantine / target.name).exists())
-
     def test_format_only_recovery_does_not_call_lingarr(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -72,7 +72,7 @@ export function RecoveryDiagnostics({ diagnostics = {} }: { diagnostics?: DataRo
   </section>;
 }
 
-const maintenanceLabels: Record<string, string> = { formatted: "Formatted", repaired: "Repaired", quarantined: "Quarantined", deleted: "Deleted", undersized: "Undersized", pruned: "Pruned", source_less_warnings: "Source-less warnings", repeat_quarantines: "Repeat quarantines", cycle_suppressions: "Same-cycle suppressions", variant_outputs: "Variant outputs", failures: "Failures" };
+const maintenanceLabels: Record<string, string> = { formatted: "Formatted", repaired: "Repaired", quarantined: "Quarantined", deleted: "Deleted", undersized: "Undersized", pruned: "Pruned", source_less_warnings: "Source-less warnings", repeat_quarantines: "Repeat quarantines", cycle_suppressions: "Same-cycle suppressions", variant_outputs: "Variant outputs", cache_hits: "Cache hits", worker_failures: "Worker failures", failures: "Failures" };
 
 export function LatestMaintenance({ maintenance = {} }: { maintenance?: DataRow }) {
   const lastScan = maintenance.lastScan;
