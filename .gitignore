@@ -4,10 +4,8 @@
 !.env.example
 
 # Local assistant and agent state
-.claude/*
-!.claude/.context.md
-!.claude/.changes.md
-!.claude/.memory.md
+.claude/
+.codex/
 .agents/
 
 # Python caches, tooling, and virtual environments

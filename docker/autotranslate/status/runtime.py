@@ -11,6 +11,15 @@ def _register_runtime_resources(*, state_store: _runtime.StateStore | None=None,
 def close_runtime_resources() -> None:
     """Close production resources once, in reverse construction order."""
     _runtime._shutdown_repair_executor()
+    maintenance_pool = _runtime._maintenance_worker_pool
+    _runtime._maintenance_worker_pool = None
+    if maintenance_pool is not None:
+        terminated = maintenance_pool.shutdown(
+            wait_for_workers=True,
+            grace_seconds=_runtime._shutdown_controller.remaining(),
+        )
+        if terminated:
+            print(f'{_runtime.YELLOW}[MAINTENANCE] Terminated {terminated} worker process(es) after the shutdown deadline{_runtime.RESET}')
     with _runtime._runtime_resources_lock:
         status_server = _runtime._active_status_server
         state_store = _runtime._active_state_store
@@ -212,7 +221,7 @@ def _maintenance_file_identity(path: str | _runtime.Path, target_language: str |
     return {'title': identity['displayTitle'], 'episodeCode': identity.get('episodeCode'), 'episodeTitle': identity.get('episodeTitle'), 'targetLanguage': target_language}
 
 def _maintenance_metrics(stats: dict) -> dict:
-    return {'formatted': stats.get('formatted_files', 0), 'repaired': stats.get('repaired_files', 0) + stats.get('async_repairs_completed', 0), 'quarantined': stats.get('quarantined_files', 0) + stats.get('undersized_quarantined', 0) + stats.get('prune_quarantined', 0), 'deleted': stats.get('deleted_files', 0) + stats.get('prune_deleted', 0), 'undersized': stats.get('undersized_detected', 0), 'pruned': stats.get('prune_quarantined', 0) + stats.get('prune_deleted', 0), 'source_less_warnings': stats.get('source_less_warnings', 0), 'repeat_quarantines': stats.get('repeat_quarantines', 0), 'cycle_suppressions': stats.get('cycle_suppressions', 0), 'variant_outputs': stats.get('variant_outputs_discovered', 0) + stats.get('recovered_pending_outputs', 0), 'failures': stats.get('repair_failures', 0) + stats.get('action_failures', 0) + stats.get('prune_failures', 0) + stats.get('async_repair_failures', 0)}
+    return {'formatted': stats.get('formatted_files', 0), 'repaired': stats.get('repaired_files', 0) + stats.get('async_repairs_completed', 0), 'quarantined': stats.get('quarantined_files', 0) + stats.get('undersized_quarantined', 0) + stats.get('prune_quarantined', 0), 'deleted': stats.get('deleted_files', 0) + stats.get('prune_deleted', 0), 'undersized': stats.get('undersized_detected', 0), 'pruned': stats.get('prune_quarantined', 0) + stats.get('prune_deleted', 0), 'source_less_warnings': stats.get('source_less_warnings', 0), 'repeat_quarantines': stats.get('repeat_quarantines', 0), 'cycle_suppressions': stats.get('cycle_suppressions', 0), 'variant_outputs': stats.get('variant_outputs_discovered', 0) + stats.get('recovered_pending_outputs', 0), 'cache_hits': stats.get('cache_hits', 0), 'worker_failures': stats.get('worker_failures', 0), 'failures': stats.get('repair_failures', 0) + stats.get('action_failures', 0) + stats.get('prune_failures', 0) + stats.get('async_repair_failures', 0) + stats.get('worker_failures', 0)}
 
 def _scan_progress_details(context: dict) -> dict:
     stats = context.get('stats', {})
@@ -221,7 +230,7 @@ def _scan_progress_details(context: dict) -> dict:
     elapsed = max(0.001, _runtime.time.monotonic() - context['started'])
     remaining = max(0, discovered - checked)
     eta = round(elapsed / checked * remaining, 1) if checked else None
-    details = {'filesDiscovered': discovered, 'filesChecked': checked, 'filesRemaining': remaining, 'unchangedFilesSkipped': stats.get('skipped_unchanged', 0), 'validationsPerformed': stats.get('files_checked', 0), 'formatRepairs': stats.get('formatted_files', 0), 'cueRepairsQueued': context.get('repairs_queued', 0), 'cueRepairsCompleted': context.get('repairs_completed', 0), 'quarantines': stats.get('quarantined_files', 0) + stats.get('undersized_quarantined', 0) + stats.get('prune_quarantined', 0), 'failures': _runtime._maintenance_metrics(stats)['failures'], 'progress': round(checked * 100 / max(1, discovered), 1), 'estimatedSeconds': round(elapsed + eta, 1) if eta is not None else None, 'etaSeconds': eta}
+    details = {'filesDiscovered': discovered, 'filesChecked': checked, 'filesRemaining': remaining, 'unchangedFilesSkipped': stats.get('skipped_unchanged', 0), 'maintenanceWorkers': stats.get('maintenance_workers', 1), 'cacheHits': stats.get('cache_hits', 0), 'tasksSubmitted': stats.get('tasks_submitted', 0), 'tasksCompleted': stats.get('tasks_completed', 0), 'workerFailures': stats.get('worker_failures', 0), 'validationsPerformed': stats.get('files_checked', 0), 'formatRepairs': stats.get('formatted_files', 0), 'cueRepairsQueued': context.get('repairs_queued', 0), 'cueRepairsCompleted': context.get('repairs_completed', 0), 'quarantines': stats.get('quarantined_files', 0) + stats.get('undersized_quarantined', 0) + stats.get('prune_quarantined', 0), 'failures': _runtime._maintenance_metrics(stats)['failures'], 'progress': round(checked * 100 / max(1, discovered), 1), 'estimatedSeconds': round(elapsed + eta, 1) if eta is not None else None, 'etaSeconds': eta}
     return details
 
 def _publish_scan_progress(scan_job_id: str | None, *, force: bool=False) -> None:

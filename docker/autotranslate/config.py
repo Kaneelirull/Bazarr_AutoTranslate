@@ -66,6 +66,7 @@ class Config:
     lingarr_api_key: str
     languages: tuple[str, ...]
     parallel_translates: int
+    maintenance_workers: int
     check_interval: int
     connect_timeout: int
     poll_interval: int
@@ -164,6 +165,9 @@ class Config:
             for value in (env.get("CLEANUP_ROOT", "/media").strip() or "/media").split(os.pathsep)
             if value.strip()
         )
+        maintenance_workers = _integer(env, "MAINTENANCE_WORKERS", 4, 1)
+        if maintenance_workers > 32:
+            raise ConfigError("MAINTENANCE_WORKERS must be between 1 and 32")
         return cls(
             bazarr_url=_url(_required(env, "BAZARR_URL")),
             bazarr_api_key=_required(env, "BAZARR_API_KEY"),
@@ -171,6 +175,7 @@ class Config:
             lingarr_api_key=env.get("LINGARR_API_KEY", "").strip(),
             languages=languages,
             parallel_translates=_integer(env, "PARALLEL_TRANSLATES", 1, 1),
+            maintenance_workers=maintenance_workers,
             check_interval=_integer(env, "CHECK_INTERVAL", 1200, 10),
             connect_timeout=_integer(env, "CONNECT_TIMEOUT", 10, 5),
             poll_interval=_integer(env, "POLL_INTERVAL", 20, 5),

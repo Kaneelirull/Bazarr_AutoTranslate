@@ -1,6 +1,9 @@
 from .composition import runtime as _runtime
 
 def initialize_runtime_state():
+    _runtime._maintenance_worker_pool = _runtime.MaintenanceWorkerPool(
+        _runtime.MAINTENANCE_WORKERS
+    )
     _runtime._repair_capacity = _runtime.threading.BoundedSemaphore(
         _runtime.PARALLEL_TRANSLATES + _runtime.CLEANUP_REPAIR_QUEUE_MAX
     )

@@ -54,6 +54,8 @@ MAINTENANCE_IDENTITY_KEYS = (
 )
 MAINTENANCE_PROGRESS_KEYS = (
     "filesDiscovered", "filesChecked", "filesRemaining", "unchangedFilesSkipped",
+    "maintenanceWorkers", "cacheHits", "tasksSubmitted", "tasksCompleted",
+    "workerFailures",
     "validationsPerformed", "formatRepairs", "cueRepairsQueued",
     "cueRepairsCompleted", "quarantines", "failures",
     "totalRepairableCues", "completedCues", "currentCueNumber",

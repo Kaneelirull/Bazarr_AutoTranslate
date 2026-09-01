@@ -407,6 +407,7 @@ class ArchitectureUpgradeTests(unittest.TestCase):
         })
         self.assertEqual(config.bazarr_url, "http://bazarr:6767")
         self.assertEqual(config.languages, ("en", "et", "sv"))
+        self.assertEqual(config.maintenance_workers, 4)
         self.assertEqual(config.repair_shutdown_grace_seconds, 30)
         self.assertTrue(config.status_manual_actions_enabled)
         read_only = Config.from_env({
@@ -417,6 +418,23 @@ class ArchitectureUpgradeTests(unittest.TestCase):
         self.assertFalse(read_only.status_manual_actions_enabled)
         with self.assertRaises(ConfigError):
             Config.from_env({"LINGARR_URL": "lingarr:8080"})
+        with self.assertRaises(ConfigError):
+            Config.from_env({
+                "BAZARR_URL": "bazarr:6767", "BAZARR_API_KEY": "secret",
+                "LINGARR_URL": "lingarr:8080", "MAINTENANCE_WORKERS": "33",
+            })
+
+    def test_validation_fingerprint_covers_all_worker_policy_inputs(self):
+        source = (REPO_ROOT / "docker" / "autotranslate" / "composition.py").read_text(
+            encoding="utf-8"
+        )
+        for field in (
+            "cleanup_min_chars", "cleanup_min_confidence",
+            "cleanup_max_unique_ratio", "cleanup_min_letters_for_script",
+            "cleanup_repair_enabled", "cleanup_max_repair_attempts",
+            "cleanup_repair_context_lines", "cleanup_ffprobe_timeout",
+        ):
+            self.assertIn(field, source)
 
     def test_application_owns_host_lifecycle_and_cleanup(self):
         events = []
@@ -512,7 +530,7 @@ class ArchitectureUpgradeTests(unittest.TestCase):
         clock["now"] = 50.0
         self.assertEqual(shutdown.remaining(), 0.0)
 
-    def test_schema_v16_is_authoritative_and_removes_legacy_state(self):
+    def test_schema_v17_is_authoritative_and_removes_legacy_state(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "state.sqlite3"
             store = StateStore(database, validator_version="v2", config_fingerprint="cfg")
@@ -522,9 +540,9 @@ class ArchitectureUpgradeTests(unittest.TestCase):
                         "SELECT version FROM schema_migrations"
                     )
                 }
-                self.assertTrue({9, 10, 11, 12, 13, 14, 15, 16}.issubset(versions))
+                self.assertTrue({9, 10, 11, 12, 13, 14, 15, 16, 17}.issubset(versions))
                 self.assertEqual(LATEST_SCHEMA_VERSION, max(versions))
-                self.assertEqual(store._connection.execute("PRAGMA user_version").fetchone()[0], 16)
+                self.assertEqual(store._connection.execute("PRAGMA user_version").fetchone()[0], 17)
                 tables = {
                     row[0] for row in store._connection.execute(
                         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -536,6 +554,7 @@ class ArchitectureUpgradeTests(unittest.TestCase):
                     "failure_fingerprints", "retry_admission_events", "provider_events",
                     "manual_review_actions",
                     "manual_review_scan_outbox",
+                    "maintenance_validation_cache",
                 }.issubset(tables))
                 self.assertNotIn("legacy_quarantine_index", tables)
                 self.assertEqual(store._connection.execute("PRAGMA quick_check").fetchone()[0], "ok")

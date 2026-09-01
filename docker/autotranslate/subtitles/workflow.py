@@ -1385,8 +1385,14 @@ def _resolve_retry_success(plan_id: int | None, expected_source_hash: str | None
         print(f'{_runtime.YELLOW}[RETRY] Could not resolve retry plan: {exc}{_runtime.RESET}')
         return False
 
-def _validate_translated_file(source_path: str, target_path: str, source_lang: str, target_lang: str, item_id: int | None, title: str='', dry_run: bool=False, *, defer_repair: bool=False, item_type: str | None=None, media_duration: float | None=None, origin: str | None=None, provenance_source_hash: str | None=None, series_key: str | None=None, series_title: str | None=None, maintenance_scan_job_id: str | None=None, retry_plan_id: int | None=None, trial_owner: str | None=None, trial_job_id: int | None=None, trial_plan_id: int | None=None, trial_generation: int | None=None) -> tuple[str, object]:
+def _validate_translated_file(source_path: str, target_path: str, source_lang: str, target_lang: str, item_id: int | None, title: str='', dry_run: bool=False, *, defer_repair: bool=False, item_type: str | None=None, media_duration: float | None=None, origin: str | None=None, provenance_source_hash: str | None=None, series_key: str | None=None, series_title: str | None=None, maintenance_scan_job_id: str | None=None, retry_plan_id: int | None=None, trial_owner: str | None=None, trial_job_id: int | None=None, trial_plan_id: int | None=None, trial_generation: int | None=None, prepared_analysis=None) -> tuple[str, object]:
     validated_target_hash = _runtime._file_hash_or_none(target_path)
+    from ..maintenance.workers import MaintenanceFileStat
+    prepared_target_reusable = bool(
+        prepared_analysis is not None
+        and prepared_analysis.error is None
+        and prepared_analysis.target_stat == MaintenanceFileStat.capture(target_path)
+    )
     validation_identity = {
         'title': title or ('Movie' if item_type == 'movies' else 'Episode' if item_type == 'episodes' else 'Media item'),
         'episodeCode': _runtime.episode_identity_from_path(target_path),
@@ -1399,7 +1405,13 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
         from .library import validate_subtitle_without_source
         detector = _runtime._get_cleanup_detector()
         target_language = target_language_for_code(target_lang)
-        if detector is None or target_language is None:
+        prepared_target_only = bool(
+            prepared_target_reusable
+            and prepared_analysis.validation_mode == 'target-only'
+        )
+        if prepared_target_only:
+            report = prepared_analysis.report
+        elif detector is None or target_language is None:
             from .foundation import validate_srt_structure
             report = validate_srt_structure(target_path)
         else:
@@ -1407,8 +1419,12 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
                 _runtime.Path(target_path), detector, target_language,
                 target_lang=target_lang, **_runtime._validation_kwargs(),
             )
-        completeness = _runtime._evaluate_completeness(target_path, media_duration)
-        _runtime._add_completeness_issue(report, completeness)
+        completeness = (
+            prepared_analysis.completeness if prepared_target_only else None
+        )
+        if completeness is None:
+            completeness = _runtime._evaluate_completeness(target_path, media_duration)
+            _runtime._add_completeness_issue(report, completeness)
         if report.valid:
             if validated_target_hash is None or _runtime._file_hash_or_none(target_path) != validated_target_hash:
                 print(f'{_runtime.YELLOW}[CLEANUP] Deferred {target_path}: target changed during validation{_runtime.RESET}')
@@ -1450,8 +1466,20 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
     detector = _runtime._get_cleanup_detector()
     if target_language is None or detector is None:
         return ('valid', None)
-    source_hash = _runtime._file_hash_or_none(source_path)
-    expected_target_hash = validated_target_hash
+    prepared_reusable = bool(
+        prepared_target_reusable
+        and prepared_analysis.source_stat == MaintenanceFileStat.capture(source_path)
+    )
+    source_hash = (
+        prepared_analysis.source_hash
+        if prepared_reusable and prepared_analysis.source_hash is not None
+        else _runtime._file_hash_or_none(source_path)
+    )
+    expected_target_hash = (
+        prepared_analysis.target_hash
+        if prepared_reusable and prepared_analysis.target_hash is not None
+        else validated_target_hash
+    )
     target_suffix = _runtime._target_suffix(target_path, target_lang)
     target_identity = _runtime._target_identity_from_sidecar(target_path, target_lang)
     target_variant = target_suffix[1] if target_suffix is not None else None
@@ -1465,12 +1493,21 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
         print(f'{_runtime.YELLOW}[CLEANUP] Unverified Lingarr provenance for {_runtime.os.path.basename(target_path)}; using conservative target-only validation{_runtime.RESET}')
     source_aligned = recorded_source_aligned
     effective_origin = 'lingarr' if source_aligned else origin if origin != 'lingarr' else None
-    if source_aligned:
+    prepared_mode = 'source-aware' if source_aligned else 'target-only'
+    if prepared_reusable and prepared_analysis.validation_mode == prepared_mode:
+        report = prepared_analysis.report
+    elif source_aligned:
         report = validate_subtitle_pair(_runtime.Path(source_path), _runtime.Path(target_path), detector, target_language, target_lang=target_lang, **_runtime._validation_kwargs())
     else:
         report = validate_subtitle_without_source(_runtime.Path(target_path), detector, target_language, target_lang=target_lang, **_runtime._validation_kwargs())
-    completeness = _runtime._evaluate_completeness(target_path, media_duration)
-    _runtime._add_completeness_issue(report, completeness)
+    completeness = (
+        prepared_analysis.completeness
+        if prepared_reusable and prepared_analysis.completeness is not None
+        else _runtime._evaluate_completeness(target_path, media_duration)
+    )
+    if not (prepared_reusable and prepared_analysis.completeness is completeness):
+        _runtime._add_completeness_issue(report, completeness)
+    setattr(report, 'source_aligned', source_aligned)
     if not source_aligned and _runtime._source_less_line_only_warning(report):
         print(f'{_runtime.YELLOW}[CLEANUP] Retained {_runtime.os.path.basename(target_path)} with source-less line-count warning: {report.summary()}{_runtime.RESET}')
         if not _runtime._record_validation_result(target_path, source_hash, expected_target_hash, 'valid_with_warnings', report, origin=effective_origin, warningRules=['excessive_lines'], completeness=completeness.to_dict() if completeness is not None else None, **validation_identity):
