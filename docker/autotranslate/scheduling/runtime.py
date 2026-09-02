@@ -2,11 +2,14 @@ from __future__ import annotations
 from ..composition import runtime as _runtime
 
 def _ensemble_key(plan: dict, attempt_ids: list[int]) -> str:
-    material = repr((int(plan['id']), plan['sourceHash'], tuple(sorted(attempt_ids))))
+    state = _runtime._get_validation_state()
+    snapshot = state.name_approval_snapshot(plan)
+    hashes = sorted((a['id'], a['targetHash']) for a in state.quarantine_attempts(plan['itemType'], plan['itemId'], plan['targetLanguage']) if a['id'] in attempt_ids)
+    material = repr(('recovery-v2', int(plan['id']), plan['sourceHash'], plan.get('failedOutputHash'), hashes, state.validator_version, state.config_fingerprint, snapshot['scope'], snapshot['revision'], state.manual_review_action_count(plan['id'])))
     return 'quarantine-ensemble:' + _runtime.hashlib.sha256(material.encode('utf-8')).hexdigest()
 
 def _persist_ensemble_cues(plan: dict, repair, source_cues: list) -> None:
-    if not repair.partial_raw or not repair.repaired_cues:
+    if not repair.partial_raw:
         return
     from ..subtitles.foundation import cue_source_signature, parse_srt_cues
     partial_cues, errors = parse_srt_cues(repair.partial_raw)
@@ -14,15 +17,21 @@ def _persist_ensemble_cues(plan: dict, repair, source_cues: list) -> None:
         return
     state = _runtime._get_validation_state()
     partial_hash = _runtime.hashlib.sha256(repair.partial_raw.encode('utf-8')).hexdigest()
+    directory = state.path.parent / 'recovery'
+    directory.mkdir(parents=True, exist_ok=True)
+    retained = directory / f"partial-{plan['id']}-{partial_hash}.srt"
+    from ..subtitles.publication import retain_partial_text
+    retain_partial_text(retained, repair.partial_raw)
     partial_id = state.record_partial_candidate(
         item_type=plan['itemType'], item_id=plan['itemId'],
         source_language=plan.get('sourceLanguage'), target_language=plan['targetLanguage'],
         source_hash=plan['sourceHash'], target_hash=partial_hash,
         changed_cues=repair.repaired_cues, unresolved_cues=repair.unresolved_cues,
         provenance=repair.attempt_history + repair.donor_history,
-        artifact_path=None, retry_plan_id=plan['id'],
+        artifact_path=retained, retry_plan_id=plan['id'],
         validation_level='ensemble_partial_improved',
     )
+    state.set_retry_candidate(plan['id'], str(retained), partial_hash)
     targets = {cue.number: cue for cue in partial_cues}
     changed = set(repair.repaired_cues)
     donor_by_cue = {entry.get('cueNumber'): entry for entry in repair.donor_history}
@@ -91,8 +100,6 @@ def _run_quarantine_recovery_job(job: dict, stats: dict | None=None) -> bool:
                 reason = 'stale_source'
             elif attempt.get('targetLanguage') != plan['targetLanguage']:
                 reason = 'wrong_language'
-            elif attempt.get('validatorFingerprint') != state.validator_version or attempt.get('configFingerprint') != state.config_fingerprint:
-                reason = 'incompatible_validator'
             elif not attempt.get('artifactPath'):
                 reason = 'missing_file'
             if reason is not None:
@@ -116,7 +123,7 @@ def _run_quarantine_recovery_job(job: dict, stats: dict | None=None) -> bool:
                 continue
             temp = _runtime._write_recovery_candidate(target_path, recovery.raw, same_directory=False)
             temporary.append(temp)
-            report = validate_subtitle_pair(source_path, temp, detector, target_language, target_lang=plan['targetLanguage'], **_runtime._validation_kwargs())
+            report = validate_subtitle_pair(source_path, temp, detector, target_language, target_lang=plan['targetLanguage'], **_runtime._validation_kwargs(plan))
             if not report.valid and not report.repairable_cue_indexes:
                 print(f"[ENSEMBLE] Rejected donor attempt {attempt_id}: incompatible_validation")
                 state.record_donor_event(item_type=plan['itemType'], item_id=plan['itemId'], target_language=plan['targetLanguage'], retry_plan_id=plan['id'], donor_attempt_id=attempt_id, reason_code='incompatible_validation')
@@ -124,6 +131,14 @@ def _run_quarantine_recovery_job(job: dict, stats: dict | None=None) -> bool:
             candidate = dict(attempt)
             candidate.update({'artifactPath': str(temp), 'targetHash': file_sha256(temp), 'cueSignatures': source_cue_signatures(source_path), 'report': report})
             candidates.append(candidate)
+        retained_path = plan.get('artifactPath')
+        if retained_path and _runtime._file_hash_or_none(retained_path) == plan.get('failedOutputHash'):
+            recovery = recover_subtitle_pair(source_path, retained_path)
+            if recovery.safe and recovery.raw:
+                temp = _runtime._write_recovery_candidate(target_path, recovery.raw, same_directory=False)
+                temporary.append(temp)
+                report = validate_subtitle_pair(source_path, temp, detector, target_language, target_lang=plan['targetLanguage'], **_runtime._validation_kwargs(plan))
+                candidates.append(dict(id=None, artifactPath=str(temp), targetHash=file_sha256(temp), sourceHash=plan['sourceHash'], targetLanguage=plan['targetLanguage'], cueSignatures=source_cue_signatures(source_path), report=report))
         if not candidates:
             state.transition_repair_job(job['id'], 'failed', error_code='ensemble_no_usable_donors', expected_states=('active',))
             print(f"[ENSEMBLE] Plan {plan['id']} has no usable donors; falling back to regeneration")
@@ -139,23 +154,39 @@ def _run_quarantine_recovery_job(job: dict, stats: dict | None=None) -> bool:
         else:
             recoveries = state.cue_recoveries(plan['itemType'], plan['itemId'], plan['targetLanguage'], source_file_hash=plan['sourceHash'])
             donor_attempts = [entry for entry in candidates if entry['id'] != baseline['id']]
-            translator = lambda line, before, after: _runtime.lingarr_translate_line(line, plan.get('sourceLanguage') or 'en', plan['targetLanguage'], before, after, repair_label=plan.get('mediaTitle') or 'quarantine recovery')
-            repair = repair_subtitle_file(source_path, baseline['artifactPath'], detector, target_language, translator, target_lang=plan['targetLanguage'], max_attempts=_runtime.CLEANUP_MAX_REPAIR_ATTEMPTS, context_lines=_runtime.CLEANUP_REPAIR_CONTEXT_LINES, donor_attempts=donor_attempts, cue_recoveries=recoveries, artifact_access=_runtime._artifact_access, provider_enabled=False, cancellation_requested=lambda: _runtime.shutdown_requested, **_runtime._validation_kwargs())
+            from ..services.cue_repair import CueRepairProvider
+            translator = CueRepairProvider(_runtime.lingarr_translate_line, state, plan,
+                _runtime._VALIDATION_CONFIG_FINGERPRINT, cancelled=lambda: _runtime.shutdown_requested)
+            exhausted = state.exhausted_recovery_strategies(item_type=plan['itemType'], item_id=plan['itemId'],
+                target_language=plan['targetLanguage'], source_file_hash=plan['sourceHash'], provider='lingarr',
+                config_fingerprint=_runtime._VALIDATION_CONFIG_FINGERPRINT)
+            repair = repair_subtitle_file(source_path, baseline['artifactPath'], detector, target_language, translator, target_lang=plan['targetLanguage'], max_attempts=_runtime.CLEANUP_MAX_REPAIR_ATTEMPTS, context_lines=_runtime.CLEANUP_REPAIR_CONTEXT_LINES, donor_attempts=donor_attempts, cue_recoveries=recoveries, artifact_access=_runtime._artifact_access, provider_enabled=False, cancellation_requested=lambda: _runtime.shutdown_requested, **_runtime._validation_kwargs(plan))
             ensemble_donor_history = [{'sourceAttemptId': baseline['id'], 'sourceAttempt': baseline.get('attemptNumber'), 'role': 'baseline'}, *repair.donor_history]
             if repair.interrupted:
+                _persist_ensemble_cues(plan, repair, source_cues)
                 state.transition_repair_job(job['id'], 'persisted_for_restart', shutdown_classification='interrupted', expected_states=('active',))
                 return False
             if not repair.success and repair.partial_raw:
                 _persist_ensemble_cues(plan, repair, source_cues)
                 second = _runtime._write_recovery_candidate(target_path, repair.partial_raw, same_directory=False)
                 temporary.append(second)
-                repair = repair_subtitle_file(source_path, second, detector, target_language, translator, target_lang=plan['targetLanguage'], max_attempts=_runtime.CLEANUP_MAX_REPAIR_ATTEMPTS, context_lines=_runtime.CLEANUP_REPAIR_CONTEXT_LINES, provider_enabled=True, cancellation_requested=lambda: _runtime.shutdown_requested, **_runtime._validation_kwargs())
+                token = _runtime._shared_capacity.reserve_repair()
+                try:
+                    if not _runtime._shared_capacity.start_repair(token):
+                        state.transition_repair_job(job['id'], 'persisted_for_restart', expected_states=('active',))
+                        return False
+                    repair = repair_subtitle_file(source_path, second, detector, target_language, translator, target_lang=plan['targetLanguage'], max_attempts=_runtime.CLEANUP_MAX_REPAIR_ATTEMPTS, context_lines=_runtime.CLEANUP_REPAIR_CONTEXT_LINES, provider_enabled=_runtime.CLEANUP_REPAIR_ENABLED, attempt_logger=translator.on_attempt, exhausted_strategies=exhausted, cancellation_requested=lambda: _runtime.shutdown_requested, **_runtime._validation_kwargs(plan))
+                finally:
+                    _runtime._shared_capacity.release(token)
                 ensemble_donor_history.extend(repair.donor_history)
             if repair.interrupted:
+                _persist_ensemble_cues(plan, repair, source_cues)
                 state.transition_repair_job(job['id'], 'persisted_for_restart', shutdown_classification='interrupted', expected_states=('active',))
                 return False
             if not repair.success:
                 _persist_ensemble_cues(plan, repair, source_cues)
+                if repair.manual_review or any(i.rule == 'ambiguous_copied_source' for i in repair.report.issues):
+                    state.hold_retry_for_review(plan['id'], 'unresolved_cues')
                 state.transition_repair_job(job['id'], 'completed', error_code='ensemble_partial' if repair.repaired_cues else 'ensemble_no_progress', expected_states=('active',))
                 print(f"[ENSEMBLE] Partial recovery for plan {plan['id']}; canonical target remains absent and regeneration stays queued")
                 _runtime._status_transition(plan['itemType'], plan['itemId'], plan['targetLanguage'], 'deferred', reason='partial quarantine recovery persisted; regeneration retained', details={'quarantineAttemptIds': attempt_ids, 'unresolvedCues': len(repair.unresolved_cues)})
@@ -164,12 +195,22 @@ def _run_quarantine_recovery_job(job: dict, stats: dict | None=None) -> bool:
             publish_candidate = _runtime.Path(baseline['artifactPath']) if repair is None else _runtime.Path(second if 'second' in locals() else baseline['artifactPath'])
             donor_history = ensemble_donor_history
             final_report = repair.report
+        video = _runtime._find_sidecar_video(_runtime.Path(target_path))
+        duration = _runtime._probe_media_duration(video) if video else None
+        completeness = _runtime._evaluate_completeness(publish_candidate, duration)
+        _runtime._add_completeness_issue(final_report, completeness)
+        if not final_report.valid:
+            state.hold_retry_for_review(plan['id'], 'candidate_completeness')
+            return False
         with _runtime._target_repair_lock(target_path):
             if _runtime._file_hash_or_none(source_path) != plan['sourceHash'] or _runtime.os.path.exists(target_path):
                 state.transition_repair_job(job['id'], 'failed', error_code='ensemble_publication_race', expected_states=('active',))
                 return False
-            published = _runtime._replace_managed_file_if_current(publish_candidate, target_path, source_path=source_path, expected_source_hash=plan['sourceHash'], expected_target_hash=None, source_language=plan.get('sourceLanguage'), target_language=plan['targetLanguage'], origin='lingarr', operation='donor_recovery', parent_artifact_id=None)
+            published = _runtime._replace_managed_file_if_current(publish_candidate, target_path, source_path=source_path, expected_source_hash=plan['sourceHash'], expected_target_hash=None, source_language=plan.get('sourceLanguage'), target_language=plan['targetLanguage'], origin='lingarr', operation='donor_recovery', parent_artifact_id=None, identity=plan)
         if not published:
+            if repair is not None and repair.success and _runtime._file_hash_or_none(source_path) == plan['sourceHash']:
+                repair.partial_raw = read_text_best_effort(publish_candidate)
+                _persist_ensemble_cues(plan, repair, source_cues)
             state.transition_repair_job(job['id'], 'failed', error_code='ensemble_publication_race', expected_states=('active',))
             return False
         recorded = _runtime._record_validation_result(target_path, plan['sourceHash'], _runtime._file_hash_or_none(target_path), 'valid', final_report, origin='lingarr', sourcePath=source_path, sourceLanguage=plan.get('sourceLanguage'), targetLanguage=plan['targetLanguage'], title=plan.get('mediaTitle'), itemType=plan['itemType'], itemId=plan['itemId'], operation='donor_recovery', donorRecovery=donor_history)
@@ -194,6 +235,10 @@ def _run_quarantine_recovery_job(job: dict, stats: dict | None=None) -> bool:
         print(f"{_runtime.GREEN}[ENSEMBLE] Recovered and published {plan.get('mediaTitle') or target_path} from quarantine attempts{_runtime.RESET}")
         return True
     except Exception as exc:
+        from ..subtitles.publication import PublicationDeferred
+        if isinstance(exc, PublicationDeferred):
+            state.transition_repair_job(job['id'], 'completed', error_code='publication_pending', expected_states=('active',))
+            return False
         try:
             state.transition_repair_job(job['id'], 'persisted_for_restart' if _runtime.shutdown_requested else 'failed', error_code='ensemble_exception', expected_states=('queued', 'active', 'persisted_for_restart'))
         except _runtime.StateStoreError:
@@ -204,25 +249,101 @@ def _run_quarantine_recovery_job(job: dict, stats: dict | None=None) -> bool:
     finally:
         for path in temporary:
             try:
-                if path.exists():
+                pending_publication = state.publication_for_target(target_path)
+                if path.exists() and (not pending_publication or _runtime.Path(pending_publication['candidate_path']) != path):
                     path.unlink()
             except OSError:
                 pass
+
+def _resume_publications(stats: dict) -> None:
+    from ..subtitles.publication import publish_journaled, PublicationDeferred
+    from ..subtitles.foundation import validate_subtitle_pair, target_language_for_code
+    state = _runtime._get_validation_state()
+    for record in state.pending_publications():
+        if _runtime.shutdown_requested:
+            break
+        plans = [p for p in state.retry_plans(include_terminal=True) if p.get('targetPath') == record['target_path']]
+        plan = max(plans, key=lambda p: p['id']) if plans else record['payload'].get('identity', {})
+        if not plans and plan.get('itemType') in ('episodes', 'movies') and plan.get('itemId') is not None:
+            plan, _ = state.schedule_retry_plan(item_type=plan['itemType'], item_id=plan['itemId'],
+                source_language=record['payload'].get('sourceLanguage'), target_language=record['payload']['targetLanguage'],
+                source_hash=record['source_hash'], source_path=record['source_path'], target_path=record['target_path'],
+                series_key=plan.get('canonicalSeriesKey'), media_title=plan.get('mediaTitle'), failure_class='whole_file',
+                rules=['publication_pending'], state='regeneration_waiting', failed_output_hash=record['candidate_hash'],
+                artifact_path=record['candidate_path'], eligible_completed_cycle=record['eligible_cycle'], reason='publication_pending')
+        if record.get('source_hash') and _runtime._file_hash_or_none(record.get('source_path')) != record['source_hash']:
+            state.finish_publication(record['id'], 'superseded')
+            continue
+        if record['state'] == 'manual_review':
+            if plan.get('id'):
+                state.hold_retry_for_review(plan['id'], record['last_error'] or 'publication failed')
+            continue
+        if record['eligible_cycle'] > _runtime._completed_cycle:
+            continue
+        with _runtime._target_repair_lock(record['target_path']), _runtime._artifact_access.hold(record['source_path'], record['candidate_path'], record['target_path']), state.approval_guard():
+            payload = record['payload']
+            language = payload['targetLanguage']
+            candidate = record['candidate_path']
+            # A name decision or validation-policy change cannot publish stale approval.
+            report = validate_subtitle_pair(record['source_path'], candidate, _runtime._get_cleanup_detector(),
+                target_language_for_code(language), target_lang=language, **_runtime._validation_kwargs(plan))
+            video = _runtime._find_sidecar_video(_runtime.Path(record['target_path']))
+            duration = _runtime._probe_media_duration(video) if video else None
+            _runtime._add_completeness_issue(report, _runtime._evaluate_completeness(candidate, duration))
+            if not report.valid:
+                if plan.get('id'):
+                    state.set_retry_candidate(plan['id'], candidate, record['candidate_hash'])
+                    state.hold_retry_for_review(plan['id'], 'retained candidate needs validation review')
+                state.finish_publication(record['id'], 'superseded')
+                continue
+            try:
+                published = publish_journaled(record, state, completed_cycle=_runtime._completed_cycle,
+                    lock=_runtime._target_repair_lock(record['target_path']))
+            except PublicationDeferred:
+                stats['publication_deferred'] = stats.get('publication_deferred', 0) + 1
+                continue
+            if not published:
+                continue
+            recorded = _runtime._record_validation_result(record['target_path'], record['source_hash'], record['candidate_hash'],
+                'valid', report, origin=payload['origin'], sourcePath=record['source_path'],
+                sourceLanguage=payload.get('sourceLanguage'), targetLanguage=language, operation=payload['operation'],
+                itemType=plan.get('itemType'), itemId=plan.get('itemId'))
+            if not recorded:
+                continue
+            if plan.get('id'):
+                circuit = state.circuit_trial_for_retry_plan(plan['id'])
+                resolved = state.resolve_retry_plan(plan['id'], record['source_hash'], outcome='accepted_after_donor_recovery')
+                if resolved and circuit:
+                    state.settle_circuit_trial_for_retry(plan['id'], lease_generation=circuit['leaseGeneration'], outcome='success', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES)
+                video = _runtime._find_sidecar_video(_runtime.Path(record['target_path']))
+                if video:
+                    _runtime._queue_video_for_pruning(video, plan['itemType'])
+                stats['episode_activity' if plan['itemType'] == 'episodes' else 'movie_activity'] = True
+            state.finish_publication(record['id'], 'completed')
+            _runtime.Path(candidate).unlink(missing_ok=True)
+            _runtime.Path(candidate).with_suffix('.json').unlink(missing_ok=True)
+
 
 def _run_quarantine_recoveries(stats: dict) -> None:
     if _runtime.shutdown_requested:
         return
     state = _runtime._get_validation_state()
+    from ..subtitles.publication import reconcile_publication_receipts
+    reconcile_publication_receipts(state)
+    state.reactivate_changed_manual_reviews(state.config_fingerprint)
+    _resume_publications(stats)
     try:
         plans = [plan for plan in state.retry_plans(include_terminal=False) if plan.get('failureClass') == 'whole_file' and plan.get('state') == 'regeneration_waiting']
         for plan in plans:
+            if plan.get('lastDeferralClass') == 'manual_review' or state.publication_for_target(plan.get('targetPath')):
+                continue
             if _runtime.shutdown_requested or _runtime.os.path.exists(plan.get('targetPath') or ''):
                 continue
             if _runtime._file_hash_or_none(plan.get('sourcePath')) != plan.get('sourceHash'):
                 continue
             attempts = [attempt for attempt in state.quarantine_attempts(plan['itemType'], plan['itemId'], plan['targetLanguage']) if attempt.get('sourceHash') == plan['sourceHash']]
             attempt_ids = sorted({int(attempt['id']) for attempt in attempts})
-            if len(attempt_ids) < 2:
+            if not attempt_ids and not plan.get('artifactPath'):
                 continue
             dedupe_key = _ensemble_key(plan, attempt_ids)
             if state.repair_job_attempted(dedupe_key):
@@ -451,6 +572,9 @@ def run_cycle(cycle_num: int) -> bool:
     _runtime._status_set_phase('cycle_work')
     stats: dict = {'submitted': 0, 'completed': 0, 'timed_out': 0, 'failed': 0, 'deferred': 0, 'api_errors': 0, 'degraded': False, 'cycle_suppressions': 0, 'cooldown_deferrals': 0, 'circuit_deferrals': 0, 'variant_outputs_discovered': 0, 'recovered_pending_outputs': 0, 'translations': [], 'episode_activity': False, 'movie_activity': False}
     stats_lock = _runtime.threading.Lock()
+    from ..subtitles.publication import reconcile_publication_receipts
+    reconcile_publication_receipts(_runtime._get_validation_state())
+    _resume_publications(stats)
     _runtime.lingarr_build_media_cache()
     try:
         active_before = len(_runtime.lingarr_get_active_translations())

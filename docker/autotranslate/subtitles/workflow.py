@@ -258,8 +258,15 @@ def _derive_target_path(source_path: str, source_lang: str, target_lang: str) ->
     stem_tokens[language_index] = target_lang
     return str(path.with_name('.'.join(stem_tokens) + path.suffix))
 
-def _validation_kwargs() -> dict:
-    return {'min_chars': _runtime.CLEANUP_MIN_CHARS, 'min_confidence': _runtime.CLEANUP_MIN_CONFIDENCE, 'max_unique_ratio': _runtime.CLEANUP_MAX_UNIQUE_RATIO, 'max_cyrillic_ratio': _runtime.CLEANUP_MAX_CYRILLIC_RATIO, 'max_cjk_ratio': _runtime.CLEANUP_MAX_CJK_RATIO, 'max_latin_ratio': _runtime.CLEANUP_MAX_LATIN_RATIO, 'min_letters_for_script': _runtime.CLEANUP_MIN_LETTERS_FOR_SCRIPT, 'max_cue_lines': _runtime.CLEANUP_MAX_CUE_LINES, 'max_cue_chars': _runtime.CLEANUP_MAX_CUE_CHARS, 'max_expansion_ratio': _runtime.CLEANUP_MAX_EXPANSION_RATIO, 'max_expansion_chars': _runtime.CLEANUP_MAX_EXPANSION_CHARS, 'max_source_similarity': _runtime.CLEANUP_MAX_SOURCE_SIMILARITY}
+def _validation_kwargs(identity: dict | None = None) -> dict:
+    options = {'min_chars': _runtime.CLEANUP_MIN_CHARS, 'min_confidence': _runtime.CLEANUP_MIN_CONFIDENCE, 'max_unique_ratio': _runtime.CLEANUP_MAX_UNIQUE_RATIO, 'max_cyrillic_ratio': _runtime.CLEANUP_MAX_CYRILLIC_RATIO, 'max_cjk_ratio': _runtime.CLEANUP_MAX_CJK_RATIO, 'max_latin_ratio': _runtime.CLEANUP_MAX_LATIN_RATIO, 'min_letters_for_script': _runtime.CLEANUP_MIN_LETTERS_FOR_SCRIPT, 'max_cue_lines': _runtime.CLEANUP_MAX_CUE_LINES, 'max_cue_chars': _runtime.CLEANUP_MAX_CUE_CHARS, 'max_expansion_ratio': _runtime.CLEANUP_MAX_EXPANSION_RATIO, 'max_expansion_chars': _runtime.CLEANUP_MAX_EXPANSION_CHARS, 'max_source_similarity': _runtime.CLEANUP_MAX_SOURCE_SIMILARITY}
+    if identity is not None:
+        snapshot = _runtime._get_validation_state().name_approval_snapshot(identity)
+        options['approved_name_pairs'] = tuple(tuple(pair) for pair in snapshot['pairs'])
+        options['approval_revision'] = snapshot['revision']
+        options['approval_scope'] = snapshot['scope']
+    return options
+
 
 
 def _confident_wrong_language_evidence(
@@ -381,6 +388,17 @@ def _record_validation_result(target_path: str | _runtime.Path, source_hash: str
         target_language = extra.get('targetLanguage')
         if target_language is None:
             target_language = next((language for language in _runtime.LANGUAGES if _runtime._target_suffix(target_path, language) is not None), None)
+        cache_identity = _runtime._get_validation_state().approval_identity_for_target(target_path)
+        cache_identity.update({k: v for k, v in extra.items() if v is not None})
+        cache_identity['targetLanguage'] = target_language
+        snapshot = _runtime._get_validation_state().name_approval_snapshot(cache_identity)
+        details['approvalRevision'] = getattr(report, 'approval_revision', snapshot['revision'])
+        if result in ('valid', 'valid_with_warnings') and (details['approvalRevision'] != snapshot['revision'] or getattr(report, 'approval_scope', None) not in (None, snapshot['scope'])):
+            return False
+        details['approvalScope'] = snapshot['scope']
+        details['sourceLanguage'] = snapshot['sourceLanguage']
+        details['targetLanguage'] = target_language
+        details['canonicalSeriesKey'] = extra.get('canonicalSeriesKey') or extra.get('seriesKey')
         target_suffix = _runtime._target_suffix(target_path, target_language) if target_language is not None else None
         trusted_source_hash = source_hash if origin == 'lingarr' or extra.get('trustedSource') else None
         _runtime._get_validation_state().record(target_path, source_hash=trusted_source_hash, target_hash=target_hash, result=result, origin=origin, details=details, source_path=extra.get('sourcePath'), source_language=extra.get('sourceLanguage'), target_language=target_language, target_identity=extra.get('targetIdentity') or (_runtime._target_identity_from_sidecar(target_path, target_language) if target_language is not None else None), target_variant=extra.get('targetVariant') if extra.get('targetVariant') is not None else target_suffix[1] if target_suffix is not None else None, operation=extra.get('operation', 'validation'), parent_artifact_id=extra.get('parentArtifactId'), attempt_id=extra.get('attemptId'), validation_mode=extra.get('validationMode') or ('source-aware' if origin == 'lingarr' and trusted_source_hash else 'target-only'), validator_version=VALIDATOR_VERSION, item_type=extra.get('itemType'), item_id=extra.get('itemId'))
@@ -631,39 +649,56 @@ def _publish_canonical_target(source_path: str | _runtime.Path, canonical_path: 
             print(f'{_runtime.RED}[ERROR] Could not publish canonical target for {label}: {exc}{_runtime.RESET}')
             return None
 
-def _replace_managed_file(candidate: str | _runtime.Path, target: str | _runtime.Path) -> None:
-    from .foundation import normalize_managed_file
-    candidate_path = _runtime.Path(candidate)
-    try:
-        normalize_managed_file(candidate_path)
-        _runtime.os.replace(candidate_path, target)
-    except OSError:
+def _replace_managed_file_if_current(candidate, target, *, source_path, expected_source_hash,
+                                     expected_target_hash, source_language, target_language, origin,
+                                     operation, parent_artifact_id, identity=None):
+    from .publication import retain_publication, publish_journaled, PublicationDeferred
+    from .foundation import validate_subtitle_pair, target_language_for_code
+    state = _runtime._get_validation_state()
+    with _runtime._target_repair_lock(target), _runtime._artifact_access.hold(source_path, target, candidate), state.approval_guard():
+        if _runtime.shutdown_requested:
+            return False
+        if expected_source_hash is not None and _runtime._file_hash_or_none(source_path) != expected_source_hash:
+            return False
+        if _runtime._file_hash_or_none(target) != expected_target_hash:
+            return False
+        candidate_hash = _runtime._file_hash_or_none(candidate)
+        if candidate_hash is None:
+            return False
+        if origin == 'lingarr':
+            validation = validate_subtitle_pair(source_path, candidate, _runtime._get_cleanup_detector(),
+                target_language_for_code(target_language), target_lang=target_language, **_runtime._validation_kwargs(identity or {}))
+            if not validation.valid:
+                return False
+        payload = dict(sourceLanguage=source_language, targetLanguage=target_language,
+                       origin=origin or 'external', operation=operation, parentArtifactId=parent_artifact_id, identity=identity or {})
+        record = retain_publication(state, candidate, target, source_path=source_path,
+            source_hash=expected_source_hash, expected_target_hash=expected_target_hash, payload=payload, expected_candidate_hash=candidate_hash)
         try:
-            candidate_path.unlink()
-        except OSError:
-            pass
-        raise
+            return publish_journaled(record, state, completed_cycle=_runtime._completed_cycle,
+                                     lock=_runtime._target_repair_lock(target))
+        except (PublicationDeferred, _runtime.StateStoreError):
+            if identity and identity.get('itemType') in ('episodes', 'movies') and identity.get('itemId') is not None:
+                plan, _ = state.schedule_retry_plan(item_type=identity['itemType'], item_id=identity['itemId'],
+                    source_language=source_language, target_language=target_language, source_path=source_path,
+                    source_hash=expected_source_hash, target_path=target, series_key=identity.get('canonicalSeriesKey'),
+                    media_title=identity.get('mediaTitle'), failure_class='whole_file', rules=['publication_pending'],
+                    state='regeneration_waiting', failed_output_hash=record['candidate_hash'], artifact_path=record['candidate_path'],
+                    eligible_completed_cycle=_runtime._completed_cycle + 1, reason='publication_pending')
+            raise
 
-def _replace_managed_file_if_current(candidate: str | _runtime.Path, target: str | _runtime.Path, *, source_path: str | _runtime.Path | None, expected_source_hash: str | None, expected_target_hash: str | None, source_language: str | None, target_language: str, origin: str | None, operation: str, parent_artifact_id: int | None) -> bool:
-    if expected_source_hash is not None and _runtime._file_hash_or_none(source_path) != expected_source_hash or (expected_target_hash is not None and _runtime._file_hash_or_none(target) != expected_target_hash):
-        try:
-            _runtime.Path(candidate).unlink()
-        except OSError:
-            pass
-        return False
-    candidate_hash = _runtime._file_hash_or_none(candidate)
-    if candidate_hash is None:
-        raise OSError(f'could not hash replacement candidate {candidate}')
-    suffix = _runtime._target_suffix(target, target_language)
-    pending_artifact_id = _runtime._get_validation_state().record_artifact_version(target, target_hash=candidate_hash, source_path=source_path, source_hash=expected_source_hash, source_language=source_language, target_language=target_language, origin=origin or 'external', operation=operation, parent_artifact_id=parent_artifact_id, target_identity=_runtime._target_identity_from_sidecar(target, target_language), target_variant=suffix[1] if suffix is not None else '', disposition='replacement_pending', pending_destination=target)
-    _runtime._replace_managed_file(candidate, target)
-    _runtime._get_validation_state().set_artifact_disposition(pending_artifact_id, 'active')
-    return True
 
 def _perform_repair(source_path: str, target_path: str, source_lang: str, target_lang: str, item_id: int | None, title: str, item_type: str | None, initial_report, expected_target_hash: str | None, expected_source_hash: str | None=None, recovery_raw: str | None=None, format_fixes: list[str] | None=None, format_recovered_cues: list[int] | None=None, completeness=None, origin: str | None='lingarr', series_key: str | None=None, series_title: str | None=None, status_ref: dict | None=None, cancellation_requested=None, publication_guard=None, retry_plan_id: int | None=None, trial_owner: str | None=None, trial_job_id: int | None=None, trial_plan_id: int | None=None, trial_generation: int | None=None) -> _runtime.RepairJobResult:
     from .foundation import target_language_for_code
     from .repair import repair_subtitle_file
     label = title or _runtime.os.path.basename(target_path)
+    identity = {'itemType': item_type, 'itemId': item_id, 'sourceLanguage': source_lang, 'targetLanguage': target_lang, 'canonicalSeriesKey': series_key, 'sourceHash': expected_source_hash, 'mediaTitle': label}
+    from .publication import reconcile_publication_receipts
+    state_store = _runtime._get_validation_state()
+    reconcile_publication_receipts(state_store)
+    if state_store.publication_for_target(target_path):
+        setattr(initial_report, 'publication_pending', True)
+        return _runtime.RepairJobResult('repair-deferred', initial_report, label, target_lang, item_type, item_id, target_path=str(target_path))
     publication_admitted = False
 
     def admit_publication() -> bool:
@@ -694,19 +729,15 @@ def _perform_repair(source_path: str, target_path: str, source_lang: str, target
                 return _runtime.RepairJobResult('repair-deferred', initial_report, label, target_lang, item_type, item_id, target_path=str(target_path))
         recovery_temp = _runtime._write_recovery_candidate(target_path, recovery_raw)
         working_path = recovery_temp
-        attempt_state: dict = {}
+        from ..services.cue_repair import CueRepairProvider
+        provider = CueRepairProvider(_runtime.lingarr_translate_line, _runtime._get_validation_state(), identity,
+            _runtime._VALIDATION_CONFIG_FINGERPRINT, cancelled=cancellation_requested or (lambda: _runtime.shutdown_requested))
         progress_started = _runtime.time.monotonic()
         last_progress_signature: tuple | None = None
         last_progress_at = 0.0
 
-        def attempt_logger(event: dict) -> None:
-            attempt_state.clear()
-            attempt_state.update(event)
-            if event.get('event') == 'rejected' and event.get('outputFingerprint') and event.get('sourceCueHash') and (item_type in ('episodes', 'movies')) and (item_id is not None) and expected_source_hash:
-                try:
-                    _runtime._get_validation_state().record_failure_fingerprint(item_type=item_type, item_id=item_id, target_language=target_lang, source_file_hash=expected_source_hash, source_cue_hash=event['sourceCueHash'], strategy_key=event.get('strategy') or 'unknown', provider='lingarr', config_fingerprint=_runtime._VALIDATION_CONFIG_FINGERPRINT, output_fingerprint=event['outputFingerprint'], failure_class=','.join(event.get('validationRules') or ['validation']))
-                except _runtime.StateStoreError as exc:
-                    print(f'{_runtime.YELLOW}[REPAIR] Could not persist failure fingerprint: {exc}{_runtime.RESET}')
+        def attempt_logger(event: dict):
+            occurrences = provider.on_attempt(event)
             if event['event'] == 'donor_accepted':
                 print(f"[DONOR] Cue {event.get('cueNumber')} recovered from quarantine attempt {event.get('sourceAttempt')}")
                 return
@@ -727,6 +758,8 @@ def _perform_repair(source_path: str, target_path: str, source_lang: str, target
                 print(f'[REPAIR] Cue {cue} attempt {attempt} rejected{http_label} after {duration:.1f}s: {rules}')
             else:
                 print(f"[REPAIR] Cue {cue} attempt {attempt} failed{http_label} after {duration:.1f}s: {event.get('outcome')}")
+
+            return occurrences
 
         def progress_callback(event: dict) -> None:
             nonlocal last_progress_signature, last_progress_at
@@ -749,12 +782,7 @@ def _perform_repair(source_path: str, target_path: str, source_lang: str, target
             last_progress_at = now
             _runtime._status_ref_transition(status_ref, state, details=details)
 
-        def translator(line: str, before: list[str], after: list[str]):
-            if cancellation_requested is not None and cancellation_requested():
-                return (None, {'cancelled': True})
-            outcome_meta: dict = {}
-            translated = _runtime.lingarr_translate_line(line, source_lang, target_lang, before, after, repair_label=label, cue_number=attempt_state.get('cueNumber'), attempt=attempt_state.get('attempt'), outcome_meta=outcome_meta, strict=attempt_state.get('strategy') == 'strict_isolated', cancellation_requested=cancellation_requested)
-            return (translated, outcome_meta)
+        translator = provider
 
         def donor_event_logger(event: dict) -> None:
             if item_type not in ('episodes', 'movies') or item_id is None:
@@ -763,6 +791,40 @@ def _perform_repair(source_path: str, target_path: str, source_lang: str, target
                 _runtime._get_validation_state().record_donor_event(item_type=item_type, item_id=item_id, target_language=target_lang, cue_number=event.get('cueNumber'), donor_attempt_id=event.get('donorAttemptId'), reason_code=event.get('reasonCode') or 'current_validation_failed')
             except _runtime.StateStoreError as exc:
                 print(f'{_runtime.YELLOW}[DONOR] Could not persist donor diagnostic: {exc}{_runtime.RESET}')
+        def persist_partial_progress(repair):
+            from .foundation import read_text_best_effort
+            partial_id = None
+            if expected_source_hash and _runtime._file_hash_or_none(source_path) != expected_source_hash:
+                return None
+            if repair.success and not repair.partial_raw:
+                repair.partial_raw = read_text_best_effort(recovery_temp)
+            if repair.partial_raw and (item_type in ('episodes', 'movies')) and (item_id is not None) and expected_source_hash:
+                try:
+                    from .foundation import cue_source_signature, parse_srt_cues, read_text_best_effort
+                    source_raw = read_text_best_effort(_runtime.Path(source_path)) or ''
+                    source_cues, source_errors = parse_srt_cues(source_raw)
+                    partial_cues, partial_errors = parse_srt_cues(repair.partial_raw)
+                    partial_hash = _runtime.hashlib.sha256(repair.partial_raw.encode('utf-8')).hexdigest()
+                    if not source_errors and (not partial_errors):
+                        partial_path = _runtime._get_validation_state().path.parent / 'recovery' / f'partial-{partial_hash}.srt'
+                        partial_path.parent.mkdir(parents=True, exist_ok=True)
+                        from .publication import retain_partial_text
+                        retain_partial_text(partial_path, repair.partial_raw)
+                        partial_id = _runtime._get_validation_state().record_partial_candidate(item_type=item_type, item_id=item_id, source_language=source_lang, target_language=target_lang, source_hash=expected_source_hash, target_hash=partial_hash, changed_cues=repair.repaired_cues, unresolved_cues=repair.unresolved_cues, provenance=repair.attempt_history + repair.donor_history, artifact_path=str(partial_path))
+                        setattr(repair.report, 'review_candidate', (str(partial_path), partial_hash))
+                        changed = set(repair.repaired_cues)
+                        by_number = {cue.number: cue for cue in partial_cues}
+                        for source_cue in source_cues:
+                            target_cue = by_number.get(source_cue.number)
+                            if source_cue.number not in changed or target_cue is None:
+                                continue
+                            signature = cue_source_signature(source_cue)
+                            target_text = target_cue.text
+                            _runtime._get_validation_state().record_cue_recovery(partial_candidate_id=partial_id, item_type=item_type, item_id=item_id, source_language=source_lang, target_language=target_lang, source_file_hash=expected_source_hash, source_cue_number=source_cue.number, source_cue_hash=signature['sourceHash'], source_signature=signature, cue_start_ms=signature.get('startMs'), target_text=target_text, target_hash=_runtime.hashlib.sha256(target_text.encode('utf-8')).hexdigest(), recovery_stage='cue_repair')
+                except (OSError, _runtime.StateStoreError) as exc:
+                    print(f'{_runtime.YELLOW}[REPAIR] Could not persist partial progress: {exc}{_runtime.RESET}')
+            return partial_id
+
         cue_list = ', '.join((str(i + 1) for i in initial_report.repairable_cue_indexes))
         print(f"[REPAIR] Retrying {label} '{target_lang}' cue position(s): {cue_list}")
         try:
@@ -774,9 +836,10 @@ def _perform_repair(source_path: str, target_path: str, source_lang: str, target
                 cue_recoveries = _runtime._get_validation_state().cue_recoveries(item_type, item_id, target_lang, source_file_hash=expected_source_hash)
                 if expected_source_hash and hasattr(_runtime._get_validation_state(), 'exhausted_recovery_strategies'):
                     exhausted_strategies = _runtime._get_validation_state().exhausted_recovery_strategies(item_type=item_type, item_id=item_id, target_language=target_lang, source_file_hash=expected_source_hash, provider='lingarr', config_fingerprint=_runtime._VALIDATION_CONFIG_FINGERPRINT)
-            repair = repair_subtitle_file(_runtime.Path(source_path), working_path, detector, target_language, translator, target_lang=target_lang, max_attempts=_runtime.CLEANUP_MAX_REPAIR_ATTEMPTS, context_lines=_runtime.CLEANUP_REPAIR_CONTEXT_LINES, attempt_logger=attempt_logger, progress_callback=progress_callback, donor_attempts=donor_attempts, cue_recoveries=cue_recoveries, donor_event_logger=donor_event_logger, artifact_access=_runtime._artifact_access, exhausted_strategies=exhausted_strategies, cancellation_requested=lambda: cancellation_requested is not None and cancellation_requested() if cancellation_requested is not None else None, **_runtime._validation_kwargs())
+            repair = repair_subtitle_file(_runtime.Path(source_path), working_path, detector, target_language, translator, target_lang=target_lang, provider_enabled=_runtime.CLEANUP_REPAIR_ENABLED, max_attempts=_runtime.CLEANUP_MAX_REPAIR_ATTEMPTS, context_lines=_runtime.CLEANUP_REPAIR_CONTEXT_LINES, attempt_logger=attempt_logger, progress_callback=progress_callback, donor_attempts=donor_attempts, cue_recoveries=cue_recoveries, donor_event_logger=donor_event_logger, artifact_access=_runtime._artifact_access, exhausted_strategies=exhausted_strategies, cancellation_requested=lambda: cancellation_requested is not None and cancellation_requested() if cancellation_requested is not None else None, **_runtime._validation_kwargs(identity))
             second_attempts = sum((entry.get('attempt', 0) > 1 and entry.get('withoutContext') for entry in repair.attempt_history))
             if repair.interrupted or (cancellation_requested is not None and cancellation_requested()):
+                persist_partial_progress(repair)
                 print(f"[REPAIR] Persisted {label} '{target_lang}' for restart after shutdown interruption")
                 return _runtime.RepairJobResult('repair-deferred', repair.report, label, target_lang, item_type, item_id, repair.attempts, second_attempts, str(target_path))
             if repair.success:
@@ -791,20 +854,22 @@ def _perform_repair(source_path: str, target_path: str, source_lang: str, target
                 if candidate_hash is None:
                     return _runtime.RepairJobResult('repair-deferred', repair.report, label, target_lang, item_type, item_id, repair.attempts, second_attempts, str(target_path))
                 if not admit_publication():
+                    persist_partial_progress(repair)
                     return _runtime.RepairJobResult('repair-deferred', repair.report, label, target_lang, item_type, item_id, repair.attempts, second_attempts, str(target_path))
-                suffix = _runtime._target_suffix(target_path, target_lang)
+                from .publication import PublicationDeferred
                 try:
-                    pending_artifact_id = _runtime._get_validation_state().record_artifact_version(target_path, target_hash=candidate_hash, source_path=source_path, source_hash=expected_source_hash, source_language=source_lang, target_language=target_lang, origin=origin or 'external', operation='cue_repair', parent_artifact_id=parent.get('id') if parent else None, target_identity=_runtime._target_identity_from_sidecar(target_path, target_lang), target_variant=suffix[1] if suffix is not None else '', disposition='replacement_pending', pending_destination=target_path)
-                except _runtime.StateStoreError as exc:
-                    print(f"{_runtime.YELLOW}[REPAIR] Deferred {label} '{target_lang}': could not persist replacement intent ({exc}){_runtime.RESET}")
-                    return _runtime.RepairJobResult('repair-deferred', repair.report, label, target_lang, item_type, item_id, repair.attempts, second_attempts, str(target_path))
-                _runtime._replace_managed_file(recovery_temp, target_path)
-                recovery_temp = None
-                try:
-                    _runtime._get_validation_state().set_artifact_disposition(pending_artifact_id, 'active')
-                except _runtime.StateStoreError as exc:
-                    print(f'{_runtime.YELLOW}[REPAIR] Replacement completed but state finalization was deferred: {exc}{_runtime.RESET}')
-                    return _runtime.RepairJobResult('repair-deferred', repair.report, label, target_lang, item_type, item_id, repair.attempts, second_attempts, str(target_path))
+                    published = _runtime._replace_managed_file_if_current(recovery_temp, target_path,
+                        source_path=source_path, expected_source_hash=expected_source_hash,
+                        expected_target_hash=expected_target_hash, source_language=source_lang,
+                        target_language=target_lang, origin=origin, operation='cue_repair',
+                        parent_artifact_id=parent.get('id') if parent else None, identity=identity)
+                except PublicationDeferred:
+                    setattr(repair.report, 'publication_pending', True)
+                    return _runtime.RepairJobResult('repair-deferred', repair.report, label, target_lang,
+                        item_type, item_id, repair.attempts, second_attempts, str(target_path))
+                if not published:
+                    return _runtime.RepairJobResult('repair-deferred', repair.report, label, target_lang,
+                        item_type, item_id, repair.attempts, second_attempts, str(target_path))
                 repaired = ', '.join((str(number) for number in repair.repaired_cues))
                 print(f"{_runtime.GREEN}[REPAIR] Repaired and validated {label} '{target_lang}' cue(s): {repaired}{_runtime.RESET}")
                 if not _runtime._record_validation_result(target_path, _runtime._file_hash_or_none(source_path), _runtime._file_hash_or_none(target_path), 'valid', repair.report, origin=origin, repairedCues=repair.repaired_cues, repairAttempts=repair.attempts, repairAttemptHistory=repair.attempt_history, donorRecovery=repair.donor_history, formatFixes=format_fixes or [], formatRecoveredCues=format_recovered_cues or [], lingarrOutcome='repaired', completeness=completeness.to_dict() if completeness is not None else None, sourcePath=source_path, sourceLanguage=source_lang, targetLanguage=target_lang, title=label, itemType=item_type, itemId=item_id, episodeCode=_runtime.episode_identity_from_path(target_path), operation='cue_repair', parentArtifactId=parent.get('id') if parent else None):
@@ -813,27 +878,7 @@ def _perform_repair(source_path: str, target_path: str, source_lang: str, target
             print(f"{_runtime.YELLOW}[REPAIR] Could not repair {label} '{target_lang}': {repair.reason}{_runtime.RESET}")
             if repair.manual_review:
                 setattr(repair.report, 'manual_review', True)
-            partial_id = None
-            if repair.partial_raw and repair.repaired_cues and (item_type in ('episodes', 'movies')) and (item_id is not None) and expected_source_hash:
-                try:
-                    from .foundation import cue_source_signature, parse_srt_cues, read_text_best_effort
-                    source_raw = read_text_best_effort(_runtime.Path(source_path)) or ''
-                    source_cues, source_errors = parse_srt_cues(source_raw)
-                    partial_cues, partial_errors = parse_srt_cues(repair.partial_raw)
-                    partial_hash = _runtime.hashlib.sha256(repair.partial_raw.encode('utf-8')).hexdigest()
-                    if not source_errors and (not partial_errors):
-                        partial_id = _runtime._get_validation_state().record_partial_candidate(item_type=item_type, item_id=item_id, source_language=source_lang, target_language=target_lang, source_hash=expected_source_hash, target_hash=partial_hash, changed_cues=repair.repaired_cues, unresolved_cues=repair.unresolved_cues, provenance=repair.attempt_history + repair.donor_history, artifact_path=None)
-                        changed = set(repair.repaired_cues)
-                        by_number = {cue.number: cue for cue in partial_cues}
-                        for source_cue in source_cues:
-                            target_cue = by_number.get(source_cue.number)
-                            if source_cue.number not in changed or target_cue is None:
-                                continue
-                            signature = cue_source_signature(source_cue)
-                            target_text = target_cue.text
-                            _runtime._get_validation_state().record_cue_recovery(partial_candidate_id=partial_id, item_type=item_type, item_id=item_id, source_language=source_lang, target_language=target_lang, source_file_hash=expected_source_hash, source_cue_number=source_cue.number, source_cue_hash=signature['sourceHash'], source_signature=signature, cue_start_ms=signature.get('startMs'), target_text=target_text, target_hash=_runtime.hashlib.sha256(target_text.encode('utf-8')).hexdigest(), recovery_stage='cue_repair')
-                except (OSError, _runtime.StateStoreError) as exc:
-                    print(f'{_runtime.YELLOW}[REPAIR] Could not persist partial progress: {exc}{_runtime.RESET}')
+            partial_id = persist_partial_progress(repair)
             if not admit_publication():
                 return _runtime.RepairJobResult('repair-deferred', repair.report, label, target_lang, item_type, item_id, repair.attempts, second_attempts, str(target_path))
             action = _runtime._apply_cleanup_action(target_path, source_path, target_lang, repair.report, expected_target_hash=expected_target_hash, repair_attempts=repair.attempts, lingarr_outcome=repair.reason, attempt_history=repair.attempt_history, format_fixes=format_fixes, format_recovered_cues=format_recovered_cues, completeness=completeness, origin=origin, item_type=item_type, item_id=item_id, donor_history=repair.donor_history, candidate_raw=repair.partial_raw if _runtime.CLEANUP_ACTION == 'quarantine' else None, partial_candidate_id=partial_id)
@@ -845,7 +890,9 @@ def _perform_repair(source_path: str, target_path: str, source_lang: str, target
         finally:
             if recovery_temp is not None:
                 try:
-                    recovery_temp.unlink()
+                    pending_publication = _runtime._get_validation_state().publication_for_target(target_path)
+                    if not pending_publication or _runtime.Path(pending_publication['candidate_path']) != recovery_temp:
+                        recovery_temp.unlink()
                 except OSError:
                     pass
 
@@ -1335,7 +1382,15 @@ def _schedule_validation_retry(*, report, action: str, source_path: str, source_
                 target_hash = archived_attempt['targetHash']
         except _runtime.StateStoreError:
             pass
-    if failure_class == 'cue_repairable' and action == 'repair-deferred':
+    if getattr(report, 'manual_review', False):
+        state = 'regeneration_waiting'
+        failure_class = 'whole_file'
+        eligible_cycle = _runtime._completed_cycle
+    elif getattr(report, 'publication_pending', False):
+        state = 'regeneration_waiting'
+        failure_class = 'whole_file'
+        eligible_cycle = _runtime._completed_cycle + 1
+    elif failure_class == 'cue_repairable' and action == 'repair-deferred':
         state = 'repair_retry_queued'
         eligible_cycle = _runtime._completed_cycle
     elif failure_class == 'source_problem':
@@ -1357,8 +1412,16 @@ def _schedule_validation_retry(*, report, action: str, source_path: str, source_
         if not hasattr(state_store, 'schedule_retry_plan'):
             return None
         plan, repeated = state_store.schedule_retry_plan(item_type=item_type, item_id=item_id, target_language=target_lang, source_hash=source_hash, source_path=source_path, source_language=source_lang, target_path=target_path, series_key=series_key, series_title=series_title, media_title=title, source_cue_count=_runtime._count_srt_cues(source_path), failure_class=failure_class, rules=(issue.rule for issue in getattr(report, 'issues', [])), state=state, failed_output_hash=target_hash, artifact_path=archived_attempt.get('artifactPath') if archived_attempt else None, report_path=archived_attempt.get('reportPath') if archived_attempt else None, eligible_completed_cycle=eligible_cycle, reason=getattr(report, 'summary', lambda: action)())
+        candidate = getattr(report, 'review_candidate', None)
+        if candidate:
+            state_store.set_retry_candidate(plan['id'], *candidate)
         if getattr(report, 'manual_review', False):
-            plan = state_store.reschedule_retry_no_progress(plan['id'], completed_cycle=_runtime._completed_cycle, deferral_class='manual_review', reason='no materially new recovery strategy remains', delay_cycles=1) or plan
+            state_store.hold_retry_for_review(plan['id'], 'unresolved_cues')
+        publication = state_store.publication_for_target(target_path)
+        if publication:
+            state_store.set_retry_candidate(plan['id'], publication['candidate_path'], publication['candidate_hash'])
+            if publication['state'] == 'manual_review':
+                state_store.hold_retry_for_review(plan['id'], publication['last_error'])
         print(f"[RETRY] {('Observed unchanged' if repeated else 'Scheduled')} {title} '{target_lang}': state={plan['state']} eligible_cycle={plan['eligibleCompletedCycle']} attempt={plan['attemptCount']}/{_runtime.REGENERATION_MAX_ATTEMPTS or 'unlimited'}")
         _runtime._refresh_status_diagnostics()
         return plan
@@ -1386,6 +1449,12 @@ def _resolve_retry_success(plan_id: int | None, expected_source_hash: str | None
         return False
 
 def _validate_translated_file(source_path: str, target_path: str, source_lang: str, target_lang: str, item_id: int | None, title: str='', dry_run: bool=False, *, defer_repair: bool=False, item_type: str | None=None, media_duration: float | None=None, origin: str | None=None, provenance_source_hash: str | None=None, series_key: str | None=None, series_title: str | None=None, maintenance_scan_job_id: str | None=None, retry_plan_id: int | None=None, trial_owner: str | None=None, trial_job_id: int | None=None, trial_plan_id: int | None=None, trial_generation: int | None=None, prepared_analysis=None) -> tuple[str, object]:
+    identity = {'itemType': item_type, 'itemId': item_id, 'sourceLanguage': source_lang, 'targetLanguage': target_lang, 'canonicalSeriesKey': series_key, 'mediaTitle': title}
+    if _runtime._get_validation_state().publication_for_target(target_path):
+        from .foundation import ValidationReport
+        pending_report = ValidationReport()
+        setattr(pending_report, 'publication_pending', True)
+        return ('repair-deferred', pending_report)
     validated_target_hash = _runtime._file_hash_or_none(target_path)
     from ..maintenance.workers import MaintenanceFileStat
     prepared_target_reusable = bool(
@@ -1394,13 +1463,16 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
         and prepared_analysis.target_stat == MaintenanceFileStat.capture(target_path)
     )
     validation_identity = {
+        'canonicalSeriesKey': series_key,
         'title': title or ('Movie' if item_type == 'movies' else 'Episode' if item_type == 'episodes' else 'Media item'),
         'episodeCode': _runtime.episode_identity_from_path(target_path),
         'itemType': item_type,
         'itemId': item_id,
         'targetLanguage': target_lang,
     }
-    if target_lang not in _runtime.CLEANUP_LANGUAGES:
+    lineage = _runtime._get_validation_state().matching_record(target_path, validated_target_hash) if validated_target_hash else None
+    generated = bool(lineage and lineage.get('origin') == 'lingarr' and lineage.get('sourceHash') == _runtime._file_hash_or_none(source_path) and lineage.get('sourceHash'))
+    if target_lang not in _runtime.CLEANUP_LANGUAGES and not generated:
         from .foundation import target_language_for_code
         from .library import validate_subtitle_without_source
         detector = _runtime._get_cleanup_detector()
@@ -1417,7 +1489,7 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
         else:
             report = validate_subtitle_without_source(
                 _runtime.Path(target_path), detector, target_language,
-                target_lang=target_lang, **_runtime._validation_kwargs(),
+                target_lang=target_lang, **_runtime._validation_kwargs(identity),
             )
         completeness = (
             prepared_analysis.completeness if prepared_target_only else None
@@ -1469,6 +1541,8 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
     prepared_reusable = bool(
         prepared_target_reusable
         and prepared_analysis.source_stat == MaintenanceFileStat.capture(source_path)
+        and getattr(prepared_analysis, 'approval_revision', 0) == _runtime._get_validation_state().name_approval_snapshot(identity)['revision']
+        and getattr(prepared_analysis, 'approval_scope', None) == _runtime._get_validation_state().name_approval_snapshot(identity)['scope']
     )
     source_hash = (
         prepared_analysis.source_hash
@@ -1497,9 +1571,9 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
     if prepared_reusable and prepared_analysis.validation_mode == prepared_mode:
         report = prepared_analysis.report
     elif source_aligned:
-        report = validate_subtitle_pair(_runtime.Path(source_path), _runtime.Path(target_path), detector, target_language, target_lang=target_lang, **_runtime._validation_kwargs())
+        report = validate_subtitle_pair(_runtime.Path(source_path), _runtime.Path(target_path), detector, target_language, target_lang=target_lang, **_runtime._validation_kwargs(identity))
     else:
-        report = validate_subtitle_without_source(_runtime.Path(target_path), detector, target_language, target_lang=target_lang, **_runtime._validation_kwargs())
+        report = validate_subtitle_without_source(_runtime.Path(target_path), detector, target_language, target_lang=target_lang, **_runtime._validation_kwargs(identity))
     completeness = (
         prepared_analysis.completeness
         if prepared_reusable and prepared_analysis.completeness is not None
@@ -1519,7 +1593,7 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
             if recovery.safe and recovery.changed and (recovery.raw is not None):
                 candidate = _runtime._write_recovery_candidate(target_path, recovery.raw, same_directory=False)
                 try:
-                    normalized_report = validate_subtitle_pair(_runtime.Path(source_path), candidate, detector, target_language, target_lang=target_lang, **_runtime._validation_kwargs())
+                    normalized_report = validate_subtitle_pair(_runtime.Path(source_path), candidate, detector, target_language, target_lang=target_lang, **_runtime._validation_kwargs(identity))
                     _runtime._add_completeness_issue(normalized_report, completeness)
                 finally:
                     try:
@@ -1540,7 +1614,7 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
                 try:
                     with _runtime._target_repair_lock(target_path):
                         temp = _runtime._write_recovery_candidate(target_path, recovery.raw)
-                        replaced = _runtime._replace_managed_file_if_current(temp, target_path, source_path=source_path, expected_source_hash=source_hash, expected_target_hash=expected_target_hash, source_language=source_lang, target_language=target_lang, origin=effective_origin, operation='format_repair', parent_artifact_id=recorded.get('artifactId') if recorded else None)
+                        replaced = _runtime._replace_managed_file_if_current(temp, target_path, source_path=source_path, expected_source_hash=source_hash, expected_target_hash=expected_target_hash, source_language=source_lang, target_language=target_lang, origin=effective_origin, operation='format_repair', parent_artifact_id=recorded.get('artifactId') if recorded else None, identity=identity)
                 except (OSError, _runtime.StateStoreError) as exc:
                     print(f'{_runtime.RED}[ERROR] Could not normalize {target_path}: {exc}{_runtime.RESET}')
                     return ('action-failed', report)
@@ -1572,7 +1646,7 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
         if recovery.safe and recovery.changed and (recovery.raw is not None):
             candidate = _runtime._write_recovery_candidate(target_path, recovery.raw, same_directory=False)
             try:
-                recovered_report = validate_subtitle_pair(_runtime.Path(source_path), candidate, detector, target_language, target_lang=target_lang, **_runtime._validation_kwargs())
+                recovered_report = validate_subtitle_pair(_runtime.Path(source_path), candidate, detector, target_language, target_lang=target_lang, **_runtime._validation_kwargs(identity))
                 _runtime._add_completeness_issue(recovered_report, completeness)
             finally:
                 try:
@@ -1589,7 +1663,7 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
                 try:
                     with _runtime._target_repair_lock(target_path):
                         temp = _runtime._write_recovery_candidate(target_path, recovery.raw)
-                        replaced = _runtime._replace_managed_file_if_current(temp, target_path, source_path=source_path, expected_source_hash=source_hash, expected_target_hash=expected_target_hash, source_language=source_lang, target_language=target_lang, origin=effective_origin, operation='format_repair', parent_artifact_id=recorded.get('artifactId') if recorded else None)
+                        replaced = _runtime._replace_managed_file_if_current(temp, target_path, source_path=source_path, expected_source_hash=source_hash, expected_target_hash=expected_target_hash, source_language=source_lang, target_language=target_lang, origin=effective_origin, operation='format_repair', parent_artifact_id=recorded.get('artifactId') if recorded else None, identity=identity)
                 except (OSError, _runtime.StateStoreError) as exc:
                     print(f'{_runtime.RED}[ERROR] Could not repair {target_path}: {exc}{_runtime.RESET}')
                     return ('action-failed', report)
@@ -1604,7 +1678,7 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
             recovery_raw = recovery.raw
         elif not recovery.safe:
             _runtime.dbg(f'Format recovery unsafe for {label}: {recovery.reason}')
-    if source_aligned and _runtime.CLEANUP_REPAIR_ENABLED and report.repairable_cue_indexes and (not dry_run) and (not repeat_invalid_hash):
+    if source_aligned and (_runtime.CLEANUP_REPAIR_ENABLED or _runtime.DONOR_RECOVERY_ENABLED or any(i.rule == 'ambiguous_copied_source' for i in report.issues)) and report.repairable_cue_indexes and (not dry_run) and (not repeat_invalid_hash):
         job_kwargs = {'source_path': source_path, 'target_path': target_path, 'source_lang': source_lang, 'target_lang': target_lang, 'item_id': item_id, 'title': label, 'item_type': item_type, 'initial_report': report, 'expected_target_hash': expected_target_hash, 'expected_source_hash': source_hash, 'recovery_raw': recovery_raw, 'format_fixes': format_fixes, 'format_recovered_cues': format_recovered_cues, 'completeness': completeness, 'origin': effective_origin, 'series_key': series_key, 'series_title': series_title, 'maintenance_scan_job_id': maintenance_scan_job_id, 'retry_plan_id': retry_plan_id, 'trial_owner': trial_owner, 'trial_job_id': trial_job_id, 'trial_plan_id': trial_plan_id, 'trial_generation': trial_generation}
         if defer_repair:
             repair_key = (_runtime.os.path.normcase(_runtime.os.path.abspath(target_path)), source_hash, expected_target_hash, target_lang, tuple(report.repairable_cue_indexes))
@@ -1617,6 +1691,7 @@ def _validate_translated_file(source_path: str, target_path: str, source_lang: s
         for coordination_key in ('trial_owner', 'trial_job_id', 'trial_plan_id', 'trial_generation'):
             synchronous_kwargs.pop(coordination_key, None)
         result = _runtime._perform_repair(**synchronous_kwargs)
+        _runtime._schedule_validation_retry(report=result.report, action=result.action, source_path=source_path, source_lang=source_lang, target_path=target_path, target_lang=target_lang, item_type=item_type, item_id=item_id, title=label, series_key=series_key, series_title=series_title)
         return (result.action, result.report)
     action = _runtime._apply_cleanup_action(target_path, source_path, target_lang, report, expected_target_hash=expected_target_hash, format_fixes=format_fixes, format_recovered_cues=format_recovered_cues, completeness=completeness, origin=effective_origin, item_type=item_type, item_id=item_id, dry_run=dry_run)
     if action in ('quarantined', 'deleted') and item_id is not None:
@@ -1645,7 +1720,7 @@ EXPORTS = {
         '_submission_matches_source', '_is_variant_aware_adjacent_source',
         '_record_quarantine_event', '_apply_cleanup_action',
         '_target_repair_lock', '_write_recovery_candidate',
-        '_normalize_managed_output', '_publish_canonical_target', '_replace_managed_file',
+        '_normalize_managed_output', '_publish_canonical_target',
         '_replace_managed_file_if_current', '_perform_repair',
         '_get_repair_executor', '_run_repair_with_capacity',
         '_publish_repair_status', '_queue_repair', '_defer_linked_repair_trial',

@@ -204,7 +204,10 @@ def _maintenance_preflight(candidates: list) -> tuple[dict[str, object], set[str
         source_stat = MaintenanceFileStat.capture(source_path)
         video_stat = MaintenanceFileStat.capture(video)
         receipt_stat = MaintenanceFileStat.capture(receipt)
+        identity = state.approval_identity_for_target(candidate.path)
+        snapshot = state.name_approval_snapshot(identity)
         dependencies = {
+            'approvalRevision': snapshot['revision'], 'approvalScope': snapshot['scope'],
             'source': source_stat.to_dict() if source_stat else None,
             'video': video_stat.to_dict() if video_stat else None,
             'receipt': receipt_stat.to_dict() if receipt_stat else None,
@@ -237,7 +240,9 @@ def _maintenance_preflight(candidates: list) -> tuple[dict[str, object], set[str
             ),
             video_path=str(video) if video is not None else None,
             receipt_path=str(receipt) if receipt is not None else None,
-            validation_kwargs=_runtime._validation_kwargs(),
+            validation_kwargs=_runtime._validation_kwargs(identity),
+            approval_revision=snapshot['revision'],
+            approval_scope=snapshot['scope'],
             completeness_kwargs=_runtime._completeness_kwargs(),
             undersized_enabled=_runtime.CLEANUP_UNDERSIZED_ENABLED,
             ffprobe_timeout=_runtime.CLEANUP_FFPROBE_TIMEOUT,
@@ -264,7 +269,12 @@ def _maintenance_cache_update(
     target_stat = MaintenanceFileStat.capture(target_path)
     if target_stat is None:
         return None
+    state = _runtime._get_validation_state()
+    snapshot = state.name_approval_snapshot(state.approval_identity_for_target(target_path))
+    if source_aligned and (getattr(report, 'approval_revision', 0) != snapshot['revision'] or getattr(report, 'approval_scope', snapshot['scope']) != snapshot['scope']):
+        return None
     dependencies = {
+        'approvalRevision': snapshot['revision'], 'approvalScope': snapshot['scope'],
         'source': (stat.to_dict() if (stat := MaintenanceFileStat.capture(source_path)) else None),
         'video': (stat.to_dict() if (stat := MaintenanceFileStat.capture(video_path)) else None),
         'receipt': (stat.to_dict() if (stat := MaintenanceFileStat.capture(receipt_path)) else None),

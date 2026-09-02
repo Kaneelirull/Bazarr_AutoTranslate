@@ -2218,13 +2218,13 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             target = root / "Top Gear S14E01.et.srt"
             source.write_text(
                 "442\n00:23:44,000 --> 00:23:45,000\nBefore the car.\n\n"
-                "443\n00:23:46,000 --> 00:23:48,000\nAston Martin Vanquish\n\n"
+                "443\n00:23:46,000 --> 00:23:48,000\nAston Martin DB9\n\n"
                 "444\n00:23:49,000 --> 00:23:51,000\nAfter the car.\n",
                 encoding="utf-8",
             )
             target.write_text(
                 "442\n00:23:44,000 --> 00:23:45,000\nEnne autot.\n\n"
-                "443\n00:23:46,000 --> 00:23:48,000\nAston Martin Vanquish\n\n"
+                "443\n00:23:46,000 --> 00:23:48,000\nAston Martin DB9\n\n"
                 "444\n00:23:49,000 --> 00:23:51,000\nPÃ¤rast autot.\n",
                 encoding="utf-8",
             )
@@ -2265,7 +2265,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual((public[0]["title"], public[0]["cueNumber"]), ("Top Gear", 443))
             serialized = json.dumps(public)
             self.assertNotIn(str(target), serialized)
-            self.assertNotIn("Aston Martin Vanquish", serialized)
+            self.assertNotIn("Aston Martin DB9", serialized)
 
             database = Path(self._state_directory.name) / "state.sqlite3"
             app._validation_state.close()
@@ -2276,7 +2276,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(reloaded["result"], "valid_with_warnings")
             self.assertEqual(
                 reloaded["details"]["validation"]["observations"][0]["classification"],
-                "ambiguous",
+                "likely_invariant",
             )
 
     def test_repair_logs_attempts_without_dialogue_text(self):
@@ -2295,10 +2295,10 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             )
             self._record_lingarr_artifact(source, target)
             responses = [
-                "[SOURCE] still leaked [/SOURCE]",
-                "[SOURCE] still leaked [/SOURCE]",
-                "[SOURCE] still leaked [/SOURCE]",
-                "[SOURCE] still leaked [/SOURCE]",
+                "[SOURCE] leaked one [/SOURCE]",
+                "[SOURCE] leaked two [/SOURCE]",
+                "[SOURCE] leaked three [/SOURCE]",
+                "[SOURCE] leaked four [/SOURCE]",
                 "Parandatud",
             ]
 

@@ -21,7 +21,7 @@ def _manual_review_validate(plan: dict, source_path, target_path, media_path) ->
     if source_path is not None:
         report = validate_subtitle_pair(
             source_path, target_path, detector, target_language,
-            target_lang=plan["targetLanguage"], **_runtime._validation_kwargs(),
+            target_lang=plan["targetLanguage"], **_runtime._validation_kwargs(plan),
         )
         mode = "source-aware"
     else:
@@ -75,6 +75,8 @@ def _prepare_manual_validation(plan, result, source_path, target_path) -> dict:
     target_language = plan.get("targetLanguage")
     target_suffix = _runtime._target_suffix(target_path, target_language)
     extra = {
+        "approvalRevision": getattr(result.report, "approval_revision", 0),
+        "canonicalSeriesKey": plan.get("canonicalSeriesKey"),
         "sourcePath": str(source_path) if source_path is not None else None,
         "sourceLanguage": plan.get("sourceLanguage"),
         "targetLanguage": target_language,
@@ -153,7 +155,7 @@ def _resolve_manual_media(_plan: dict, target_path):
 def build_manual_review_service(state_store) -> ManualReviewService:
     return ManualReviewService(
         state_store,
-        managed_roots=_runtime.CLEANUP_ROOTS,
+        managed_roots=[*_runtime.CLEANUP_ROOTS, state_store.path.parent / 'recovery'],
         quarantine_root=_runtime.CLEANUP_QUARANTINE_DIR,
         artifact_access=_runtime._artifact_access,
         validate=_manual_review_validate,
@@ -166,8 +168,37 @@ def build_manual_review_service(state_store) -> ManualReviewService:
         on_change=_runtime._refresh_status_diagnostics,
         actions_enabled=_runtime.STATUS_MANUAL_ACTIONS_ENABLED,
         emit=print,
+        inspect_cues=_inspect_review_cues,
     )
 
 
-EXPORTS = {"build_manual_review_service": build_manual_review_service}
+def _inspect_review_cues(plan, source, candidate, pairs):
+    import hashlib
+    from ..subtitles.foundation import parse_srt_cues, read_text_best_effort, validate_subtitle_pair, target_language_for_code
+    source_cues, errors = parse_srt_cues(read_text_best_effort(source) or '')
+    target_cues, target_errors = parse_srt_cues(read_text_best_effort(candidate) or '')
+    if errors or target_errors or len(source_cues) != len(target_cues):
+        from .service import ManualReviewConflict
+        raise ManualReviewConflict('candidate requires structural recovery before cue review')
+    options = _runtime._validation_kwargs()
+    options['approved_name_pairs'] = pairs
+    report = validate_subtitle_pair(source, candidate, _runtime._get_cleanup_detector(),
+        target_language_for_code(plan['targetLanguage']), target_lang=plan['targetLanguage'], **options)
+    output = []
+    for index, (original, translated) in enumerate(zip(source_cues, target_cues)):
+        issues = [i for i in report.issues if i.cue_index == index]
+        if not issues:
+            continue
+        source_text, target_text = '\n'.join(original.lines), '\n'.join(translated.lines)
+        output.append({'cueNumber': original.number, 'timestamp': original.timestamp,
+            'sourceText': source_text, 'targetText': target_text,
+            'targetCueHash': hashlib.sha256(target_text.encode('utf-8')).hexdigest(),
+            'rules': sorted({i.rule for i in issues}), 'reason': '; '.join(i.detail for i in issues),
+            'canApproveName': original.number == translated.number and original.timestamp == translated.timestamp
+                and any(i.rule == 'ambiguous_copied_source' for i in issues),
+            'context': [{'cueNumber': source_cues[j].number, 'sourceText': '\n'.join(source_cues[j].lines),
+                         'targetText': '\n'.join(target_cues[j].lines)} for j in (index-1, index+1) if 0 <= j < len(source_cues)]})
+    return output
 
+
+EXPORTS = {"build_manual_review_service": build_manual_review_service}

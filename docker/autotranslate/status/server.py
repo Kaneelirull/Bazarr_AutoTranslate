@@ -178,6 +178,23 @@ def start_status_server(
                     200, "text/html; charset=utf-8",
                     render_review_page(display_timezone).encode("utf-8"),
                 )
+            elif re.fullmatch(r"/api/manual-reviews/(\d+)/cues", parsed.path):
+                if manual_review_service is None:
+                    self._json_error(503, "service_unavailable", "Manual review service is unavailable.")
+                    return
+                try:
+                    query = parse_qs(parsed.query)
+                    plan_id = int(parsed.path.split('/')[3])
+                    payload = manual_review_service.review_cues(plan_id, int(query.get('page', ['1'])[0]), int(query.get('pageSize', ['20'])[0]))
+                    self._send_json(200, payload)
+                except ManualReviewNotFound:
+                    self._json_error(404, "not_found", "Manual review was not found.")
+                except ManualReviewConflict:
+                    self._json_error(409, "stale_review", "Recovery files changed or are unavailable. Refresh the review.")
+                except (TypeError, ValueError):
+                    self._json_error(400, "invalid_query", "Cue query is invalid.")
+                except (OSError, RuntimeError):
+                    self._json_error(503, "service_unavailable", "Cue review is temporarily unavailable.")
             elif parsed.path == "/api/manual-reviews":
                 if manual_review_service is None:
                     self._json_error(503, "service_unavailable", "Manual review service is unavailable.")
@@ -269,7 +286,11 @@ def start_status_server(
             except (UnicodeDecodeError, ValueError):
                 self._json_error(400, "invalid_json", "Request body must be valid JSON.")
                 return
-            if not isinstance(payload, dict) or set(payload) != {"action", "expectedUpdatedAt"}:
+            action_fields = {
+                'approve_name': {'action','expectedUpdatedAt','approvalRevision','sourceHash','candidateHash','cueNumber','targetCueHash'},
+                'revoke_name': {'action','expectedUpdatedAt','approvalRevision','approvalId'},
+            }
+            if not isinstance(payload, dict) or set(payload) != action_fields.get(str(payload.get('action')), {"action", "expectedUpdatedAt"}):
                 self._json_error(400, "invalid_body", "Action and expectedUpdatedAt are required.")
                 return
             try:
@@ -277,11 +298,17 @@ def start_status_server(
                 expected = float(payload["expectedUpdatedAt"])
                 if not math.isfinite(expected):
                     raise ValueError("expectedUpdatedAt must be finite")
-                if action not in {"recheck", "queue_retry", "dismiss"}:
+                if action not in {"recheck", "queue_retry", "dismiss", "approve_name", "revoke_name"}:
                     raise ValueError("unsupported action")
-                status, response = manual_review_service.perform_action(
-                    int(match.group(1)), action, expected
-                )
+                if action in action_fields:
+                    numeric = ['approvalRevision', 'cueNumber' if action == 'approve_name' else 'approvalId']
+                    if any(type(payload[key]) is not int or payload[key] < (0 if key == 'approvalRevision' else 1) for key in numeric):
+                        raise ValueError('invalid identifier or revision')
+                    if action == 'approve_name' and any(not isinstance(payload[key], str) or not re.fullmatch('[0-9a-f]{64}', payload[key]) for key in ('sourceHash','candidateHash','targetCueHash')):
+                        raise ValueError('invalid evidence hash')
+                    status, response = manual_review_service.perform_name_action(int(match.group(1)), payload)
+                else:
+                    status, response = manual_review_service.perform_action(int(match.group(1)), action, expected)
             except (TypeError, ValueError):
                 self._json_error(400, "invalid_action", "Manual review action is invalid.")
                 return

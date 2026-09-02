@@ -511,22 +511,24 @@ class ServiceReliabilityTests(unittest.TestCase):
         self.assertEqual(mode, 0o664)
 
     def test_managed_replace_preserves_original_on_permission_failure(self):
+        from autotranslate.subtitles.publication import retain_publication, publish_journaled, PublicationDeferred
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            target = root / "movie.et.srt"
-            candidate = root / ".movie.et.srt.tmp"
-            target.write_text("original", encoding="utf-8")
-            candidate.write_text("replacement", encoding="utf-8")
-
-            with patch(
-                "autotranslate.subtitles.foundation.normalize_managed_file",
-                side_effect=PermissionError("chown denied"),
-            ):
-                with self.assertRaises(PermissionError):
-                    app._replace_managed_file(candidate, target)
-
-            self.assertEqual(target.read_text(encoding="utf-8"), "original")
-            self.assertFalse(candidate.exists())
+            target = root / 'movie.et.srt'
+            candidate = root / 'candidate.srt'
+            target.write_text('original', encoding='utf-8')
+            candidate.write_text('replacement', encoding='utf-8')
+            store = StateStore(root / 'state.sqlite3', validator_version='v', config_fingerprint='c')
+            try:
+                record = retain_publication(store, candidate, target, source_path=None, source_hash=None,
+                    expected_target_hash=app._file_hash_or_none(target), payload={})
+                with patch('autotranslate.subtitles.publication.normalize_managed_file', side_effect=PermissionError('chown denied')):
+                    with self.assertRaises(PublicationDeferred):
+                        publish_journaled(record, store, completed_cycle=0, lock=threading.RLock())
+                self.assertEqual(target.read_text(encoding='utf-8'), 'original')
+                self.assertTrue(Path(record['candidate_path']).exists())
+            finally:
+                store.close()
 
     def test_quarantine_and_report_are_normalized(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1095,7 +1097,7 @@ class ServiceReliabilityTests(unittest.TestCase):
                 patch.object(app, "_get_cleanup_detector", return_value=object()),
                 patch.object(cleanup, "target_language_for_code", return_value=object()),
                 patch.object(cleanup, "repair_subtitle_file", return_value=repair),
-                patch.object(app, "_replace_managed_file") as replace,
+                patch.object(app, "_replace_managed_file_if_current") as replace,
             ):
                 result = app._perform_repair(
                     str(source), str(target), "en", "et", None, "Movie",

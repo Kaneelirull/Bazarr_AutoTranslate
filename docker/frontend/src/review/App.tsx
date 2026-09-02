@@ -147,7 +147,7 @@ export function ReviewApp({ timeZone = "UTC", pollInterval = 20_000 }: { timeZon
   if (!payload && initialLoading) return <main className="dashboard-shell review-shell" aria-busy="true"><h1>Manual review</h1><p className="loading">Loading manual reviews…</p></main>;
 
   if (!payload) return <main className="dashboard-shell review-shell">
-    <AppHeader eyebrow="Operator recovery" title="Manual review" description="Restore files externally, verify them safely, or authorize one scheduler retry." current="review" />
+    <AppHeader eyebrow="Operator recovery" title="Manual review" description="Review unresolved cues, remember names, or queue recovery." current="review" />
     <Panel className="review-unavailable"><div role="alert"><h2>Manual reviews are unavailable</h2><p>{loadError || "The review service could not be reached."}</p></div>
       <button className="btn btn-primary" type="button" onClick={() => void load(appliedFilters, "initial")}>Retry</button>
     </Panel>
@@ -162,7 +162,7 @@ export function ReviewApp({ timeZone = "UTC", pollInterval = 20_000 }: { timeZon
     <AppHeader
       eyebrow="Operator recovery"
       title="Manual review"
-      description="Restore files externally, verify them safely, or authorize one scheduler retry."
+      description="Review unresolved cues, remember names, or queue recovery."
       current="review"
       action={<button className={`btn btn-primary${foregroundLoading ? " is-loading" : ""}`} type="button" disabled={foregroundLoading || actionPending} aria-busy={foregroundLoading} onClick={() => void load(appliedFilters, "foreground")}>{foregroundLoading ? "Refreshing…" : "Refresh now"}</button>}
     />
@@ -206,7 +206,11 @@ export function ReviewApp({ timeZone = "UTC", pollInterval = 20_000 }: { timeZon
                 {item.allowedActions?.includes("dismiss") && <button className="btn btn-sm btn-danger" type="button" disabled={actionPending || !payload.actionsEnabled} aria-describedby={!payload.actionsEnabled ? "review-disabled-note" : undefined} onClick={(event) => void performAction(item, "dismiss", event.currentTarget)}>Dismiss</button>}
               </div></td>
             </tr>
-            <tr className="review-detail-row"><td colSpan={6}><ReviewDetails item={item} timeZone={timeZone} open={open} onToggle={(nextOpen) => setExpandedIds((current) => { const next = new Set(current); if (nextOpen) next.add(item.id); else next.delete(item.id); return next; })} /></td></tr>
+            <tr className="review-detail-row"><td colSpan={6}><ReviewDetails item={item} timeZone={timeZone} open={open} disabled={actionPending || !payload.actionsEnabled} onMutation={(pending, message) => {
+              mutationRef.current = pending; setActionPending(pending);
+              if (pending) { listAbortRef.current?.abort(); listAbortRef.current = null; }
+              else if (message) { setActionMessage(message); setActionError(false); void load(appliedRef.current, "foreground"); }
+            }} onToggle={(nextOpen) => setExpandedIds((current) => { const next = new Set(current); if (nextOpen) next.add(item.id); else next.delete(item.id); return next; })} /></td></tr>
           </tbody>;
         })}
       </table></div>}
@@ -216,6 +220,6 @@ export function ReviewApp({ timeZone = "UTC", pollInterval = 20_000 }: { timeZon
         <button className="btn btn-secondary" type="button" disabled={(page * pageSize) >= total || foregroundLoading || actionPending} onClick={() => changePage(1)}>Next</button>
       </nav>
     </Panel>
-    <PageFooter />
+    <PageFooter review />
   </main>;
 }

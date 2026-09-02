@@ -73,8 +73,8 @@ export function AdvancedFilters({ children, label = "More filters" }: { children
   </div>;
 }
 
-export function PageFooter() {
+export function PageFooter({ review = false }: { review?: boolean }) {
   return <p className="footer-note">
-    Trusted LAN endpoint · no subtitle text, hashes, credentials, or absolute paths exposed
+    {review ? "Subtitle dialogue appears only in explicit cue comparisons." : "Trusted LAN endpoint · no subtitle text, hashes, credentials, or absolute paths exposed"}
   </p>;
 }

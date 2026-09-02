@@ -1,0 +1,158 @@
+{
+  "retry_plans": [
+    {
+      "item_id": 28461,
+      "media_title": "Key & Peele S05E04"
+    },
+    {
+      "item_id": 28467,
+      "media_title": "Key & Peele S05E10"
+    },
+    {
+      "item_id": 12142,
+      "media_title": "Shameless (US) S08E08"
+    },
+    {
+      "item_id": 12157,
+      "media_title": "Shameless (US) S09E11"
+    },
+    {
+      "item_id": 12156,
+      "media_title": "Shameless (US) S09E10"
+    }
+  ],
+  "quarantine_attempts": [
+    {
+      "id": 49,
+      "item_id": 28461,
+      "attempt_number": 1,
+      "created_at": 1788155561.831261
+    },
+    {
+      "id": 50,
+      "item_id": 28467,
+      "attempt_number": 1,
+      "created_at": 1788159280.6637216
+    },
+    {
+      "id": 61,
+      "item_id": 28461,
+      "attempt_number": 2,
+      "created_at": 1788181516.4584382
+    },
+    {
+      "id": 69,
+      "item_id": 12142,
+      "attempt_number": 1,
+      "created_at": 1788214229.9695332
+    },
+    {
+      "id": 70,
+      "item_id": 12157,
+      "attempt_number": 1,
+      "created_at": 1788221098.3731086
+    },
+    {
+      "id": 74,
+      "item_id": 12156,
+      "attempt_number": 1,
+      "created_at": 1788228433.0749469
+    },
+    {
+      "id": 81,
+      "item_id": 28467,
+      "attempt_number": 2,
+      "created_at": 1788243722.1403167
+    },
+    {
+      "id": 83,
+      "item_id": 12142,
+      "attempt_number": 2,
+      "created_at": 1788247036.86153
+    },
+    {
+      "id": 86,
+      "item_id": 12157,
+      "attempt_number": 2,
+      "created_at": 1788252894.135549
+    },
+    {
+      "id": 87,
+      "item_id": 12156,
+      "attempt_number": 2,
+      "created_at": 1788255909.7973204
+    },
+    {
+      "id": 91,
+      "item_id": 28461,
+      "attempt_number": 3,
+      "created_at": 1788260186.2601466
+    },
+    {
+      "id": 96,
+      "item_id": 12142,
+      "attempt_number": 3,
+      "created_at": 1788281845.2561617
+    },
+    {
+      "id": 97,
+      "item_id": 12157,
+      "attempt_number": 3,
+      "created_at": 1788284563.2293174
+    },
+    {
+      "id": 98,
+      "item_id": 28467,
+      "attempt_number": 3,
+      "created_at": 1788286836.476792
+    },
+    {
+      "id": 99,
+      "item_id": 12156,
+      "attempt_number": 3,
+      "created_at": 1788287417.682136
+    },
+    {
+      "id": 102,
+      "item_id": 28461,
+      "attempt_number": 4,
+      "created_at": 1788299254.9892764
+    },
+    {
+      "id": 108,
+      "item_id": 28467,
+      "attempt_number": 4,
+      "created_at": 1788317490.1271195
+    },
+    {
+      "id": 109,
+      "item_id": 12142,
+      "attempt_number": 4,
+      "created_at": 1788323210.797722
+    },
+    {
+      "id": 110,
+      "item_id": 12157,
+      "attempt_number": 4,
+      "created_at": 1788329978.3899653
+    },
+    {
+      "id": 112,
+      "item_id": 12156,
+      "attempt_number": 4,
+      "created_at": 1788344470.4082549
+    },
+    {
+      "id": 114,
+      "item_id": 28461,
+      "attempt_number": 5,
+      "created_at": 1788353392.7801034
+    },
+    {
+      "id": 118,
+      "item_id": 28467,
+      "attempt_number": 5,
+      "created_at": 1788377494.068035
+    }
+  ]
+}
