@@ -289,6 +289,11 @@ def start_status_server(
             action_fields = {
                 'approve_name': {'action','expectedUpdatedAt','approvalRevision','sourceHash','candidateHash','cueNumber','targetCueHash'},
                 'revoke_name': {'action','expectedUpdatedAt','approvalRevision','approvalId'},
+                'approve_cue': {'action','requestId','expectedUpdatedAt','decisionRevision','sourceHash','candidateHash','cueNumber','targetCueHash','rememberPhrase'},
+                'retry_cue': {'action','requestId','expectedUpdatedAt','decisionRevision','sourceHash','candidateHash','cueNumber','targetCueHash'},
+                'clear_cue_decision': {'action','requestId','expectedUpdatedAt','decisionRevision','sourceHash','candidateHash','cueNumber','targetCueHash'},
+                'finish_review': {'action','requestId','expectedUpdatedAt','decisionRevision','sourceHash','candidateHash'},
+                'reopen': {'action','requestId','expectedUpdatedAt'},
             }
             if not isinstance(payload, dict) or set(payload) != action_fields.get(str(payload.get('action')), {"action", "expectedUpdatedAt"}):
                 self._json_error(400, "invalid_body", "Action and expectedUpdatedAt are required.")
@@ -298,9 +303,24 @@ def start_status_server(
                 expected = float(payload["expectedUpdatedAt"])
                 if not math.isfinite(expected):
                     raise ValueError("expectedUpdatedAt must be finite")
-                if action not in {"recheck", "queue_retry", "dismiss", "approve_name", "revoke_name"}:
+                cue_actions = {"approve_cue", "retry_cue", "clear_cue_decision", "finish_review", "reopen"}
+                if action not in {"recheck", "queue_retry", "dismiss", "approve_name", "revoke_name", *cue_actions}:
                     raise ValueError("unsupported action")
-                if action in action_fields:
+                if action in cue_actions:
+                    if not isinstance(payload['requestId'], str) or not re.fullmatch('[A-Za-z0-9_-]{16,128}', payload['requestId']):
+                        raise ValueError('invalid idempotency key')
+                    if action != 'reopen':
+                        if type(payload['decisionRevision']) is not int or payload['decisionRevision'] < 0:
+                            raise ValueError('invalid decision revision')
+                        if any(not isinstance(payload[key], str) or not re.fullmatch('[0-9a-f]{64}', payload[key]) for key in ('sourceHash','candidateHash')):
+                            raise ValueError('invalid evidence hash')
+                    if action in {'approve_cue','retry_cue','clear_cue_decision'}:
+                        if type(payload['cueNumber']) is not int or payload['cueNumber'] < 1 or not re.fullmatch('[0-9a-f]{64}', str(payload['targetCueHash'])):
+                            raise ValueError('invalid cue evidence')
+                    if action == 'approve_cue' and type(payload['rememberPhrase']) is not bool:
+                        raise ValueError('invalid remember choice')
+                    status, response = manual_review_service.perform_cue_action(int(match.group(1)), payload)
+                elif action in action_fields:
                     numeric = ['approvalRevision', 'cueNumber' if action == 'approve_name' else 'approvalId']
                     if any(type(payload[key]) is not int or payload[key] < (0 if key == 'approvalRevision' else 1) for key in numeric):
                         raise ValueError('invalid identifier or revision')

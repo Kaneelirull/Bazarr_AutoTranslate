@@ -9,10 +9,16 @@ function queryString(filters: ReviewFilters) {
   return new URLSearchParams(filters).toString();
 }
 
+function filtersFromUrl(): ReviewFilters {
+  const values = new URLSearchParams(window.location.search);
+  return Object.fromEntries(Object.entries(DEFAULT_FILTERS).map(([key, fallback]) => [key, values.get(key) ?? fallback])) as ReviewFilters;
+}
+
 function actionResult(payload: ActionPayload) {
   if (payload.scanPending) return "File accepted; Bazarr scan is queued for retry.";
   return ({
     queued: "Manual retry queued for scheduler admission.",
+    reopened: "Review reopened with refreshed evidence.",
     dismissed: "Review dismissed.",
     invalid: "The restored file is still invalid.",
     resolved: "Restored file accepted and Bazarr scan dispatched.",
@@ -20,9 +26,10 @@ function actionResult(payload: ActionPayload) {
 }
 
 export function ReviewApp({ timeZone = "UTC", pollInterval = 20_000 }: { timeZone?: string; pollInterval?: number }) {
+  const initialFilters = useRef(filtersFromUrl()).current;
   const [payload, setPayload] = useState<ReviewPayload | null>(null);
-  const [filters, setFilters] = useState<ReviewFilters>(DEFAULT_FILTERS);
-  const [appliedFilters, setAppliedFilters] = useState<ReviewFilters>(DEFAULT_FILTERS);
+  const [filters, setFilters] = useState<ReviewFilters>(initialFilters);
+  const [appliedFilters, setAppliedFilters] = useState<ReviewFilters>(initialFilters);
   const [initialLoading, setInitialLoading] = useState(true);
   const [foregroundLoading, setForegroundLoading] = useState(false);
   const [backgroundRefreshing, setBackgroundRefreshing] = useState(false);
@@ -59,8 +66,23 @@ export function ReviewApp({ timeZone = "UTC", pollInterval = 20_000 }: { timeZon
         pageSize: String(numberValue(data.pagination?.pageSize) || 20),
       };
       setPayload(data);
+      const requestedReview = Number(new URLSearchParams(window.location.search).get("review"));
+      const availableIds = new Set((data.items || []).map((item) => item.id));
+      setExpandedIds((current) => {
+        const currentId = [...current].find((id) => availableIds.has(id));
+        const selectedId = (requestedReview && availableIds.has(requestedReview) ? requestedReview : currentId) ?? data.items?.[0]?.id;
+        if (selectedId) {
+          const selectedUrl = new URL(window.location.href);
+          selectedUrl.searchParams.set("review", String(selectedId));
+          window.history.replaceState(null, "", selectedUrl);
+        }
+        return selectedId ? new Set([selectedId]) : new Set();
+      });
       setAppliedFilters(next);
       setFilters(next);
+      const url = new URL(window.location.href);
+      Object.entries(next).forEach(([key, value]) => value ? url.searchParams.set(key, value) : url.searchParams.delete(key));
+      window.history.replaceState(null, "", url);
       setLoadError("");
       return true;
     } catch (error) {
@@ -78,7 +100,7 @@ export function ReviewApp({ timeZone = "UTC", pollInterval = 20_000 }: { timeZon
   }, []);
 
   useEffect(() => {
-    void load(DEFAULT_FILTERS, "initial");
+    void load(initialFilters, "initial");
     const timer = window.setInterval(() => {
       if (!document.hidden && !mutationRef.current && !listAbortRef.current) void load(appliedRef.current, "background");
     }, pollInterval);
@@ -122,7 +144,8 @@ export function ReviewApp({ timeZone = "UTC", pollInterval = 20_000 }: { timeZon
       const result = await requestJson<ActionPayload>(`/api/manual-reviews/${item.id}/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Bazarr-Autotranslate-Action": "manual-review" },
-        body: JSON.stringify({ action, expectedUpdatedAt: numberValue(item.updatedAt) }),
+        body: JSON.stringify({ action, expectedUpdatedAt: numberValue(item.updatedAt),
+          ...(action === "reopen" ? { requestId: globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}` } : {}) }),
       });
       setActionMessage(actionResult(result));
       setActionError(result.outcome === "invalid");
@@ -187,33 +210,27 @@ export function ReviewApp({ timeZone = "UTC", pollInterval = 20_000 }: { timeZon
       <p ref={statusRef} className={`review-action-status ${actionError ? "is-error" : ""}`} role={actionError ? "alert" : "status"} aria-live={actionError ? "assertive" : "polite"} tabIndex={-1}>
         {actionMessage || `${total.toLocaleString()} review record${total === 1 ? "" : "s"}`}
       </p>
-      {!payload.items?.length ? <p className="empty-state">No manual reviews match these filters.</p> : <div className="table-wrap review-table-wrap"><table className="data-table review-table">
-        <thead><tr><th>Media</th><th>Type</th><th>Language</th><th>Status</th><th>Updated</th><th>Actions</th></tr></thead>
-        {payload.items.map((item) => {
-          const open = expandedIds.has(item.id);
+      {!payload.items?.length ? <p className="empty-state">No manual reviews match these filters.</p> : <div className="review-workspace">
+        <aside className="review-list" aria-label="Reviews"><h2>Choose an episode</h2>{payload.items.map((item) => {
+          const selected = expandedIds.has(item.id), title = item.media?.title || `${item.itemType || "media"} ${item.itemId}`;
+          return <button type="button" className={`review-list-item${selected ? " is-selected" : ""}`} aria-pressed={selected} key={item.id} onClick={() => {
+            setExpandedIds(new Set([item.id])); const url = new URL(window.location.href); url.searchParams.set("review", String(item.id)); window.history.replaceState(null, "", url);
+          }}><span><strong>{title}</strong><small>{item.media?.episodeCode || operatorLabel(item.itemType || "media")} · {item.targetLanguage || "—"}</small></span><span className={`badge ${statusTone(item.status)}`}>{statusLabel(item.status)}</span></button>;
+        })}</aside>
+        <section className="review-selected" aria-label="Selected review">{(() => {
+          const item = payload.items?.find((value) => expandedIds.has(value.id));
+          if (!item) return <div className="review-select-prompt"><h2>Select an episode</h2><p>Choose a review to compare cues and decide what happens next.</p></div>;
           const title = item.media?.title || `${item.itemType || "media"} ${item.itemId}`;
-          return <tbody className="review-record" key={item.id}>
-            <tr className={`review-main-row${open ? " has-expanded" : ""}`}>
-              <td className="cell-media" data-label="Media"><strong>{title}</strong>{item.media?.episodeCode && <span>{item.media.episodeCode}</span>}</td>
-              <td data-label="Type">{operatorLabel(item.itemType || "media")}</td>
-              <td data-label="Language">{item.targetLanguage || "—"}</td>
-              <td data-label="Status"><span className={`badge ${statusTone(item.status)}`}>{statusLabel(item.status)}</span>{item.scanPending && <> <span className="badge badge-warning">Scan pending</span></>}</td>
-              <td data-label="Updated"><ReviewTime value={item.updatedAt} timeZone={timeZone} /></td>
-              <td className="cell-actions" data-label="Actions"><div className="review-actions">
-                {!item.allowedActions?.length && <span className="section-note">No actions available</span>}
-                {item.allowedActions?.includes("recheck") && <button className="btn btn-sm btn-primary" type="button" disabled={actionPending || !payload.actionsEnabled} aria-describedby={!payload.actionsEnabled ? "review-disabled-note" : undefined} onClick={(event) => void performAction(item, "recheck", event.currentTarget)}>Recheck restored file</button>}
-                {item.allowedActions?.includes("queue_retry") && <button className="btn btn-sm btn-secondary" type="button" disabled={actionPending || !payload.actionsEnabled} aria-describedby={!payload.actionsEnabled ? "review-disabled-note" : undefined} onClick={(event) => void performAction(item, "queue_retry", event.currentTarget)}>Queue manual retry</button>}
-                {item.allowedActions?.includes("dismiss") && <button className="btn btn-sm btn-danger" type="button" disabled={actionPending || !payload.actionsEnabled} aria-describedby={!payload.actionsEnabled ? "review-disabled-note" : undefined} onClick={(event) => void performAction(item, "dismiss", event.currentTarget)}>Dismiss</button>}
-              </div></td>
-            </tr>
-            <tr className="review-detail-row"><td colSpan={6}><ReviewDetails item={item} timeZone={timeZone} open={open} disabled={actionPending || !payload.actionsEnabled} onMutation={(pending, message) => {
-              mutationRef.current = pending; setActionPending(pending);
-              if (pending) { listAbortRef.current?.abort(); listAbortRef.current = null; }
-              else if (message) { setActionMessage(message); setActionError(false); void load(appliedRef.current, "foreground"); }
-            }} onToggle={(nextOpen) => setExpandedIds((current) => { const next = new Set(current); if (nextOpen) next.add(item.id); else next.delete(item.id); return next; })} /></td></tr>
-          </tbody>;
-        })}
-      </table></div>}
+          return <><header className="selected-media-header"><div><p className="eyebrow">{item.itemType === "episodes" ? `Season ${item.media?.seasonNumber ?? "—"} · Episode ${item.media?.episodeNumber ?? "—"}` : operatorLabel(item.itemType || "media")}</p><h2>{title}{item.media?.episodeCode ? ` · ${item.media.episodeCode}` : ""}</h2><p>{item.media?.episodeTitle || ""} · {item.sourceLanguage || "—"} → {item.targetLanguage || "—"}</p></div><ReviewTime value={item.updatedAt} timeZone={timeZone} /></header>
+            <div className="review-actions">
+              {item.allowedActions?.includes("recheck") && <button className="btn btn-sm btn-primary" disabled={actionPending || !payload.actionsEnabled} onClick={(event) => void performAction(item, "recheck", event.currentTarget)}>Recheck files</button>}
+              {item.allowedActions?.includes("queue_retry") && <button className="btn btn-sm btn-secondary" disabled={actionPending || !payload.actionsEnabled} onClick={(event) => void performAction(item, "queue_retry", event.currentTarget)}>Retry recovery</button>}
+              {item.allowedActions?.includes("dismiss") && <button className="btn btn-sm btn-danger" disabled={actionPending || !payload.actionsEnabled} onClick={(event) => void performAction(item, "dismiss", event.currentTarget)}>Ignore review</button>}
+              {item.allowedActions?.includes("reopen") && <button className="btn btn-sm btn-primary" disabled={actionPending || !payload.actionsEnabled} onClick={(event) => void performAction(item, "reopen", event.currentTarget)}>Reopen review</button>}
+            </div>
+            <ReviewDetails item={item} timeZone={timeZone} disabled={actionPending || !payload.actionsEnabled} onMutation={(pending, message) => { mutationRef.current = pending; setActionPending(pending); if (pending) { listAbortRef.current?.abort(); listAbortRef.current = null; } else if (message) { setActionMessage(message); setActionError(false); void load(appliedRef.current, "foreground"); } }} /></>;
+        })()}</section>
+      </div>}
       <nav className="review-pagination" aria-label="Manual review pages">
         <button className="btn btn-secondary" type="button" disabled={page <= 1 || foregroundLoading || actionPending} onClick={() => changePage(-1)}>Previous</button>
         <span>Page {page.toLocaleString()} · {total.toLocaleString()} records</span>

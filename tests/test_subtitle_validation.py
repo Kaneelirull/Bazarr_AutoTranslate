@@ -167,6 +167,27 @@ class SubtitleValidationTests(unittest.TestCase):
 
             self.assertTrue(report.valid, report.summary())
 
+    def test_exact_operator_cue_approval_removes_only_matching_text_findings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, target = root / "episode.en.srt", root / "episode.sv.srt"
+            text = "[leesie] oh. Gun, billie. This dialogue remains unchanged."
+            source.write_text(make_srt(text), encoding="utf-8")
+            target.write_text(make_srt(text), encoding="utf-8")
+            baseline = validate_subtitle_pair(source, target, self.detector,
+                target_language_for_code("sv"), target_lang="sv", min_chars=1)
+            self.assertIn("copied_source", {issue.rule for issue in baseline.issues})
+            cue = parse_srt_cues(source.read_text(encoding="utf-8"))[0][0]
+            approval = {"cueNumber": cue.number, "timestamp": cue.timestamp,
+                "sourceCueHash": hashlib.sha256(cue.text.encode("utf-8")).hexdigest(),
+                "targetCueHash": hashlib.sha256(cue.text.encode("utf-8")).hexdigest(),
+                "findings": ["copied_source"]}
+            approved = validate_subtitle_pair(source, target, self.detector,
+                target_language_for_code("sv"), target_lang="sv", min_chars=1,
+                approved_cue_findings=[approval])
+            self.assertNotIn("copied_source", {issue.rule for issue in approved.issues})
+            self.assertTrue(any(observation.evidence.get("operatorApproved") for observation in approved.observations))
+
     def test_one_kilobyte_movie_subtitle_is_undersized(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "movie.et.srt"

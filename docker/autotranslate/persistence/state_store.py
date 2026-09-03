@@ -13,6 +13,7 @@ from .manual_reviews import ManualReviewsRepositoryMixin
 from .maintenance_cache import MaintenanceCacheRepositoryMixin
 from .names import NamesRepositoryMixin
 from .publications import PublicationsRepositoryMixin
+from .cue_decisions import CueDecisionsRepositoryMixin
 
 
 class StateStore(
@@ -27,6 +28,7 @@ class StateStore(
     MaintenanceCacheRepositoryMixin,
     NamesRepositoryMixin,
     PublicationsRepositoryMixin,
+    CueDecisionsRepositoryMixin,
     DatabaseState,
 ):
     """Package-owned aggregate composed from focused SQLite repositories."""

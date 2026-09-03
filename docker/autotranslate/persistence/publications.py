@@ -57,9 +57,10 @@ class PublicationsRepositoryMixin:
 
     def recovery_policy_key(self, plan):
         snapshot = self.name_approval_snapshot(plan)
+        decisions = self.cue_decision_snapshot(plan)
         attempts = self.quarantine_attempts(plan['itemType'], plan['itemId'], plan['targetLanguage'])
         return json.dumps(['recovery-v2', self.validator_version, self.config_fingerprint,
-                           plan['sourceHash'], snapshot['scope'], snapshot['revision'], sorted((a['id'], a['targetHash']) for a in attempts)])
+                           plan['sourceHash'], snapshot['scope'], snapshot['revision'], decisions['revision'], sorted((a['id'], a['targetHash']) for a in attempts)])
 
     def hold_retry_for_review(self, plan_id, reason):
         plan = self.retry_plan(plan_id)

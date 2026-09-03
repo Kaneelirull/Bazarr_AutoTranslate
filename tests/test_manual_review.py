@@ -94,12 +94,12 @@ class ManualReviewTests(unittest.TestCase):
             reopened = self.make_store(root)
             try:
                 migrated = reopened.manual_review_plan(plan["id"])
-                self.assertEqual(SCHEMA_VERSION, 18)
+                self.assertEqual(SCHEMA_VERSION, 19)
                 self.assertEqual(migrated["state"], "regeneration_waiting")
                 self.assertEqual(migrated["lastDeferralClass"], "manual_review")
                 self.assertIsNone(migrated["finalOutcome"])
                 self.assertEqual(
-                    reopened._connection.execute("PRAGMA user_version").fetchone()[0], 18
+                    reopened._connection.execute("PRAGMA user_version").fetchone()[0], 19
                 )
                 self.assertIsNotNone(reopened._fetchone(
                     "SELECT name FROM sqlite_master WHERE type='table' "
@@ -107,6 +107,57 @@ class ManualReviewTests(unittest.TestCase):
                 ))
             finally:
                 reopened.close()
+
+    def test_schema_v19_saves_cue_decisions_and_finish_requires_all_cues(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self.make_store(root)
+            try:
+                plan = self.make_plan(store, root)
+                cue = {"cueNumber": 815, "timestamp": "00:32:46,501 --> 00:32:48,266",
+                       "sourceCueHash": "a" * 64, "targetCueHash": "b" * 64,
+                       "sourceText": "[leesie] oh. Gun, billie.", "targetText": "[leesie] Åh. Gun, Billie.",
+                       "rules": ["copied_source"]}
+                saved = store.save_cue_decision(plan["id"], plan["updatedAt"], 0, cue=cue,
+                                                decision="approve", remember_phrase=True)
+                snapshot = store.cue_decision_snapshot(saved)
+                self.assertEqual(snapshot["revision"], 1)
+                self.assertEqual(snapshot["approved"][0]["cueNumber"], 815)
+                with self.assertRaises(RuntimeError):
+                    store.finish_cue_review(plan["id"], saved["updatedAt"], 1, [815, 816], 9)
+                finished = store.finish_cue_review(plan["id"], saved["updatedAt"], 1, [815], 9)
+                self.assertIsNone(finished["lastDeferralClass"])
+                self.assertEqual(store.name_approval_snapshot(finished)["pairs"],
+                                 [["[leesie] oh. gun, billie.", "[leesie] åh. gun, billie."]])
+            finally:
+                store.close()
+
+    def test_ignored_review_can_be_reopened_without_queueing_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self.make_store(root)
+            try:
+                plan = self.make_plan(store, root)
+                candidate = root / "candidate.srt"
+                candidate.write_text("retained", encoding="utf-8")
+                publication_id = store.record_publication(target=root / "Top Gear S14E01.et.srt",
+                    candidate=candidate, candidate_hash=file_hash(candidate),
+                    source_path=root / "Top Gear S14E01.en.srt", source_hash=plan["sourceHash"],
+                    expected_target_hash=None, payload={})
+                store._connection.execute("UPDATE subtitle_publications SET state='manual_review' WHERE id=?", (publication_id,))
+                ignored = store.dismiss_manual_review(plan["id"], plan["updatedAt"])
+                self.assertEqual(store.publication_for_target(root / "Top Gear S14E01.et.srt")["state"], "manual_review")
+                source = root / "Top Gear S14E01.en.srt"
+                self.assertTrue(any(path.exists() and path.samefile(source) for path in store.protected_artifact_paths()))
+                reopened = store.reopen_manual_review(plan["id"], ignored["updatedAt"])
+                self.assertEqual(reopened["lastDeferralClass"], "manual_review")
+                self.assertEqual(reopened["state"], "regeneration_waiting")
+                self.assertEqual(store.manual_review_actions(plan["id"])[0]["action"], "reopen")
+                finished = store.finish_cue_review(plan["id"], reopened["updatedAt"], 0, [], 9)
+                self.assertEqual(store.publication_for_target(root / "Top Gear S14E01.et.srt")["state"], "pending")
+                self.assertIsNone(finished["lastDeferralClass"])
+            finally:
+                store.close()
 
     def test_repository_queue_is_atomic_stale_safe_and_does_not_increment(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1121,6 +1121,7 @@ def validate_subtitle_pair(
     max_expansion_chars: int = 300,
     max_source_similarity: float = 0.92,
     approved_name_pairs=(),
+    approved_cue_findings=(),
     approval_revision=0,
     approval_scope=None,
 ) -> ValidationReport:
@@ -1202,6 +1203,19 @@ def validate_subtitle_pair(
             context_confidence=context_confidence,
             approved_name_pairs=approved_name_pairs,
         )
+        approval = next((value for value in approved_cue_findings
+            if int(value.get("cueNumber", -1)) == source.number
+            and value.get("timestamp") == source.timestamp
+            and value.get("sourceCueHash") == hashlib.sha256(source.text.encode("utf-8")).hexdigest()
+            and value.get("targetCueHash") == hashlib.sha256(target.text.encode("utf-8")).hexdigest()), None)
+        if approval is not None:
+            accepted = set(approval.get("findings") or ())
+            cue_issues = [issue for issue in cue_issues if issue.rule not in accepted]
+            if accepted:
+                report.observations.append(ValidationObservation(
+                    "operator_approved", "Cue findings approved by operator.",
+                    {"operatorApproved": True, "rules": sorted(accepted)}, cue_index, target.number,
+                ))
         report.issues.extend(cue_issues)
         if observation is not None:
             report.observations.append(observation)

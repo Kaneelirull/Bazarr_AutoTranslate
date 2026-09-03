@@ -312,16 +312,16 @@ class ArtifactsRepositoryMixin:
             """
             SELECT source_path AS path FROM retry_plans
              WHERE state IN ('repair_retry_queued', 'regeneration_waiting',
-                             'regeneration_queued', 'retry_in_progress')
+                             'regeneration_queued', 'retry_in_progress', 'manual_dismissed')
             UNION SELECT target_path FROM retry_plans
              WHERE state IN ('repair_retry_queued', 'regeneration_waiting',
-                             'regeneration_queued', 'retry_in_progress')
+                             'regeneration_queued', 'retry_in_progress', 'manual_dismissed')
             UNION SELECT artifact_path FROM retry_plans
              WHERE state IN ('repair_retry_queued', 'regeneration_waiting',
-                             'regeneration_queued', 'retry_in_progress')
+                             'regeneration_queued', 'retry_in_progress', 'manual_dismissed')
             UNION SELECT report_path FROM retry_plans
              WHERE state IN ('repair_retry_queued', 'regeneration_waiting',
-                             'regeneration_queued', 'retry_in_progress')
+                             'regeneration_queued', 'retry_in_progress', 'manual_dismissed')
             """,
             """
             SELECT target_path AS path FROM subtitle_artifacts

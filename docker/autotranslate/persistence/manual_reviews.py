@@ -289,7 +289,7 @@ class ManualReviewsRepositoryMixin:
                 """,
                 (timestamp, int(plan_id)),
             )
-            db.execute("UPDATE subtitle_publications SET state='superseded',updated_at=? WHERE target_path=? AND state='manual_review'", (timestamp, original['target_path']))
+            # Keep retained publication candidates resumable while this review is ignored.
             self._insert_manual_action(
                 db, plan_id, "dismiss", "dismissed", "operator_dismissed",
                 {}, timestamp,

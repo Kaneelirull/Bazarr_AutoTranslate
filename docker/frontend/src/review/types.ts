@@ -1,13 +1,16 @@
-export type ReviewActionName = "recheck" | "queue_retry" | "dismiss" | "approve_name" | "revoke_name";
+export type ReviewActionName = "recheck" | "queue_retry" | "dismiss" | "approve_name" | "revoke_name" | "reopen";
 
 export type ReviewCue = {
   cueNumber: number; timestamp: string; sourceText: string; targetText: string;
-  targetCueHash: string; reason: string; rules: string[]; canApproveName: boolean;
+  sourceCueHash: string; targetCueHash: string; reason: string; rules: string[]; canApproveName: boolean; canApproveCue: boolean;
+  decision?: "approve" | "retry" | null; rememberPhrase?: boolean;
   context: Array<{ cueNumber: number; sourceText: string; targetText: string }>;
 };
 export type CueReviewPayload = {
   planId: number; expectedUpdatedAt: number; sourceHash: string; candidateHash: string;
   approvalRevision: number; scope: string; sourceLanguage: string; targetLanguage: string;
+  decisionRevision: number; decisionCounts: { approved: number; retry: number; undecided: number };
+  fileFindings?: Array<{ code: string; reason: string; action: string }>;
   items: ReviewCue[]; pagination: { page: number; pageSize: number; total: number };
   approvals: Array<{ id: number; sourceText: string; targetText: string }>;
   actionsEnabled: boolean;
@@ -37,6 +40,7 @@ export type ReviewItem = {
   id: number;
   itemId?: number;
   itemType?: string;
+  sourceLanguage?: string;
   targetLanguage?: string;
   status?: string;
   updatedAt: number;
@@ -59,7 +63,7 @@ export type ReviewItem = {
   artifactAvailabilityReason?: string;
   mediaAvailabilityReason?: string;
   allowedActions?: ReviewActionName[];
-  media?: { title?: string; episodeCode?: string; episodeTitle?: string };
+  media?: { title?: string; episodeCode?: string; episodeTitle?: string; seasonNumber?: number; episodeNumber?: number };
   recovery?: { validRecoveredCueCount?: number; unresolvedCueCount?: number; latestRecoveryStage?: string };
   validationFeedback?: Record<string, unknown> & { completeness?: Record<string, unknown>; validationResult?: string; outcome?: string; reasonCode?: string };
   actions?: ReviewHistory[];

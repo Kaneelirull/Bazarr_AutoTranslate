@@ -642,6 +642,33 @@ class MigrationsRepositoryMixin:
                     retry_plan_id INTEGER PRIMARY KEY REFERENCES retry_plans(id) ON DELETE CASCADE,
                     policy_key TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS manual_review_decision_scopes (
+                    retry_plan_id INTEGER PRIMARY KEY REFERENCES retry_plans(id) ON DELETE CASCADE,
+                    revision INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS manual_review_cue_decisions (
+                    id INTEGER PRIMARY KEY,
+                    retry_plan_id INTEGER NOT NULL REFERENCES retry_plans(id) ON DELETE CASCADE,
+                    cue_number INTEGER NOT NULL, timestamp TEXT NOT NULL,
+                    source_hash TEXT NOT NULL, candidate_hash TEXT NOT NULL,
+                    source_cue_hash TEXT NOT NULL, target_cue_hash TEXT NOT NULL,
+                    findings_json TEXT NOT NULL, decision TEXT NOT NULL,
+                    remember_phrase INTEGER NOT NULL DEFAULT 0,
+                    source_text TEXT NOT NULL, target_text TEXT NOT NULL,
+                    created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                    UNIQUE(retry_plan_id, cue_number)
+                );
+                CREATE INDEX IF NOT EXISTS idx_manual_review_cue_decisions_plan
+                    ON manual_review_cue_decisions(retry_plan_id, cue_number);
+                CREATE TABLE IF NOT EXISTS manual_review_action_requests (
+                    request_id TEXT PRIMARY KEY,
+                    retry_plan_id INTEGER NOT NULL REFERENCES retry_plans(id) ON DELETE CASCADE,
+                    action TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_manual_review_action_requests_plan
+                    ON manual_review_action_requests(retry_plan_id, created_at);
             """)
             self._migration_checkpoint("name_approvals_and_publications")
             migration_names = {
@@ -655,6 +682,7 @@ class MigrationsRepositoryMixin:
                 16: "atomic manual recovery and fair scan outbox",
                 17: "incremental parallel maintenance validation cache",
                 18: "durable publication and scoped name approvals",
+                19: "durable manual review cue decisions",
             }
             timestamp = time.time()
             for version, name in migration_names.items():

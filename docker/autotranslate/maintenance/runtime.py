@@ -206,8 +206,10 @@ def _maintenance_preflight(candidates: list) -> tuple[dict[str, object], set[str
         receipt_stat = MaintenanceFileStat.capture(receipt)
         identity = state.approval_identity_for_target(candidate.path)
         snapshot = state.name_approval_snapshot(identity)
+        decisions = state.cue_decision_snapshot(identity)
         dependencies = {
             'approvalRevision': snapshot['revision'], 'approvalScope': snapshot['scope'],
+            'decisionRevision': decisions['revision'],
             'source': source_stat.to_dict() if source_stat else None,
             'video': video_stat.to_dict() if video_stat else None,
             'receipt': receipt_stat.to_dict() if receipt_stat else None,
@@ -271,10 +273,12 @@ def _maintenance_cache_update(
         return None
     state = _runtime._get_validation_state()
     snapshot = state.name_approval_snapshot(state.approval_identity_for_target(target_path))
+    decisions = state.cue_decision_snapshot(state.approval_identity_for_target(target_path))
     if source_aligned and (getattr(report, 'approval_revision', 0) != snapshot['revision'] or getattr(report, 'approval_scope', snapshot['scope']) != snapshot['scope']):
         return None
     dependencies = {
         'approvalRevision': snapshot['revision'], 'approvalScope': snapshot['scope'],
+        'decisionRevision': decisions['revision'],
         'source': (stat.to_dict() if (stat := MaintenanceFileStat.capture(source_path)) else None),
         'video': (stat.to_dict() if (stat := MaintenanceFileStat.capture(video_path)) else None),
         'receipt': (stat.to_dict() if (stat := MaintenanceFileStat.capture(receipt_path)) else None),

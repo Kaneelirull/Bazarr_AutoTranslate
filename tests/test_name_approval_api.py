@@ -111,7 +111,7 @@ class NameApprovalApiTests(unittest.TestCase):
         self.store.close()
         self.store = StateStore(self.root/'state.sqlite3', validator_version='v', config_fingerprint='c')
         self.addCleanup(self.store.close)
-        self.assertEqual(self.store._fetchone('PRAGMA user_version')[0], 18)
+        self.assertEqual(self.store._fetchone('PRAGMA user_version')[0], 19)
         self.assertEqual(self.store.retry_plan(self.plan['id'])['lastDeferralClass'], 'manual_review')
         self.assertEqual(self.store._connection.execute('PRAGMA foreign_key_check').fetchall(), [])
         self.assertEqual(self.store.name_approval_snapshot(self.plan)['revision'], 0)
@@ -150,3 +150,25 @@ class NameApprovalApiTests(unittest.TestCase):
             stale.exception.close()
         finally:
             server.shutdown(); server.server_close(); thread.join(2)
+
+    def test_general_cue_decisions_accept_copied_prose_and_finish_atomically(self):
+        detail = self.service.review_cues(self.plan['id'], 1, 100)
+        self.assertEqual(detail['decisionRevision'], 0)
+        self.assertTrue(all(cue['canApproveCue'] for cue in detail['items']))
+        for cue in detail['items']:
+            payload = {**{key: detail[key] for key in ('expectedUpdatedAt','decisionRevision','sourceHash','candidateHash')},
+                       'action': 'approve_cue', 'cueNumber': cue['cueNumber'],
+                       'targetCueHash': cue['targetCueHash'], 'rememberPhrase': False,
+                       'requestId': f"approve-cue-request-{cue['cueNumber']}"}
+            status, result = self.service.perform_cue_action(self.plan['id'], payload)
+            self.assertEqual((status, result['outcome']), (200, 'saved'))
+            detail = self.service.review_cues(self.plan['id'], 1, 100)
+        self.assertEqual(detail['decisionCounts'], {'approved': 2, 'retry': 0, 'undecided': 0})
+        finish = {**{key: detail[key] for key in ('expectedUpdatedAt','decisionRevision','sourceHash','candidateHash')},
+                  'action': 'finish_review', 'requestId': 'finish-review-request-001'}
+        status, result = self.service.perform_cue_action(self.plan['id'], finish)
+        self.assertEqual((status, result['outcome']), (202, 'queued'))
+        replay_status, replay = self.service.perform_cue_action(self.plan['id'], finish)
+        self.assertEqual((replay_status, replay['outcome']), (202, 'queued'))
+        self.assertEqual(len([action for action in self.store.manual_review_actions(self.plan['id'])
+                              if action['action'] == 'finish_review']), 1)
