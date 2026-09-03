@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'docker'))
 from autotranslate.persistence.state_store import StateStore
 from autotranslate.persistence.common import StateStoreError
 from autotranslate.subtitles.foundation import file_sha256
+from autotranslate.subtitles import foundation
 from autotranslate.subtitles.publication import (
     retain_publication, publish_journaled, reconcile_publication_receipts, PublicationDeferred,
 )
@@ -20,6 +21,11 @@ from autotranslate.subtitles.publication import (
 
 class PublicationTests(unittest.TestCase):
     def setUp(self):
+        if os.name == 'posix':
+            # Keep real chown/chmod without requiring the TrueNAS service identity.
+            ownership = patch.multiple(foundation, MANAGED_FILE_UID=os.geteuid(), MANAGED_FILE_GID=os.getegid())
+            ownership.start()
+            self.addCleanup(ownership.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.store = StateStore(self.root / 'state.sqlite3', validator_version='v', config_fingerprint='c')
@@ -134,6 +140,9 @@ class PublicationTests(unittest.TestCase):
             row = self.retain()
             self.assertTrue(self.publish(row))
             self.assertEqual(file_sha256(self.target), row['candidate_hash'])
+            metadata = self.target.stat()
+            self.assertEqual((metadata.st_uid, metadata.st_gid), (os.geteuid(), os.getegid()))
+            self.assertEqual(metadata.st_mode & 0o777, foundation.MANAGED_FILE_MODE)
             self.assertEqual(list(self.target.parent.glob('.autotranslate-publish-*')), [])
 
 

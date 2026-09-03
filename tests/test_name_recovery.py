@@ -19,6 +19,7 @@ from autotranslate.persistence.state_store import StateStore
 from autotranslate.manual_review.runtime import build_manual_review_service
 from autotranslate.manual_review import ManualReviewConflict
 from autotranslate.subtitles.foundation import build_detector, file_sha256, VALIDATOR_VERSION
+from autotranslate.subtitles import foundation
 from autotranslate.subtitles.names import normalize_name_phrase, approved_name, name_scope
 from autotranslate.scheduling import runtime as scheduling
 
@@ -26,6 +27,13 @@ app = load_runtime(Config.from_env(), None)
 
 
 class NameRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        if os.name == 'posix':
+            # Recovery uses real filesystem permissions under an unprivileged runner.
+            ownership = patch.multiple(foundation, MANAGED_FILE_UID=os.geteuid(), MANAGED_FILE_GID=os.getegid())
+            ownership.start()
+            self.addCleanup(ownership.stop)
+
     def test_shutdown_retains_completed_cues_before_worker_returns(self):
         from autotranslate.subtitles.foundation import validate_subtitle_pair, target_language_for_code
         with tempfile.TemporaryDirectory() as directory:

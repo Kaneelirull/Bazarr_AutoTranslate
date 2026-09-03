@@ -64,6 +64,10 @@ class ServiceReliabilityTests(unittest.TestCase):
         self._state_directory.cleanup()
 
     def test_complementary_quarantine_attempts_recover_before_regeneration(self):
+        if os.name == "posix":
+            ownership = patch.multiple(subtitle_foundation, MANAGED_FILE_UID=os.geteuid(), MANAGED_FILE_GID=os.getegid())
+            ownership.start()
+            self.addCleanup(ownership.stop)
         root = Path(self._state_directory.name)
         source = root / "show.eng.srt"
         target = root / "show.et.srt"

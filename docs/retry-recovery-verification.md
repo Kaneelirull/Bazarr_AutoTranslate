@@ -11,6 +11,7 @@ The test-runner workflow was used for focused regressions, production scheduler 
 | Gate | Result |
 | --- | --- |
 | Complete Python suite in Linux | 360 tests passed, no skips (57.148 seconds) |
+| Complete Python suite as non-root Linux UID/GID 1001 | 360 tests passed, no skips (66.045 seconds), networking disabled |
 | TypeScript typecheck | Passed |
 | Frontend production build | Passed |
 | Vitest | 23 tests passed in 4 files |
@@ -32,6 +33,22 @@ The captured-example replay runs the real quarantine scheduler against a tempora
 Additional coverage includes stale-source, wrong-language, corrupted and mistimed donors; Swedish recovery with `CLEANUP_LANGUAGES=et`; unchanged external-library cleanup behavior; copied-prose rejection; spelling evidence; exact Unicode/whitespace normalization; item/series and both language boundaries; approval transaction rollback; source/candidate/revision conflicts; permanent approval/revocation audit history; cache invalidation; restart-stable holds; and saving accepted cue progress during cancellation. Existing migration tests plus a v17-to-v18 upgrade test check preserved plans, schema version and foreign-key integrity.
 
 UI tests cover explicit source/translation text, preserved line breaks, escaped markup, adjacent cues, unavailable candidates, disabled actions, stale evidence, keyboard approval, announced results and responsive layout. New comparison snapshots were inspected visually. Windows and Linux name-review baselines cover all four theme/viewport combinations. The mobile Manual Review baselines on both platforms were updated for the revised page description/footer; unrelated baselines continued to pass.
+
+CI follow-up found that the initial browser run updated only Windows snapshots.
+The six affected Linux baselines were generated with Playwright 1.55.1 on Ubuntu
+Noble, visually inspected, then verified without snapshot updates: all 20 checks
+passed (12.2 seconds). Snapshot paths include the operating system; updating
+Windows baselines does not update Linux CI expectations. Generate changed
+baselines on each supported platform with the locked Playwright version and
+always rerun without `--update-snapshots`.
+
+The next CI step exposed tests assuming root privileges to assign temporary
+files to TrueNAS UID/GID 568. Recovery test fixtures now use the effective test
+process UID/GID, preserving real `chown`, `chmod`, staging and rename operations.
+The separate-filesystem test verifies resulting ownership and mode. Production
+ownership remains 568:568, and ownership-contract and permission-failure tests
+remain active. The correction changes test setup only; final review found no
+production change or weakened filesystem-failure assertions.
 
 Local detailed logs are in `.test-logs/` (ignored generated artifacts), notably `completion-gate.log`, `name-api-final.log`, `publication-reviewed.log`, and `shutdown-recovery.log`.
 

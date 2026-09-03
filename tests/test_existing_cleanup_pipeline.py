@@ -376,6 +376,11 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             patch.object(module, "normalize_managed_file", lambda _path: None)
             for module in (cleanup, subtitle_foundation, subtitle_repair)
         ]
+        if os.name == "posix":
+            # The publication module keeps the real normalizer; use the test owner.
+            self._permissions_patchers.append(patch.multiple(
+                subtitle_foundation, MANAGED_FILE_UID=os.geteuid(), MANAGED_FILE_GID=os.getegid(),
+            ))
         for patcher in self._permissions_patchers:
             patcher.start()
 
