@@ -22,8 +22,10 @@ from .copied_source import (
     AMBIGUOUS,
     COPIED_PROSE,
     LIKELY_INVARIANT,
+    REVIEW_REQUIRED,
     assess_copied_source,
 )
+from .names import approved_name
 
 MANAGED_FILE_UID = 568
 MANAGED_FILE_GID = 568
@@ -160,6 +162,7 @@ REPAIRABLE_CUE_RULES = {
     "cue_too_long",
     "abnormal_expansion",
     "copied_source",
+    "ambiguous_copied_source",
     "unexpected_script",
     "excessive_lines",
 }
@@ -182,7 +185,7 @@ def classify_validation_failure(report: "ValidationReport") -> str:
         return "source_problem"
     return "whole_file"
 
-VALIDATOR_VERSION = "source-aware-v5-managed-language-validation"
+VALIDATOR_VERSION = "source-aware-v6-scoped-name-review"
 
 
 @dataclass
@@ -904,6 +907,7 @@ def _validate_cue_pair_assessed(
     cue_language_confidence: float | None = None,
     whole_target_confidence: float | None = None,
     context_confidence: float | None = None,
+    approved_name_pairs=(),
 ) -> tuple[list[ValidationIssue], ValidationObservation | None]:
     issues: list[ValidationIssue] = []
     observation: ValidationObservation | None = None
@@ -960,7 +964,11 @@ def _validate_cue_pair_assessed(
             whole_target_confidence=whole_target_confidence,
             context_confidence=context_confidence,
         )
-        if assessment is not None and assessment.outcome == COPIED_PROSE and repair_eligible:
+        if approved_name(source_text, target_text, approved_name_pairs):
+            observation = ValidationObservation(LIKELY_INVARIANT, "Exact name approved by operator.", {"operatorApproved": True}, cue_index, target.number)
+        elif assessment is not None and assessment.outcome == REVIEW_REQUIRED:
+            add("ambiguous_copied_source", "possible unchanged name needs review")
+        elif assessment is not None and assessment.outcome == COPIED_PROSE and repair_eligible:
             add("copied_source", f"translation matches source ({similarity:.0%} similar)")
         elif assessment is not None and assessment.outcome in (LIKELY_INVARIANT, AMBIGUOUS):
             observation = ValidationObservation(
@@ -999,6 +1007,7 @@ def validate_cue_pair(
     max_cyrillic_ratio: float = 0.05,
     max_cjk_ratio: float = 0.05,
     max_latin_ratio: float = 0.80,
+    approved_name_pairs=(),
 ) -> list[ValidationIssue]:
     """Validate one cue while preserving the historical issues-only interface."""
     issues, _observation = _validate_cue_pair_assessed(
@@ -1014,6 +1023,7 @@ def validate_cue_pair(
         max_cyrillic_ratio=max_cyrillic_ratio,
         max_cjk_ratio=max_cjk_ratio,
         max_latin_ratio=max_latin_ratio,
+        approved_name_pairs=approved_name_pairs,
     )
     return issues
 
@@ -1110,9 +1120,14 @@ def validate_subtitle_pair(
     max_expansion_ratio: float = 4.0,
     max_expansion_chars: int = 300,
     max_source_similarity: float = 0.92,
+    approved_name_pairs=(),
+    approval_revision=0,
+    approval_scope=None,
 ) -> ValidationReport:
     """Validate a translated SRT against its source and return cue-level findings."""
     report = ValidationReport()
+    report.approval_revision = approval_revision
+    report.approval_scope = approval_scope
     source_raw = read_text_best_effort(Path(source_path))
     target_raw = read_text_best_effort(Path(target_path))
     if source_raw is None:
@@ -1185,6 +1200,7 @@ def validate_subtitle_pair(
             cue_language_confidence=cue_language_confidence,
             whole_target_confidence=whole_target_confidence,
             context_confidence=context_confidence,
+            approved_name_pairs=approved_name_pairs,
         )
         report.issues.extend(cue_issues)
         if observation is not None:

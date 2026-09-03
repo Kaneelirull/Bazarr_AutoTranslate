@@ -610,6 +610,40 @@ class MigrationsRepositoryMixin:
                     "ALTER TABLE translation_attempts ADD COLUMN failure_details_json TEXT"
                 )
             self._migration_checkpoint("attempt_columns")
+            self._execute_migration_script(db, """
+                CREATE TABLE IF NOT EXISTS name_approval_scopes (
+                    scope TEXT NOT NULL, source_language TEXT NOT NULL, target_language TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(scope, source_language, target_language)
+                );
+                CREATE TABLE IF NOT EXISTS name_approvals (
+                    id INTEGER PRIMARY KEY, scope TEXT NOT NULL, source_language TEXT NOT NULL,
+                    target_language TEXT NOT NULL, source_normalized TEXT NOT NULL, target_normalized TEXT NOT NULL,
+                    source_text TEXT NOT NULL, target_text TEXT NOT NULL, plan_id INTEGER NOT NULL,
+                    cue_number INTEGER, source_hash TEXT NOT NULL, candidate_hash TEXT NOT NULL, created_at REAL NOT NULL, revoked_at REAL,
+                    UNIQUE(scope,source_language,target_language,source_normalized,target_normalized)
+                );
+                CREATE TABLE IF NOT EXISTS name_approval_events (
+                    id INTEGER PRIMARY KEY, approval_id INTEGER NOT NULL, action TEXT NOT NULL,
+                    scope TEXT NOT NULL, source_language TEXT NOT NULL, target_language TEXT NOT NULL,
+                    source_text TEXT NOT NULL, target_text TEXT NOT NULL, plan_id INTEGER NOT NULL,
+                    cue_number INTEGER, source_hash TEXT NOT NULL, candidate_hash TEXT NOT NULL, revision INTEGER NOT NULL, created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS subtitle_publications (
+                    id INTEGER PRIMARY KEY, target_path TEXT NOT NULL, candidate_path TEXT NOT NULL,
+                    candidate_hash TEXT NOT NULL, source_path TEXT, source_hash TEXT,
+                    expected_target_hash TEXT, payload_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+                    failure_count INTEGER NOT NULL DEFAULT 0, eligible_cycle INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT, stage_path TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_publication_active_target ON subtitle_publications(target_path)
+                    WHERE state IN ('pending','published','manual_review');
+                CREATE TABLE IF NOT EXISTS recovery_review_holds (
+                    retry_plan_id INTEGER PRIMARY KEY REFERENCES retry_plans(id) ON DELETE CASCADE,
+                    policy_key TEXT NOT NULL
+                );
+            """)
+            self._migration_checkpoint("name_approvals_and_publications")
             migration_names = {
                 9: "maintenance history and migration ledger",
                 10: "durable repairs and cue recovery",
@@ -620,6 +654,7 @@ class MigrationsRepositoryMixin:
                 15: "manual review actions and state normalization",
                 16: "atomic manual recovery and fair scan outbox",
                 17: "incremental parallel maintenance validation cache",
+                18: "durable publication and scoped name approvals",
             }
             timestamp = time.time()
             for version, name in migration_names.items():

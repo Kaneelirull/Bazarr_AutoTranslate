@@ -1,4 +1,18 @@
-export type ReviewActionName = "recheck" | "queue_retry" | "dismiss";
+export type ReviewActionName = "recheck" | "queue_retry" | "dismiss" | "approve_name" | "revoke_name";
+
+export type ReviewCue = {
+  cueNumber: number; timestamp: string; sourceText: string; targetText: string;
+  targetCueHash: string; reason: string; rules: string[]; canApproveName: boolean;
+  context: Array<{ cueNumber: number; sourceText: string; targetText: string }>;
+};
+export type CueReviewPayload = {
+  planId: number; expectedUpdatedAt: number; sourceHash: string; candidateHash: string;
+  approvalRevision: number; scope: string; sourceLanguage: string; targetLanguage: string;
+  items: ReviewCue[]; pagination: { page: number; pageSize: number; total: number };
+  approvals: Array<{ id: number; sourceText: string; targetText: string }>;
+  actionsEnabled: boolean;
+  candidateAvailable?: boolean; unavailableReason?: string | null;
+};
 
 export type ReviewFilters = {
   page: string;

@@ -463,6 +463,7 @@ class RetriesRepositoryMixin:
                 WHERE state = 'regeneration_waiting'
                   AND eligible_completed_cycle <= ?
                   AND COALESCE(last_deferral_class, '') <> 'manual_review'
+                  AND NOT EXISTS (SELECT 1 FROM subtitle_publications publication WHERE publication.target_path=retry_plans.target_path AND publication.state IN ('pending','published','manual_review'))
                 ORDER BY CASE WHEN last_admitted_cycle IS NULL THEN 0 ELSE 1 END,
                          last_admitted_cycle,
                          eligible_completed_cycle,
@@ -527,6 +528,7 @@ class RetriesRepositoryMixin:
             WHERE state = 'regeneration_waiting'
               AND eligible_completed_cycle <= ?
               AND COALESCE(last_deferral_class, '') <> 'manual_review'
+                  AND NOT EXISTS (SELECT 1 FROM subtitle_publications publication WHERE publication.target_path=retry_plans.target_path AND publication.state IN ('pending','published','manual_review'))
             """,
             (max(0, int(completed_cycle)),),
         )
@@ -561,6 +563,16 @@ class RetriesRepositoryMixin:
 
     def reactivate_changed_manual_reviews(self, config_fingerprint: str) -> int:
         """Reopen manual reviews when the active recovery configuration changed."""
+        changed = 0
+        with self._lock:
+            holds = self._connection.execute('SELECT * FROM recovery_review_holds').fetchall()
+        for hold in holds:
+            plan = self.retry_plan(hold['retry_plan_id'])
+            if plan and plan['state'] == 'regeneration_waiting' and plan.get('lastDeferralClass') == 'manual_review' and self.recovery_policy_key(plan) != hold['policy_key'] and not self.publication_for_target(plan.get('targetPath')):
+                with self._transaction() as db:
+                    db.execute("UPDATE retry_plans SET last_deferral_class=NULL, updated_at=? WHERE id=?", (time.time(), plan['id']))
+                    db.execute('DELETE FROM recovery_review_holds WHERE retry_plan_id=?', (plan['id'],))
+                    changed += 1
         with self._transaction() as db:
             cursor = db.execute(
                 """
@@ -569,6 +581,8 @@ class RetriesRepositoryMixin:
                     last_reason='recovery configuration changed', updated_at=?
                 WHERE state='regeneration_waiting'
                   AND last_deferral_class='manual_review'
+                  AND NOT EXISTS (SELECT 1 FROM recovery_review_holds h WHERE h.retry_plan_id=retry_plans.id)
+                  AND NOT EXISTS (SELECT 1 FROM subtitle_publications p WHERE p.target_path=retry_plans.target_path AND p.state IN ('pending','published','manual_review'))
                   AND NOT EXISTS (
                     SELECT 1 FROM failure_fingerprints failure
                     WHERE failure.item_type=retry_plans.item_type
@@ -580,7 +594,7 @@ class RetriesRepositoryMixin:
                 """,
                 (time.time(), str(config_fingerprint)),
             )
-            return max(0, int(cursor.rowcount))
+            return changed + max(0, int(cursor.rowcount))
 
     def retry_claims_with_submissions(self) -> list[dict]:
         with self._lock:

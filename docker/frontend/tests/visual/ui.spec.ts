@@ -65,6 +65,42 @@ test("manual review", async ({ page }) => {
   await screenshot(page, "manual-review");
 });
 
+test("name review comparisons and keyboard approval", async ({ page }, testInfo) => {
+  const source = "Alexandra Martin.\nA-L-E-X-A-N-D-R-A. <i>Original markup</i>";
+  const translated = "Alexandra Martin.\nA-L-E-X-A-N-D-R-A. <script>escaped markup</script>";
+  await page.route("**/api/manual-reviews/7/cues?**", (route) => route.fulfill({ json: {
+    planId: 7, expectedUpdatedAt: 1787053500, sourceHash: "a".repeat(64), candidateHash: "b".repeat(64),
+    approvalRevision: 2, scope: "sonarr:42", sourceLanguage: "en", targetLanguage: "et", candidateAvailable: true,
+    actionsEnabled: true, pagination: { page: 1, pageSize: 20, total: 1 }, approvals: [],
+    items: [{ cueNumber: 623, timestamp: "00:23:46,000 --> 00:23:48,000", sourceText: source, targetText: translated,
+      targetCueHash: "c".repeat(64), reason: "Possible unchanged name needs review.", rules: ["ambiguous_copied_source"], canApproveName: true,
+      context: [{ cueNumber: 622, sourceText: "An adjacent line with enough text to check wrapping and comparison across the two languages.", targetText: "Kõrval olev rida pikema tekstiga, et võrrelda ridu mõlemas keeles." }] }],
+  } }));
+  let request: Record<string, unknown> | undefined;
+  await page.route("**/api/manual-reviews/7/actions", async (route) => {
+    request = route.request().postDataJSON();
+    await route.fulfill({ json: { outcome: "queued" }, status: 202 });
+  });
+  await page.goto("/review");
+  await page.getByText("Recovery details", { exact: true }).first().click();
+  const comparison = page.locator(".cue-comparison").first();
+  await expect(comparison).toContainText(source);
+  await comparison.getByText("Adjacent cues", { exact: true }).click();
+  await expect(comparison.locator("script")).toHaveCount(0);
+  const columns = comparison.locator(".cue-text-grid").first().locator(":scope > div");
+  const left = await columns.nth(0).boundingBox();
+  const right = await columns.nth(1).boundingBox();
+  if (testInfo.project.name.startsWith("mobile")) expect(right!.y).toBeGreaterThan(left!.y);
+  else expect(right!.x).toBeGreaterThan(left!.x);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await screenshot(page, "name-review");
+  await comparison.getByRole("button", { name: "Accept as name and remember" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("Name remembered. Recovery is queued; the full file still needs validation.")).toBeVisible();
+  expect(request).toMatchObject({ action: "approve_name", approvalRevision: 2, cueNumber: 623 });
+  expect(request).not.toHaveProperty("sourceText");
+});
+
 test("logs", async ({ page }) => {
   await page.goto("/logs");
   await expect(page.getByText(/Cycle 42 started/)).toBeVisible();

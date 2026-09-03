@@ -26,6 +26,7 @@ def repair_subtitle_file(
     **validation_kwargs,
 ) -> RepairResult:
     """Repair only invalid aligned cues, then atomically replace the target after full validation."""
+    exhausted_strategies = {k: set(v) for k, v in (exhausted_strategies or {}).items()}
     initial_report = validate_subtitle_pair(
         source_path,
         target_path,
@@ -49,6 +50,7 @@ def repair_subtitle_file(
     target_cues, target_errors = parse_srt_cues(target_raw)
     if source_errors or target_errors:
         return RepairResult(False, [], initial_report, "source or target structure changed", 0, [])
+    source_file_hash = file_sha256(source_path)
 
     candidate_cues = [SubtitleCue(cue.number, cue.timestamp, list(cue.lines)) for cue in target_cues]
     repaired_numbers: list[int] = []
@@ -62,7 +64,7 @@ def repair_subtitle_file(
     exhausted_cue_numbers: set[int] = set()
 
     def interrupted_result() -> RepairResult:
-        """Return without rendering or publishing in-memory partial progress."""
+        """Return validated cue progress for coordinator persistence, without publishing."""
         return RepairResult(
             False,
             repaired_numbers,
@@ -71,8 +73,8 @@ def repair_subtitle_file(
             attempt_count,
             attempt_history,
             donor_history,
-            None,
-            [source_cues[index].number for index in cue_indexes],
+            render_srt_cues(candidate_cues),
+            [source_cues[index].number for index in cue_indexes if source_cues[index].number not in repaired_numbers],
             False,
             True,
         )
@@ -108,6 +110,7 @@ def repair_subtitle_file(
         "max_cyrillic_ratio",
         "max_cjk_ratio",
         "max_latin_ratio",
+        "approved_name_pairs",
     }
     cue_validation_kwargs = {
         key: value for key, value in validation_kwargs.items() if key in cue_validation_keys
@@ -120,11 +123,214 @@ def repair_subtitle_file(
         before = [cue.text for cue in source_cues[max(0, cue_index - context_lines):cue_index]]
         after = [cue.text for cue in source_cues[cue_index + 1:cue_index + 1 + context_lines]]
         accepted = False
+        provider_attempted = False
+        ambiguous = any(i.rule == "ambiguous_copied_source" and i.cue_index == cue_index for i in initial_report.issues)
         last_reason = "translator returned no usable text"
         failed_fingerprints: set[str] = set()
 
-        provider_attempted = False
-        for attempt in (range(max(1, max_attempts)) if provider_enabled else range(0)):
+        if not accepted and cue_recoveries:
+            signature = cue_source_signature(source_cue)
+            for recovery in cue_recoveries:
+                if recovery.get("sourceCueHash") != signature.get("sourceHash"):
+                    continue
+                text = recovery.get("targetText")
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                replacement = SubtitleCue(
+                    source_cue.number,
+                    source_cue.timestamp,
+                    [line.strip() for line in text.splitlines() if line.strip()],
+                )
+                issues = validate_cue_pair(
+                    source_cue,
+                    replacement,
+                    cue_index=cue_index,
+                    target_lang=target_lang,
+                    **cue_validation_kwargs,
+                )
+                if issues:
+                    if donor_event_logger is not None:
+                        donor_event_logger({
+                            "cueNumber": source_cue.number,
+                            "reasonCode": "current_validation_failed",
+                        })
+                    continue
+                candidate_cues[cue_index] = replacement
+                repaired_numbers.append(replacement.number)
+                donor_record = {
+                    "cueNumber": source_cue.number,
+                    "sourceRecoveryId": recovery.get("id"),
+                    "sourceAttemptId": recovery.get("sourceAttemptId"),
+                }
+                donor_history.append(donor_record)
+                if donor_event_logger is not None:
+                    donor_event_logger({**donor_record, "reasonCode": "selected"})
+                accepted = True
+                break
+
+        if (
+            not accepted
+            and not donor_attempts
+            and not cue_recoveries
+            and donor_event_logger is not None
+        ):
+            donor_event_logger({
+                "cueNumber": source_cue.number,
+                "reasonCode": "no_indexed_attempts",
+            })
+        if not accepted and donor_attempts:
+            current_signature = cue_source_signature(source_cue)
+            ranked: list[tuple[tuple, SubtitleCue, dict]] = []
+            for donor_attempt in donor_attempts:
+                reason = ('stale_source' if donor_attempt.get('sourceHash') != source_file_hash
+                          else 'wrong_language' if donor_attempt.get('targetLanguage') != target_lang else None)
+                if reason:
+                    if donor_event_logger is not None:
+                        donor_event_logger({'cueNumber': source_cue.number, 'donorAttemptId': donor_attempt.get('id'), 'reasonCode': reason})
+                    continue
+                artifact_path = donor_attempt.get("artifactPath")
+                signatures = donor_attempt.get("cueSignatures") or []
+                access = (
+                    artifact_access.hold(artifact_path)
+                    if artifact_access is not None and artifact_path
+                    else nullcontext()
+                )
+                with access:
+                    donor_raw = (
+                        read_text_best_effort(Path(artifact_path))
+                        if artifact_path else None
+                    )
+                    try:
+                        artifact_hash = (
+                            file_sha256(Path(artifact_path)) if artifact_path else None
+                        )
+                    except OSError:
+                        artifact_hash = None
+                if (
+                    donor_raw is None
+                    or not donor_attempt.get("targetHash")
+                    or artifact_hash != donor_attempt.get("targetHash")
+                ):
+                    if donor_event_logger is not None:
+                        donor_event_logger({
+                            "cueNumber": source_cue.number,
+                            "donorAttemptId": donor_attempt.get("id"),
+                            "reasonCode": "artifact_unavailable" if donor_raw is None else "hash_mismatch",
+                        })
+                    continue
+                donor_cues, donor_errors = parse_srt_cues(donor_raw)
+                if donor_errors or len(donor_cues) != len(signatures):
+                    if donor_event_logger is not None:
+                        donor_event_logger({
+                            "cueNumber": source_cue.number,
+                            "donorAttemptId": donor_attempt.get("id"),
+                            "reasonCode": "source_signature_mismatch",
+                        })
+                    continue
+                for donor_cue, signature in zip(donor_cues, signatures):
+                    current_tokens = current_signature["tokenHashes"]
+                    donor_tokens = signature.get("tokenHashes") or []
+                    similarity = SequenceMatcher(
+                        None, current_tokens, donor_tokens
+                    ).ratio()
+                    current_ms = current_signature.get("startMs")
+                    donor_ms = signature.get("startMs")
+                    if current_ms is None or donor_ms is None:
+                        continue
+                    actual_donor_ms = cue_source_signature(donor_cue)['startMs']
+                    timestamp_distance = max(abs(current_ms - int(donor_ms)), abs(current_ms - int(actual_donor_ms))) if actual_donor_ms is not None else donor_timestamp_tolerance_ms + 1
+                    if (
+                        similarity < donor_similarity
+                        or timestamp_distance > donor_timestamp_tolerance_ms
+                    ):
+                        if donor_event_logger is not None:
+                            donor_event_logger({
+                                "cueNumber": source_cue.number,
+                                "donorAttemptId": donor_attempt.get("id"),
+                                "reasonCode": (
+                                    "source_signature_mismatch"
+                                    if similarity < donor_similarity
+                                    else "timestamp_mismatch"
+                                ),
+                            })
+                        continue
+                    replacement = SubtitleCue(
+                        source_cue.number,
+                        source_cue.timestamp,
+                        list(donor_cue.lines),
+                    )
+                    issues = validate_cue_pair(
+                        source_cue,
+                        replacement,
+                        cue_index=cue_index,
+                        target_lang=target_lang,
+                        **cue_validation_kwargs,
+                    )
+                    if issues:
+                        if donor_event_logger is not None:
+                            donor_event_logger({
+                                "cueNumber": source_cue.number,
+                                "donorAttemptId": donor_attempt.get("id"),
+                                "reasonCode": "current_validation_failed",
+                            })
+                        continue
+                    exact = current_signature["sourceHash"] == signature.get("sourceHash")
+                    detected_language, detected_confidence = detect_language(
+                        detector, replacement.text
+                    )
+                    if (
+                        detected_language is not None
+                        and detected_language != target_language
+                        and detected_confidence >= 0.70
+                    ):
+                        if donor_event_logger is not None:
+                            donor_event_logger({
+                                "cueNumber": source_cue.number,
+                                "donorAttemptId": donor_attempt.get("id"),
+                                "reasonCode": "language_mismatch",
+                            })
+                        continue
+                    language_confidence = (
+                        detected_confidence
+                        if detected_language in (None, target_language) else 0.0
+                    )
+                    warnings = int(
+                        detected_language is not None
+                        and detected_language != target_language
+                    )
+                    expansion = abs(len(replacement.text) - len(source_cue.text))
+                    rank = (
+                        0 if exact else 1,
+                        -similarity,
+                        timestamp_distance,
+                        warnings,
+                        -language_confidence,
+                        expansion,
+                        -float(donor_attempt.get("createdAt") or 0),
+                        -int(donor_attempt.get("attemptNumber") or 0),
+                    )
+                    ranked.append((rank, replacement, donor_attempt))
+            if ranked:
+                _, replacement, donor_attempt = min(ranked, key=lambda entry: entry[0])
+                candidate_cues[cue_index] = replacement
+                repaired_numbers.append(replacement.number)
+                donor_record = {
+                    "cueNumber": source_cue.number,
+                    "sourceAttempt": donor_attempt.get("attemptNumber"),
+                    "sourceAttemptId": donor_attempt.get("id"),
+                }
+                donor_history.append(donor_record)
+                if donor_event_logger is not None:
+                    donor_event_logger({
+                        **donor_record,
+                        "donorAttemptId": donor_attempt.get("id"),
+                        "reasonCode": "selected",
+                    })
+                if attempt_logger is not None:
+                    attempt_logger({**donor_record, "event": "donor_accepted"})
+                accepted = True
+
+        for attempt in (range(max(1, max_attempts)) if provider_enabled and not accepted and not ambiguous else range(0)):
             if cancellation_requested is not None and cancellation_requested():
                 return interrupted_result()
             attempt_before = before if attempt == 0 else []
@@ -249,7 +455,9 @@ def repair_subtitle_file(
                 })
                 attempt_history.append(attempt_record)
                 if attempt_logger is not None:
-                    attempt_logger({**attempt_record, "event": "rejected"})
+                    occurrences = attempt_logger({**attempt_record, "event": "rejected"})
+                    if isinstance(occurrences, int) and occurrences >= 2:
+                        exhausted_strategies.setdefault(source_signature["sourceHash"], set()).add(strategy)
                 publish_progress(
                     stage="validating_candidate",
                     currentCueNumber=source_cue.number,
@@ -262,6 +470,9 @@ def repair_subtitle_file(
                     lastRequestDurationSeconds=attempt_record["durationSeconds"],
                 )
                 failed_fingerprints.add(output_fingerprint)
+                duplicates = sum(e.get("outputFingerprint") == output_fingerprint and e.get("strategy") == strategy for e in attempt_history)
+                if duplicates >= 2:
+                    exhausted_strategies.setdefault(source_signature["sourceHash"], set()).add(strategy)
                 continue
 
             candidate_cues[cue_index] = replacement
@@ -276,201 +487,6 @@ def repair_subtitle_file(
                 attempt_logger({**attempt_record, "event": "accepted"})
             accepted = True
             break
-
-        if not accepted and cue_recoveries:
-            signature = cue_source_signature(source_cue)
-            for recovery in cue_recoveries:
-                if recovery.get("sourceCueHash") != signature.get("sourceHash"):
-                    continue
-                text = recovery.get("targetText")
-                if not isinstance(text, str) or not text.strip():
-                    continue
-                replacement = SubtitleCue(
-                    source_cue.number,
-                    source_cue.timestamp,
-                    [line.strip() for line in text.splitlines() if line.strip()],
-                )
-                issues = validate_cue_pair(
-                    source_cue,
-                    replacement,
-                    cue_index=cue_index,
-                    target_lang=target_lang,
-                    **cue_validation_kwargs,
-                )
-                if issues:
-                    if donor_event_logger is not None:
-                        donor_event_logger({
-                            "cueNumber": source_cue.number,
-                            "reasonCode": "current_validation_failed",
-                        })
-                    continue
-                candidate_cues[cue_index] = replacement
-                repaired_numbers.append(replacement.number)
-                donor_record = {
-                    "cueNumber": source_cue.number,
-                    "sourceRecoveryId": recovery.get("id"),
-                    "sourceAttemptId": recovery.get("sourceAttemptId"),
-                }
-                donor_history.append(donor_record)
-                if donor_event_logger is not None:
-                    donor_event_logger({**donor_record, "reasonCode": "selected"})
-                accepted = True
-                break
-
-        if (
-            not accepted
-            and not donor_attempts
-            and not cue_recoveries
-            and donor_event_logger is not None
-        ):
-            donor_event_logger({
-                "cueNumber": source_cue.number,
-                "reasonCode": "no_indexed_attempts",
-            })
-        if not accepted and donor_attempts:
-            current_signature = cue_source_signature(source_cue)
-            ranked: list[tuple[tuple, SubtitleCue, dict]] = []
-            for donor_attempt in donor_attempts:
-                artifact_path = donor_attempt.get("artifactPath")
-                signatures = donor_attempt.get("cueSignatures") or []
-                access = (
-                    artifact_access.hold(artifact_path)
-                    if artifact_access is not None and artifact_path
-                    else nullcontext()
-                )
-                with access:
-                    donor_raw = (
-                        read_text_best_effort(Path(artifact_path))
-                        if artifact_path else None
-                    )
-                    try:
-                        artifact_hash = (
-                            file_sha256(Path(artifact_path)) if artifact_path else None
-                        )
-                    except OSError:
-                        artifact_hash = None
-                if (
-                    donor_raw is None
-                    or not donor_attempt.get("targetHash")
-                    or artifact_hash != donor_attempt.get("targetHash")
-                ):
-                    if donor_event_logger is not None:
-                        donor_event_logger({
-                            "cueNumber": source_cue.number,
-                            "donorAttemptId": donor_attempt.get("id"),
-                            "reasonCode": "artifact_unavailable" if donor_raw is None else "hash_mismatch",
-                        })
-                    continue
-                donor_cues, donor_errors = parse_srt_cues(donor_raw)
-                if donor_errors or len(donor_cues) != len(signatures):
-                    if donor_event_logger is not None:
-                        donor_event_logger({
-                            "cueNumber": source_cue.number,
-                            "donorAttemptId": donor_attempt.get("id"),
-                            "reasonCode": "source_signature_mismatch",
-                        })
-                    continue
-                for donor_cue, signature in zip(donor_cues, signatures):
-                    current_tokens = current_signature["tokenHashes"]
-                    donor_tokens = signature.get("tokenHashes") or []
-                    similarity = SequenceMatcher(
-                        None, current_tokens, donor_tokens
-                    ).ratio()
-                    current_ms = current_signature.get("startMs")
-                    donor_ms = signature.get("startMs")
-                    if current_ms is None or donor_ms is None:
-                        continue
-                    timestamp_distance = abs(current_ms - int(donor_ms))
-                    if (
-                        similarity < donor_similarity
-                        or timestamp_distance > donor_timestamp_tolerance_ms
-                    ):
-                        if donor_event_logger is not None:
-                            donor_event_logger({
-                                "cueNumber": source_cue.number,
-                                "donorAttemptId": donor_attempt.get("id"),
-                                "reasonCode": (
-                                    "source_signature_mismatch"
-                                    if similarity < donor_similarity
-                                    else "timestamp_mismatch"
-                                ),
-                            })
-                        continue
-                    replacement = SubtitleCue(
-                        source_cue.number,
-                        source_cue.timestamp,
-                        list(donor_cue.lines),
-                    )
-                    issues = validate_cue_pair(
-                        source_cue,
-                        replacement,
-                        cue_index=cue_index,
-                        target_lang=target_lang,
-                        **cue_validation_kwargs,
-                    )
-                    if issues:
-                        if donor_event_logger is not None:
-                            donor_event_logger({
-                                "cueNumber": source_cue.number,
-                                "donorAttemptId": donor_attempt.get("id"),
-                                "reasonCode": "current_validation_failed",
-                            })
-                        continue
-                    exact = current_signature["sourceHash"] == signature.get("sourceHash")
-                    detected_language, detected_confidence = detect_language(
-                        detector, replacement.text
-                    )
-                    if (
-                        detected_language is not None
-                        and detected_language != target_language
-                        and detected_confidence >= 0.70
-                    ):
-                        if donor_event_logger is not None:
-                            donor_event_logger({
-                                "cueNumber": source_cue.number,
-                                "donorAttemptId": donor_attempt.get("id"),
-                                "reasonCode": "language_mismatch",
-                            })
-                        continue
-                    language_confidence = (
-                        detected_confidence
-                        if detected_language in (None, target_language) else 0.0
-                    )
-                    warnings = int(
-                        detected_language is not None
-                        and detected_language != target_language
-                    )
-                    expansion = abs(len(replacement.text) - len(source_cue.text))
-                    rank = (
-                        0 if exact else 1,
-                        -similarity,
-                        timestamp_distance,
-                        warnings,
-                        -language_confidence,
-                        expansion,
-                        -float(donor_attempt.get("createdAt") or 0),
-                        -int(donor_attempt.get("attemptNumber") or 0),
-                    )
-                    ranked.append((rank, replacement, donor_attempt))
-            if ranked:
-                _, replacement, donor_attempt = min(ranked, key=lambda entry: entry[0])
-                candidate_cues[cue_index] = replacement
-                repaired_numbers.append(replacement.number)
-                donor_record = {
-                    "cueNumber": source_cue.number,
-                    "sourceAttempt": donor_attempt.get("attemptNumber"),
-                    "sourceAttemptId": donor_attempt.get("id"),
-                }
-                donor_history.append(donor_record)
-                if donor_event_logger is not None:
-                    donor_event_logger({
-                        **donor_record,
-                        "donorAttemptId": donor_attempt.get("id"),
-                        "reasonCode": "selected",
-                    })
-                if attempt_logger is not None:
-                    attempt_logger({**donor_record, "event": "donor_accepted"})
-                accepted = True
 
         if not accepted:
             if not provider_attempted:
@@ -528,10 +544,7 @@ def repair_subtitle_file(
             donor_history,
             partial_raw,
             [cue_number for cue_number, _reason in unresolved_cues],
-            bool(unresolved_cues) and all(
-                cue_number in exhausted_cue_numbers
-                for cue_number, _reason in unresolved_cues
-            ),
+            bool(unresolved_cues) and (provider_enabled or any(i.rule == "ambiguous_copied_source" for i in partial_report.issues)),
         )
 
     newline = "\r\n" if "\r\n" in target_raw else "\n"

@@ -65,6 +65,8 @@ class ValidationTask:
     completeness_kwargs: dict = field(default_factory=dict)
     undersized_enabled: bool = True
     ffprobe_timeout: int = 15
+    approval_revision: int = 0
+    approval_scope: str | None = None
 
 
 @dataclass
@@ -82,6 +84,8 @@ class ValidationResult:
     completeness: object | None = None
     validation_mode: str = "target-only"
     worker_pid: int = 0
+    approval_revision: int = 0
+    approval_scope: str | None = None
     cue_count: int | None = None
     error: str | None = None
 
@@ -137,6 +141,8 @@ def analyze_validation_task(task: ValidationTask) -> ValidationResult:
         receipt_stat=receipt_stat,
         validation_mode="source-aware" if task.source_aligned else "target-only",
         worker_pid=os.getpid(),
+        approval_revision=task.approval_revision,
+        approval_scope=task.approval_scope,
     )
     if target_stat is None:
         result.error = "target_unavailable"

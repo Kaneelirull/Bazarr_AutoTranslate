@@ -7,6 +7,7 @@ import re
 COPIED_PROSE = "copied_prose"
 LIKELY_INVARIANT = "likely_invariant"
 AMBIGUOUS = "ambiguous"
+REVIEW_REQUIRED = "review_required"
 
 _TOKEN_RE = re.compile(r"[^\W_]+(?:-[^\W_]+)*", re.UNICODE)
 _URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)\S+|\b\S+\.(?:com|org|net|io|tv)\b")
@@ -173,6 +174,19 @@ def assess_copied_source(
             "Copy contains English prose markers.",
             evidence,
         )
+    # A spelling is objective evidence only if its letters agree with the name.
+    spelling = re.search(r"\b([A-Za-z](?:[- ][A-Za-z]){2,})[.!?]*$", target.strip())
+    if exact and spelling:
+        letters = re.sub(r"[^A-Za-z]", "", spelling.group(1)).casefold()
+        prefix = _TOKEN_RE.findall(target[:spelling.start()])
+        if prefix and prefix[-1].casefold() == letters:
+            return CopiedSourceAssessment(LIKELY_INVARIANT, "Name agrees with its letter-by-letter spelling.", evidence)
+    target_tokens = _TOKEN_RE.findall(re.sub(r"<[^>]+>", " ", target))
+    target_entities = target_tokens and all(
+        _is_entity_token(token) or token.casefold() in _NAME_PARTICLES for token in target_tokens
+    )
+    if repair_eligible and exact and not entity_shaped and 2 <= len(target_tokens) <= 6 and target_entities:
+        return CopiedSourceAssessment(REVIEW_REQUIRED, "Possible unchanged name needs operator confirmation.", evidence)
     if expanded_candidate:
         if objective_invariant:
             return CopiedSourceAssessment(
@@ -181,8 +195,8 @@ def assess_copied_source(
                 evidence,
             )
         return CopiedSourceAssessment(
-            AMBIGUOUS,
-            "Exact Title Case copy retained by the balanced policy.",
+            REVIEW_REQUIRED if repair_eligible else AMBIGUOUS,
+            "Possible unchanged name; review required when the copied-cue threshold is met.",
             evidence,
         )
     if objective_invariant and repair_eligible:

@@ -625,6 +625,12 @@ h3 {
   font-size: 13px;
 }
 
+.cue-review { margin-block: var(--space-4, 1rem); }
+.cue-comparison { padding: var(--space-4, 1rem); margin-block: var(--space-3, .75rem); border: 1px solid var(--border-subtle); border-radius: var(--radius-md, 8px); }
+.cue-text-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-4, 1rem); }
+.cue-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.cue-scope { color: var(--text-secondary); }
+@media (max-width: 640px) { .cue-text-grid { grid-template-columns: minmax(0, 1fr); } }
 .review-detail-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

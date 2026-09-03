@@ -251,7 +251,7 @@ class ManualReviewsRepositoryMixin:
     ) -> dict:
         timestamp = time.time()
         with self._transaction() as db:
-            self._manual_row_for_update(db, plan_id, expected_updated_at)
+            original = self._manual_row_for_update(db, plan_id, expected_updated_at)
             db.execute(
                 """
                 UPDATE retry_plans SET state='regeneration_waiting',
@@ -263,6 +263,8 @@ class ManualReviewsRepositoryMixin:
                 """,
                 (max(0, int(completed_cycle)), timestamp, int(plan_id)),
             )
+            db.execute("UPDATE subtitle_publications SET state='pending',failure_count=0,eligible_cycle=?,updated_at=? WHERE target_path=? AND state='manual_review'", (completed_cycle, timestamp, original['target_path']))
+            db.execute("DELETE FROM recovery_review_holds WHERE retry_plan_id=?", (plan_id,))
             self._insert_manual_action(
                 db, plan_id, "queue_retry", "queued", "operator_authorized",
                 {"eligibleCompletedCycle": max(0, int(completed_cycle))}, timestamp,
@@ -275,7 +277,7 @@ class ManualReviewsRepositoryMixin:
     ) -> dict:
         timestamp = time.time()
         with self._transaction() as db:
-            self._manual_row_for_update(db, plan_id, expected_updated_at)
+            original = self._manual_row_for_update(db, plan_id, expected_updated_at)
             db.execute(
                 """
                 UPDATE retry_plans SET state='manual_dismissed',
@@ -287,6 +289,7 @@ class ManualReviewsRepositoryMixin:
                 """,
                 (timestamp, int(plan_id)),
             )
+            db.execute("UPDATE subtitle_publications SET state='superseded',updated_at=? WHERE target_path=? AND state='manual_review'", (timestamp, original['target_path']))
             self._insert_manual_action(
                 db, plan_id, "dismiss", "dismissed", "operator_dismissed",
                 {}, timestamp,

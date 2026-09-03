@@ -334,6 +334,7 @@ class AdaptiveTranslationTests(unittest.TestCase):
                 "missing_subtitles": [{"code2": "et"}],
             }
             state = Mock()
+            state.publication_for_target.return_value = None
             state.circuit_permission.side_effect = [
                 {"allowed": True, "state": "closed", "failures": 0},
                 {"allowed": True, "state": "closed", "failures": 0},

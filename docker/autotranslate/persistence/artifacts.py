@@ -301,6 +301,8 @@ class ArtifactsRepositoryMixin:
     def protected_artifact_paths(self) -> set[Path]:
         """Paths retention must preserve for nonterminal durable work."""
         queries = (
+            """SELECT candidate_path AS path FROM subtitle_publications WHERE state IN ('pending','published','manual_review')
+               UNION SELECT source_path FROM subtitle_publications WHERE state IN ('pending','published','manual_review')""",
             """
             SELECT source_path AS path FROM repair_jobs
              WHERE state IN ('queued', 'active', 'persisted_for_restart')
@@ -785,6 +787,7 @@ class ArtifactsRepositoryMixin:
             entry
             and entry.get("validatorVersion") == self.validator_version
             and entry.get("result") in ("valid", "valid_with_warnings")
+            and self.approval_cache_matches(entry.get("details") or {}, self.approval_identity_for_target(target_path))
             and (
                 (
                     entry.get("origin") == "lingarr"
@@ -802,6 +805,7 @@ class ArtifactsRepositoryMixin:
             not entry
             or entry.get("validatorVersion") != self.validator_version
             or entry.get("result") not in ("valid", "valid_with_warnings")
+            or not self.approval_cache_matches(entry.get("details") or {}, self.approval_identity_for_target(target_path))
         ):
             return None
         details = entry.get("details")

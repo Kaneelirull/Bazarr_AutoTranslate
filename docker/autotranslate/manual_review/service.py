@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
+from .cues import CueReviewMixin
 
 
 class ManualReviewNotFound(LookupError):
@@ -55,7 +56,7 @@ _WINDOWS_PATH_RE = re.compile(r"(?i)\b[A-Z]:[\\/][^\r\n,;]+")
 _UNIX_PATH_RE = re.compile(r"(?<!\w)/(?:media|config)/[^\s,;]+")
 _SECRET_RE = re.compile(r"(?i)(api[-_ ]?key|authorization)(\s*[:=]\s*)\S+")
 _SAFE_CODE_RE = re.compile(r"[a-z][a-z0-9_:-]{0,79}")
-_SAFE_ACTIONS = {"recheck", "queue_retry", "dismiss", "bazarr_scan"}
+_SAFE_ACTIONS = {"recheck", "queue_retry", "dismiss", "bazarr_scan", "approve_name", "revoke_name"}
 _SAFE_OUTCOMES = {"invalid", "resolved", "queued", "dismissed", "pending", "failed", "dispatched"}
 _SAFE_DETAIL_KEYS = {
     "validationResult", "validationMode", "issueRules", "observationCount",
@@ -137,7 +138,7 @@ def _safe_text(value: object, limit: int = 500) -> str:
     return text[:limit]
 
 
-class ManualReviewService:
+class ManualReviewService(CueReviewMixin):
     """Operator-facing recovery workflow with no HTTP or runtime-global coupling."""
 
     def __init__(
@@ -158,6 +159,7 @@ class ManualReviewService:
         actions_enabled: bool = True,
         hash_file: Callable[[Path], str | None] = _hash_file,
         emit: Callable[[str], None] = lambda _message: None,
+        inspect_cues=None,
     ) -> None:
         self.repository = repository
         roots = [Path(root).resolve(strict=False) for root in managed_roots]
@@ -176,6 +178,7 @@ class ManualReviewService:
         self.actions_enabled = bool(actions_enabled)
         self.hash_file = hash_file
         self.emit = emit
+        self.inspect_cues = inspect_cues
 
     def _default_validation_record(
         self, plan: dict, result: RecheckResult,
@@ -466,7 +469,7 @@ class ManualReviewService:
             self.artifact_access.hold(source, target, artifact, media)
             if self.artifact_access is not None else nullcontext()
         )
-        with access:
+        with access, (self.repository.approval_guard() if hasattr(self.repository, "approval_guard") else nullcontext()):
             if target is None or not target.is_file():
                 try:
                     current = self.repository.record_manual_recheck(

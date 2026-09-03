@@ -350,6 +350,9 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
             print(f"{_runtime.YELLOW}[SKIP] {title} '{target_lang}': could not derive target path{_runtime.RESET}")
             _runtime._status_transition(item_type, item_id, target_lang, 'deferred', reason='target path unavailable')
             continue
+        if _runtime._get_validation_state().publication_for_target(target_path):
+            _runtime._status_transition(item_type, item_id, target_lang, 'deferred', reason='recovery publication pending')
+            continue
         from .subtitles.sources import lingarr_output_candidates
         provider_candidates = [
             str(path) for path in lingarr_output_candidates(
