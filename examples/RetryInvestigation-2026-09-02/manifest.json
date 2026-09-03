@@ -1,0 +1,406 @@
+{
+  "capturedAt": "2026-09-02T19:39:10.496259+00:00",
+  "selection": "Five entries chosen with PowerShell Get-Random -Count 5 from the ten screenshot rows; all target sv.",
+  "files": [
+    {
+      "remotePath": "/media/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E04 - Severed Head Showcase [WEBDL-1080p][EAC3 5.1][h264]-FLUX.en.hi.srt",
+      "localPath": "Key-Peele-S05E04/source.en.srt",
+      "expectedHash": "98433ce3a08c01b66d24f2f87bfd189876a5b72493f568c81dd9eb0ec976283e",
+      "sha256": "98433ce3a08c01b66d24f2f87bfd189876a5b72493f568c81dd9eb0ec976283e",
+      "bytes": 25027,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/media/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E04 - Severed Head Showcase [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.srt",
+      "localPath": "Key-Peele-S05E04/current.sv.srt",
+      "expectedHash": null,
+      "error": "[Errno 2] No such file or directory: '\\\\\\\\BIGBOI-TRUENAS\\\\media\\\\_Shows\\\\Key & Peele (2012) [tvdbid-255325]\\\\Season 05\\\\Key & Peele (2012) - S05E04 - Severed Head Showcase [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.srt'"
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E04 - Severed Head Showcase [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.srt",
+      "localPath": "Key-Peele-S05E04/attempt-01-id-49.sv.srt",
+      "expectedHash": "4bcf6543acb766db34d8c427deeb4d6e1b106b2e3fd033d6f8a9bcfe2a13e49d",
+      "sha256": "4bcf6543acb766db34d8c427deeb4d6e1b106b2e3fd033d6f8a9bcfe2a13e49d",
+      "bytes": 26657,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E04 - Severed Head Showcase [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.srt.validation.json",
+      "localPath": "Key-Peele-S05E04/attempt-01-id-49.validation.json",
+      "expectedHash": null,
+      "sha256": "eb1247a25cc0402d7752f0625997ba0510cc1402b39fdb21dd5974293b315166",
+      "bytes": 2706
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E04 - Severed Head Showcase [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.1.srt",
+      "localPath": "Key-Peele-S05E04/attempt-02-id-61.sv.srt",
+      "expectedHash": "a2721b13df6fd509b6c54e512814a540c494de582a1ff2c7abecc54868fd30f9",
+      "sha256": "a2721b13df6fd509b6c54e512814a540c494de582a1ff2c7abecc54868fd30f9",
+      "bytes": 26760,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E04 - Severed Head Showcase [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.1.srt.validation.json",
+      "localPath": "Key-Peele-S05E04/attempt-02-id-61.validation.json",
+      "expectedHash": null,
+      "sha256": "767cff8fb9f6d54a831cb7ea11e8aca651adb46be0d4c658e12886b21056c35a",
+      "bytes": 2917
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E04 - Severed Head Showcase [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.2.srt",
+      "localPath": "Key-Peele-S05E04/attempt-03-id-91.sv.srt",
+      "expectedHash": "a9443bea3b757ed7d1007dcda58299621f8698a0b93c9e14778276f6c1c37545",
+      "sha256": "a9443bea3b757ed7d1007dcda58299621f8698a0b93c9e14778276f6c1c37545",
+      "bytes": 27098,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E04 - Severed Head Showcase [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.2.srt.validation.json",
+      "localPath": "Key-Peele-S05E04/attempt-03-id-91.validation.json",
+      "expectedHash": null,
+      "sha256": "a6f8e56add54df2e5b11b8fa2f3b45b6745c94240b568747f692b29242dbfcf0",
+      "bytes": 3043
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E04 - Severed Head Showcase [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.3.srt",
+      "localPath": "Key-Peele-S05E04/attempt-04-id-102.sv.srt",
+      "expectedHash": "e21e6c5f4b5dbcb4ef8817102ade2dbe482ac8a279f5b7d89a8156ec8dc54e49",
+      "sha256": "e21e6c5f4b5dbcb4ef8817102ade2dbe482ac8a279f5b7d89a8156ec8dc54e49",
+      "bytes": 26817,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E04 - Severed Head Showcase [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.3.srt.validation.json",
+      "localPath": "Key-Peele-S05E04/attempt-04-id-102.validation.json",
+      "expectedHash": null,
+      "sha256": "a7c8502c755c9120af9b0f848481041436c2542b7304dee3b70e89e0717f5715",
+      "bytes": 2917
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E04 - Severed Head Showcase [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.4.srt",
+      "localPath": "Key-Peele-S05E04/attempt-05-id-114.sv.srt",
+      "expectedHash": "3ca45750939dd834da9cb53552bda8b4d88d603107be25ec1b60e7c2571c5470",
+      "sha256": "3ca45750939dd834da9cb53552bda8b4d88d603107be25ec1b60e7c2571c5470",
+      "bytes": 26665,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E04 - Severed Head Showcase [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.4.srt.validation.json",
+      "localPath": "Key-Peele-S05E04/attempt-05-id-114.validation.json",
+      "expectedHash": null,
+      "sha256": "158862d856b9e7fe82dad9a7f6af05db518a7bfd2de75941179014e3f0852048",
+      "bytes": 2794
+    },
+    {
+      "remotePath": "/media/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E10 - Meegan and Andre Break Up [WEBDL-1080p][EAC3 5.1][h264]-FLUX.en.hi.srt",
+      "localPath": "Key-Peele-S05E10/source.en.srt",
+      "expectedHash": "80308b00ccdf6dd53411e9ec1245d7ca4a065ebd2d130d893d11f9b4baaae566",
+      "sha256": "80308b00ccdf6dd53411e9ec1245d7ca4a065ebd2d130d893d11f9b4baaae566",
+      "bytes": 36372,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/media/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E10 - Meegan and Andre Break Up [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.srt",
+      "localPath": "Key-Peele-S05E10/current.sv.srt",
+      "expectedHash": null,
+      "error": "[Errno 2] No such file or directory: '\\\\\\\\BIGBOI-TRUENAS\\\\media\\\\_Shows\\\\Key & Peele (2012) [tvdbid-255325]\\\\Season 05\\\\Key & Peele (2012) - S05E10 - Meegan and Andre Break Up [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.srt'"
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E10 - Meegan and Andre Break Up [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.srt",
+      "localPath": "Key-Peele-S05E10/attempt-01-id-50.sv.srt",
+      "expectedHash": "94054d4f593426bcdab9cc704b5522d90e49f452f494ec3efedc6b9570c5ad09",
+      "sha256": "94054d4f593426bcdab9cc704b5522d90e49f452f494ec3efedc6b9570c5ad09",
+      "bytes": 38816,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E10 - Meegan and Andre Break Up [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.srt.validation.json",
+      "localPath": "Key-Peele-S05E10/attempt-01-id-50.validation.json",
+      "expectedHash": null,
+      "sha256": "e09325c002493d0f0ef20d7fbb1c33c7b47248acf7c4a4a3b566d7b25aaa03dc",
+      "bytes": 4076
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E10 - Meegan and Andre Break Up [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.1.srt",
+      "localPath": "Key-Peele-S05E10/attempt-02-id-81.sv.srt",
+      "expectedHash": "0c5c0e14faef37062216e455e1d14a31b84ad2b9421240aee235afa2e76cbddf",
+      "sha256": "0c5c0e14faef37062216e455e1d14a31b84ad2b9421240aee235afa2e76cbddf",
+      "bytes": 38477,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E10 - Meegan and Andre Break Up [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.1.srt.validation.json",
+      "localPath": "Key-Peele-S05E10/attempt-02-id-81.validation.json",
+      "expectedHash": null,
+      "sha256": "b98738acee9bff2933c0f5dcb6b0512715bb8d3831f3b0742536f26167ac589e",
+      "bytes": 2788
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E10 - Meegan and Andre Break Up [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.2.srt",
+      "localPath": "Key-Peele-S05E10/attempt-03-id-98.sv.srt",
+      "expectedHash": "7665b4033ec56442fdc3f8d7715ce127eac66dc442085848488d1666d78ec16f",
+      "sha256": "7665b4033ec56442fdc3f8d7715ce127eac66dc442085848488d1666d78ec16f",
+      "bytes": 39033,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E10 - Meegan and Andre Break Up [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.2.srt.validation.json",
+      "localPath": "Key-Peele-S05E10/attempt-03-id-98.validation.json",
+      "expectedHash": null,
+      "sha256": "58af276e7d98a39527d7248a5827c19aaa0e8a892a46e87be3816dfbdfbd08dd",
+      "bytes": 4136
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E10 - Meegan and Andre Break Up [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.3.srt",
+      "localPath": "Key-Peele-S05E10/attempt-04-id-108.sv.srt",
+      "expectedHash": "9f2d9d0a31f8c7c53942a8741424f600d4be32561941c1982ecb6d6f4cafcee0",
+      "sha256": "9f2d9d0a31f8c7c53942a8741424f600d4be32561941c1982ecb6d6f4cafcee0",
+      "bytes": 38878,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E10 - Meegan and Andre Break Up [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.3.srt.validation.json",
+      "localPath": "Key-Peele-S05E10/attempt-04-id-108.validation.json",
+      "expectedHash": null,
+      "sha256": "5dba92d471d0daffa70da19a49ca7711985f2a63dc3fa193b6cef82c9a2a330c",
+      "bytes": 4076
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E10 - Meegan and Andre Break Up [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.4.srt",
+      "localPath": "Key-Peele-S05E10/attempt-05-id-118.sv.srt",
+      "expectedHash": "4f2e5165f4149df232199281e13ef13393e150dbbe678f0221d8d06d93f4658f",
+      "sha256": "4f2e5165f4149df232199281e13ef13393e150dbbe678f0221d8d06d93f4658f",
+      "bytes": 38507,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Key & Peele (2012) [tvdbid-255325]/Season 05/Key & Peele (2012) - S05E10 - Meegan and Andre Break Up [WEBDL-1080p][EAC3 5.1][h264]-FLUX.sv.hi.4.srt.validation.json",
+      "localPath": "Key-Peele-S05E10/attempt-05-id-118.validation.json",
+      "expectedHash": null,
+      "sha256": "60f5a815428e5730fc23f3b22f47a8cb07bb594180966927f9099933b703f0fc",
+      "bytes": 2788
+    },
+    {
+      "remotePath": "/media/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 08/Shameless (US) (2011) - S08E08 - Franks Northern Southern Express [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.en.hi.srt",
+      "localPath": "Shameless-US-S08E08/source.en.srt",
+      "expectedHash": "7b0d00ad09a85c3c6c273dbbd4d099e52e5d38d71fb344e868556d67e9b24415",
+      "sha256": "7b0d00ad09a85c3c6c273dbbd4d099e52e5d38d71fb344e868556d67e9b24415",
+      "bytes": 74830,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/media/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 08/Shameless (US) (2011) - S08E08 - Franks Northern Southern Express [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.hi.srt",
+      "localPath": "Shameless-US-S08E08/current.sv.srt",
+      "expectedHash": null,
+      "error": "[Errno 2] No such file or directory: '\\\\\\\\BIGBOI-TRUENAS\\\\media\\\\_Shows\\\\Shameless (US) (2011) [tvdbid-161511]\\\\Season 08\\\\Shameless (US) (2011) - S08E08 - Franks Northern Southern Express [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.hi.srt'"
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 08/Shameless (US) (2011) - S08E08 - Franks Northern Southern Express [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.hi.srt",
+      "localPath": "Shameless-US-S08E08/attempt-01-id-69.sv.srt",
+      "expectedHash": "32619bc110143e7bfb0f70089a22bfbc82e980543ba5348423776257f8eb83fb",
+      "sha256": "32619bc110143e7bfb0f70089a22bfbc82e980543ba5348423776257f8eb83fb",
+      "bytes": 80075,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 08/Shameless (US) (2011) - S08E08 - Franks Northern Southern Express [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.hi.srt.validation.json",
+      "localPath": "Shameless-US-S08E08/attempt-01-id-69.validation.json",
+      "expectedHash": null,
+      "sha256": "ef090c26b923201ecc3702cd1fc6f12869e2830e4cb2c52691ddd13b470d827c",
+      "bytes": 2917
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 08/Shameless (US) (2011) - S08E08 - Franks Northern Southern Express [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.hi.1.srt",
+      "localPath": "Shameless-US-S08E08/attempt-02-id-83.sv.srt",
+      "expectedHash": "3177bcd063e9d35c108fbcf96aaa4e7adc8a08a3baba4058f50bd15fac8d8f2d",
+      "sha256": "3177bcd063e9d35c108fbcf96aaa4e7adc8a08a3baba4058f50bd15fac8d8f2d",
+      "bytes": 80238,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 08/Shameless (US) (2011) - S08E08 - Franks Northern Southern Express [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.hi.1.srt.validation.json",
+      "localPath": "Shameless-US-S08E08/attempt-02-id-83.validation.json",
+      "expectedHash": null,
+      "sha256": "b6bf026fa0bc6c8afc22d7fed3a2ece1cc14bc6e811bdcf243e78e580a4985ac",
+      "bytes": 2851
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 08/Shameless (US) (2011) - S08E08 - Franks Northern Southern Express [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.hi.2.srt",
+      "localPath": "Shameless-US-S08E08/attempt-03-id-96.sv.srt",
+      "expectedHash": "041481181e80d91068c60b1ac2ddc2e50898ee33645e08a2cf016f19f42811b0",
+      "sha256": "041481181e80d91068c60b1ac2ddc2e50898ee33645e08a2cf016f19f42811b0",
+      "bytes": 79987,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 08/Shameless (US) (2011) - S08E08 - Franks Northern Southern Express [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.hi.2.srt.validation.json",
+      "localPath": "Shameless-US-S08E08/attempt-03-id-96.validation.json",
+      "expectedHash": null,
+      "sha256": "a6915a48557ad6703cfb5ffe8e64918b706211699c3335a19e80397fb741534d",
+      "bytes": 3154
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 08/Shameless (US) (2011) - S08E08 - Franks Northern Southern Express [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.hi.3.srt",
+      "localPath": "Shameless-US-S08E08/attempt-04-id-109.sv.srt",
+      "expectedHash": "2bf9f219a2be6fc4f9f4da851a60b4f06b3027b70279909e1cc5f5574b96ad10",
+      "sha256": "2bf9f219a2be6fc4f9f4da851a60b4f06b3027b70279909e1cc5f5574b96ad10",
+      "bytes": 80112,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 08/Shameless (US) (2011) - S08E08 - Franks Northern Southern Express [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.hi.3.srt.validation.json",
+      "localPath": "Shameless-US-S08E08/attempt-04-id-109.validation.json",
+      "expectedHash": null,
+      "sha256": "ec98618e682495252223966b2cf0f660a410ced6e9a46d881a5fbd65c5be8d0d",
+      "bytes": 2851
+    },
+    {
+      "remotePath": "/media/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E11 - The Hobo Games [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.en.srt",
+      "localPath": "Shameless-US-S09E11/source.en.srt",
+      "expectedHash": "a426061352af5b1da528320a2a201bd6fbb6d86f724e1b79f9b5a11e0d143df4",
+      "sha256": "a426061352af5b1da528320a2a201bd6fbb6d86f724e1b79f9b5a11e0d143df4",
+      "bytes": 78717,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/media/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E11 - The Hobo Games [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.srt",
+      "localPath": "Shameless-US-S09E11/current.sv.srt",
+      "expectedHash": null,
+      "error": "[Errno 2] No such file or directory: '\\\\\\\\BIGBOI-TRUENAS\\\\media\\\\_Shows\\\\Shameless (US) (2011) [tvdbid-161511]\\\\Season 09\\\\Shameless (US) (2011) - S09E11 - The Hobo Games [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.srt'"
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E11 - The Hobo Games [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.1.srt",
+      "localPath": "Shameless-US-S09E11/attempt-01-id-70.sv.srt",
+      "expectedHash": "79eb20f0b2b04fdc957c1280b2752b26bb4001e3b43d257f079bf1f4c2e470cf",
+      "sha256": "79eb20f0b2b04fdc957c1280b2752b26bb4001e3b43d257f079bf1f4c2e470cf",
+      "bytes": 84453,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E11 - The Hobo Games [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.1.srt.validation.json",
+      "localPath": "Shameless-US-S09E11/attempt-01-id-70.validation.json",
+      "expectedHash": null,
+      "sha256": "129cb357aced4f77f2e8f7e30d5301232dfa1490a3551a05387b6d1ae250992c",
+      "bytes": 2818
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E11 - The Hobo Games [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.2.srt",
+      "localPath": "Shameless-US-S09E11/attempt-02-id-86.sv.srt",
+      "expectedHash": "9061f389b379a7be19d5d9cb1244c11b0944ff67762590269141a2c3027f71c4",
+      "sha256": "9061f389b379a7be19d5d9cb1244c11b0944ff67762590269141a2c3027f71c4",
+      "bytes": 85071,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E11 - The Hobo Games [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.2.srt.validation.json",
+      "localPath": "Shameless-US-S09E11/attempt-02-id-86.validation.json",
+      "expectedHash": null,
+      "sha256": "b70c6df13cc1b31311f79331363918d64ba6694771a6739996903fe3e99b0400",
+      "bytes": 3455
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E11 - The Hobo Games [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.3.srt",
+      "localPath": "Shameless-US-S09E11/attempt-03-id-97.sv.srt",
+      "expectedHash": "7fddbb4d923e82ab9822c8035a074ab8a839cbe8ee5d2b48d327d4755d31ef12",
+      "sha256": "7fddbb4d923e82ab9822c8035a074ab8a839cbe8ee5d2b48d327d4755d31ef12",
+      "bytes": 85059,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E11 - The Hobo Games [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.3.srt.validation.json",
+      "localPath": "Shameless-US-S09E11/attempt-03-id-97.validation.json",
+      "expectedHash": null,
+      "sha256": "6f1b49efe1da40750e07a0a0c6d5c4493f248aef2309afa3989a12053fbc0f52",
+      "bytes": 3168
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E11 - The Hobo Games [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.4.srt",
+      "localPath": "Shameless-US-S09E11/attempt-04-id-110.sv.srt",
+      "expectedHash": "42525cd78505c852f560174e807f0ecff7f95514e9834171cd1b263d710d3e7f",
+      "sha256": "42525cd78505c852f560174e807f0ecff7f95514e9834171cd1b263d710d3e7f",
+      "bytes": 84557,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E11 - The Hobo Games [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.4.srt.validation.json",
+      "localPath": "Shameless-US-S09E11/attempt-04-id-110.validation.json",
+      "expectedHash": null,
+      "sha256": "251f5615899e380c73efe1b114f11a9a5b3fe0de7793ee4d3f8c6f281d2700ce",
+      "bytes": 2993
+    },
+    {
+      "remotePath": "/media/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E10 - Los Diablos! [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.en.srt",
+      "localPath": "Shameless-US-S09E10/source.en.srt",
+      "expectedHash": "83ab3885dd1f05d734988ccab953bc6eed9fb6fbde8fbce6666779a899595feb",
+      "sha256": "83ab3885dd1f05d734988ccab953bc6eed9fb6fbde8fbce6666779a899595feb",
+      "bytes": 82359,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/media/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E10 - Los Diablos! [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.srt",
+      "localPath": "Shameless-US-S09E10/current.sv.srt",
+      "expectedHash": null,
+      "error": "[Errno 2] No such file or directory: '\\\\\\\\BIGBOI-TRUENAS\\\\media\\\\_Shows\\\\Shameless (US) (2011) [tvdbid-161511]\\\\Season 09\\\\Shameless (US) (2011) - S09E10 - Los Diablos! [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.srt'"
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E10 - Los Diablos! [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.1.srt",
+      "localPath": "Shameless-US-S09E10/attempt-01-id-74.sv.srt",
+      "expectedHash": "84cd00221fc4f78d5444bf7e7c326d380f7f47bb47316c169d1eec2d241e4368",
+      "sha256": "84cd00221fc4f78d5444bf7e7c326d380f7f47bb47316c169d1eec2d241e4368",
+      "bytes": 87799,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E10 - Los Diablos! [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.1.srt.validation.json",
+      "localPath": "Shameless-US-S09E10/attempt-01-id-74.validation.json",
+      "expectedHash": null,
+      "sha256": "093939222978657b3673c1b758031a4e362ca0ad7b56caf77b9542f2a482582a",
+      "bytes": 2975
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E10 - Los Diablos! [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.2.srt",
+      "localPath": "Shameless-US-S09E10/attempt-02-id-87.sv.srt",
+      "expectedHash": "5e87111858e30edabbc61dc81b7deb4583c6d977a642d2afcade55344895c425",
+      "sha256": "5e87111858e30edabbc61dc81b7deb4583c6d977a642d2afcade55344895c425",
+      "bytes": 87675,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E10 - Los Diablos! [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.2.srt.validation.json",
+      "localPath": "Shameless-US-S09E10/attempt-02-id-87.validation.json",
+      "expectedHash": null,
+      "sha256": "9f80aa80702c5d86d393ce271422b30ffa8c155e534ee76baf783403a0db5688",
+      "bytes": 2744
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E10 - Los Diablos! [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.3.srt",
+      "localPath": "Shameless-US-S09E10/attempt-03-id-99.sv.srt",
+      "expectedHash": "3d9376e0afafe94a63c584edb442773501e9dc7783203322dbf5b82fc1c0d699",
+      "sha256": "3d9376e0afafe94a63c584edb442773501e9dc7783203322dbf5b82fc1c0d699",
+      "bytes": 87868,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E10 - Los Diablos! [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.3.srt.validation.json",
+      "localPath": "Shameless-US-S09E10/attempt-03-id-99.validation.json",
+      "expectedHash": null,
+      "sha256": "480e4bf7c111cebf2d92a2fda5745c8cba7a957f2de0332dd3a47bce453e2e2b",
+      "bytes": 2975
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E10 - Los Diablos! [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.4.srt",
+      "localPath": "Shameless-US-S09E10/attempt-04-id-112.sv.srt",
+      "expectedHash": "6365bb71b136828d4a9c25e4b15c33cff0a4064f89cef315005cc4fcc20c9430",
+      "sha256": "6365bb71b136828d4a9c25e4b15c33cff0a4064f89cef315005cc4fcc20c9430",
+      "bytes": 87839,
+      "hashMatches": true
+    },
+    {
+      "remotePath": "/config/quarantine/_Shows/Shameless (US) (2011) [tvdbid-161511]/Season 09/Shameless (US) (2011) - S09E10 - Los Diablos! [Bluray-1080p Remux][DTS-HD MA 5.1][AVC]-NOGRP.sv.4.srt.validation.json",
+      "localPath": "Shameless-US-S09E10/attempt-04-id-112.validation.json",
+      "expectedHash": null,
+      "sha256": "4c6fa3eae143a3c59f1e43072a94c0efb928ef0274e5697494c748891bfd4da7",
+      "bytes": 2975
+    }
+  ]
+}
