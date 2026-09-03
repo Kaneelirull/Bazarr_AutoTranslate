@@ -2,8 +2,8 @@ import { ActionHistory, availabilityText, CompletenessDetails, numberValue, oper
 import type { ReviewItem } from "./types";
 import { CueReview } from "./CueReview";
 
-export function ReviewDetails({ item, timeZone, open, onToggle, disabled = false, onMutation = () => {} }: {
-  item: ReviewItem; timeZone: string; open: boolean; onToggle: (open: boolean) => void;
+export function ReviewDetails({ item, timeZone, disabled = false, onMutation = () => {} }: {
+  item: ReviewItem; timeZone: string;
   disabled?: boolean; onMutation?: (pending: boolean, message?: string) => void;
 }) {
   const paths: Array<[string, string | undefined, boolean | undefined, string | undefined]> = [
@@ -12,9 +12,10 @@ export function ReviewDetails({ item, timeZone, open, onToggle, disabled = false
     ["Recovery artifact", item.artifactRelativePath, item.artifactAvailable, item.artifactAvailabilityReason],
     ["Media", item.mediaRelativePath, item.mediaAvailable, item.mediaAvailabilityReason],
   ];
-  return <details className="review-details" open={open} onToggle={(event) => onToggle(event.currentTarget.open)}>
+  return <>
+    <CueReview item={item} disabled={disabled} onMutation={onMutation} />
+    <details className="review-details">
     <summary>Recovery details</summary>
-    {open && <CueReview item={item} disabled={disabled} onMutation={onMutation} />}
     <dl className="review-detail-grid">
       <div><dt>Failure class</dt><dd>{operatorLabel(item.failureClass)}</dd></div>
       <div><dt>Retries completed</dt><dd>{numberValue(item.attemptCount).toLocaleString()}</dd></div>
@@ -45,5 +46,6 @@ export function ReviewDetails({ item, timeZone, open, onToggle, disabled = false
     </div>)}</dl>
     <h4>Action history</h4>
     <ActionHistory actions={item.actions} count={item.actionCount} truncated={item.actionsTruncated} timeZone={timeZone} />
-  </details>;
+    </details>
+  </>;
 }

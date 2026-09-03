@@ -1,0 +1,8 @@
+bazarr-autotranslate-2026-09-02.log:4353: 2026-09-02T15:59:11.899Z   Languages         : en, et, sv
+bazarr-autotranslate-2026-09-02.log:4354: 2026-09-02T15:59:11.899Z   Cleanup languages : et
+bazarr-autotranslate-2026-09-02.log:4359: 2026-09-02T15:59:11.899Z   Quarantine retry  : 0 attempts after 2 completed cycle(s), batch 50
+bazarr-autotranslate-2026-09-02.log:4365: 2026-09-02T15:59:11.900Z   Repair queue max  : 100
+bazarr-autotranslate-2026-09-02.log:4839: 2026-09-02T16:40:25.443Z   Languages         : en, et, sv
+bazarr-autotranslate-2026-09-02.log:4840: 2026-09-02T16:40:25.443Z   Cleanup languages : et
+bazarr-autotranslate-2026-09-02.log:4845: 2026-09-02T16:40:25.443Z   Quarantine retry  : 0 attempts after 2 completed cycle(s), batch 50
+bazarr-autotranslate-2026-09-02.log:4851: 2026-09-02T16:40:25.443Z   Repair queue max  : 100

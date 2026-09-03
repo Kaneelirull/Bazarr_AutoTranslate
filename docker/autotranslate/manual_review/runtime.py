@@ -192,8 +192,11 @@ def _inspect_review_cues(plan, source, candidate, pairs):
         source_text, target_text = '\n'.join(original.lines), '\n'.join(translated.lines)
         output.append({'cueNumber': original.number, 'timestamp': original.timestamp,
             'sourceText': source_text, 'targetText': target_text,
+            'sourceCueHash': hashlib.sha256(source_text.encode('utf-8')).hexdigest(),
             'targetCueHash': hashlib.sha256(target_text.encode('utf-8')).hexdigest(),
             'rules': sorted({i.rule for i in issues}), 'reason': '; '.join(i.detail for i in issues),
+            'canApproveCue': all(i.rule in {'copied_source','ambiguous_copied_source','unexpected_script',
+                'excessive_lines','cue_too_long','abnormal_expansion','garbage','prompt_marker'} for i in issues),
             'canApproveName': original.number == translated.number and original.timestamp == translated.timestamp
                 and any(i.rule == 'ambiguous_copied_source' for i in issues),
             'context': [{'cueNumber': source_cues[j].number, 'sourceText': '\n'.join(source_cues[j].lines),

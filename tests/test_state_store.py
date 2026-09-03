@@ -428,7 +428,7 @@ class StateStoreTests(unittest.TestCase):
             )
             self.assertEqual(row["failure_category"], "context_limit")
             self.assertEqual(json.loads(row["failure_details_json"])["status"], "Failed")
-            self.assertEqual(store._fetchone("PRAGMA user_version")[0], 18)
+            self.assertEqual(store._fetchone("PRAGMA user_version")[0], 19)
             store.close()
 
     def test_schema_v4_migrates_retry_size_and_failure_columns(self):
@@ -459,7 +459,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertIn("source_cue_count", retry_columns)
             self.assertIn("failure_category", attempt_columns)
             self.assertIn("failure_details_json", attempt_columns)
-            self.assertEqual(migrated._fetchone("PRAGMA user_version")[0], 18)
+            self.assertEqual(migrated._fetchone("PRAGMA user_version")[0], 19)
             migrated.close()
 
     def test_quarantine_attempts_are_immutable_and_privacy_safe(self):

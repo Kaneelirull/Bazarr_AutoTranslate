@@ -1,0 +1,1239 @@
+[
+  {
+    "title": "Key & Peele S05E04",
+    "attempts": [
+      {
+        "id": 49,
+        "attemptNumber": 1,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 225 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          224
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:4",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": []
+      },
+      {
+        "id": 61,
+        "attemptNumber": 2,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 225 has invalid cue number '(naer)'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 226 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          224
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:5",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 6 lines (max 4 for 2-line source)",
+            "cueIndex": 223,
+            "cueNumber": 224
+          }
+        ]
+      },
+      {
+        "id": 91,
+        "attemptNumber": 3,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 225 has invalid cue number 'Och nu, dagens höjdpunkt.'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 226 has invalid cue number 'Dagens höjdpunkt är en lektion från den'",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          224
+        ],
+        "formatFixes": [
+          "trimmed_trailing_whitespace:2",
+          "collapsed_repeated_separators:6",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 10 lines (max 4 for 2-line source)",
+            "cueIndex": 223,
+            "cueNumber": 224
+          },
+          {
+            "rule": "abnormal_expansion",
+            "detail": "translation expanded 8.2x (45 -> 367 chars)",
+            "cueIndex": 223,
+            "cueNumber": 224
+          },
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 10 lines (max 4 for 2-line source)",
+            "cueIndex": 224,
+            "cueNumber": 225
+          },
+          {
+            "rule": "abnormal_expansion",
+            "detail": "translation expanded 5.9x (54 -> 318 chars)",
+            "cueIndex": 224,
+            "cueNumber": 225
+          }
+        ]
+      },
+      {
+        "id": 102,
+        "attemptNumber": 4,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 225 has invalid cue number '(naer)'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 226 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          224
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:7",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 9 lines (max 4 for 2-line source)",
+            "cueIndex": 223,
+            "cueNumber": 224
+          },
+          {
+            "rule": "abnormal_expansion",
+            "detail": "translation expanded 8.6x (45 -> 385 chars)",
+            "cueIndex": 223,
+            "cueNumber": 224
+          }
+        ]
+      },
+      {
+        "id": 114,
+        "attemptNumber": 5,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 225 has invalid cue number '[TEXT IN BRACKETS ARE NOT TO BE TRANSLATED]'",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          224
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:5",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 9 lines (max 4 for 2-line source)",
+            "cueIndex": 223,
+            "cueNumber": 224
+          }
+        ]
+      }
+    ],
+    "allAttemptsBaseline": 49,
+    "donorOnlyValid": true
+  },
+  {
+    "title": "Key & Peele S05E10",
+    "attempts": [
+      {
+        "id": 50,
+        "attemptNumber": 1,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 529 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 530 has invalid cue number 'Use them only to understand:'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 531 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 532 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 533 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 534 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 535 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 536 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          528
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:6",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 18 lines (max 4 for 2-line source)",
+            "cueIndex": 527,
+            "cueNumber": 528
+          },
+          {
+            "rule": "cue_too_long",
+            "detail": "translation is 694 characters (max 500)",
+            "cueIndex": 527,
+            "cueNumber": 528
+          },
+          {
+            "rule": "abnormal_expansion",
+            "detail": "translation expanded 11.8x (59 -> 694 chars)",
+            "cueIndex": 527,
+            "cueNumber": 528
+          }
+        ]
+      },
+      {
+        "id": 81,
+        "attemptNumber": 2,
+        "originalIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 5 lines (max 4 without source)",
+            "cueIndex": 303,
+            "cueNumber": 304
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [],
+        "formatFixes": [
+          "collapsed_repeated_separators:9",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 5 lines (max 4 for 1-line source)",
+            "cueIndex": 303,
+            "cueNumber": 304
+          }
+        ]
+      },
+      {
+        "id": 98,
+        "attemptNumber": 3,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 529 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 530 has invalid cue number 'Use them only to understand:'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 531 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 532 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 533 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 534 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 535 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 536 has invalid cue number 'put all of them in, like, one little small section of town,'",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          528
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:6",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 19 lines (max 4 for 2-line source)",
+            "cueIndex": 527,
+            "cueNumber": 528
+          },
+          {
+            "rule": "cue_too_long",
+            "detail": "translation is 747 characters (max 500)",
+            "cueIndex": 527,
+            "cueNumber": 528
+          },
+          {
+            "rule": "abnormal_expansion",
+            "detail": "translation expanded 12.7x (59 -> 747 chars)",
+            "cueIndex": 527,
+            "cueNumber": 528
+          }
+        ]
+      },
+      {
+        "id": 108,
+        "attemptNumber": 4,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 529 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 530 has invalid cue number 'Use them only to understand:'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 531 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 532 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 533 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 534 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 535 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 536 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          528
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:9",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 18 lines (max 4 for 2-line source)",
+            "cueIndex": 527,
+            "cueNumber": 528
+          },
+          {
+            "rule": "cue_too_long",
+            "detail": "translation is 706 characters (max 500)",
+            "cueIndex": 527,
+            "cueNumber": 528
+          },
+          {
+            "rule": "abnormal_expansion",
+            "detail": "translation expanded 12.0x (59 -> 706 chars)",
+            "cueIndex": 527,
+            "cueNumber": 528
+          }
+        ]
+      },
+      {
+        "id": 118,
+        "attemptNumber": 5,
+        "originalIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 5 lines (max 4 without source)",
+            "cueIndex": 303,
+            "cueNumber": 304
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [],
+        "formatFixes": [
+          "collapsed_repeated_separators:6",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 5 lines (max 4 for 1-line source)",
+            "cueIndex": 303,
+            "cueNumber": 304
+          }
+        ]
+      }
+    ],
+    "allAttemptsBaseline": 118,
+    "donorOnlyValid": true,
+    "donorOnlyRepaired": [
+      304
+    ],
+    "donorOnlyUnresolved": [],
+    "donorOnlyIssues": [],
+    "donorHistory": [
+      {
+        "cueNumber": 304,
+        "sourceAttempt": 1,
+        "sourceAttemptId": 50
+      }
+    ],
+    "unresolvedText": []
+  },
+  {
+    "title": "Shameless (US) S08E08",
+    "attempts": [
+      {
+        "id": 69,
+        "attemptNumber": 1,
+        "originalIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 6 lines (max 4 without source)",
+            "cueIndex": 862,
+            "cueNumber": 863
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [],
+        "formatFixes": [],
+        "normalizedIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 6 lines (max 4 for 2-line source)",
+            "cueIndex": 862,
+            "cueNumber": 863
+          }
+        ]
+      },
+      {
+        "id": 83,
+        "attemptNumber": 2,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 850 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          849
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:22",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "unexpected_script",
+            "detail": "entry is 100% non-Latin script",
+            "cueIndex": 507,
+            "cueNumber": 508
+          },
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 9 lines (max 4 for 2-line source)",
+            "cueIndex": 832,
+            "cueNumber": 833
+          },
+          {
+            "rule": "abnormal_expansion",
+            "detail": "translation expanded 12.1x (36 -> 434 chars)",
+            "cueIndex": 832,
+            "cueNumber": 833
+          }
+        ]
+      },
+      {
+        "id": 96,
+        "attemptNumber": 3,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 155 has invalid cue number '\"Det är mitt land och mitt hjärtas sanna känsla,'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 156 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          154
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:26",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "empty_target",
+            "detail": "translation is empty",
+            "cueIndex": 39,
+            "cueNumber": 40
+          },
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 9 lines (max 4 for 1-line source)",
+            "cueIndex": 153,
+            "cueNumber": 154
+          },
+          {
+            "rule": "abnormal_expansion",
+            "detail": "translation expanded 9.4x (32 -> 302 chars)",
+            "cueIndex": 153,
+            "cueNumber": 154
+          },
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (100% similar)",
+            "cueIndex": 211,
+            "cueNumber": 212
+          }
+        ]
+      },
+      {
+        "id": 109,
+        "attemptNumber": 4,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 850 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          849
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:24",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (100% similar)",
+            "cueIndex": 211,
+            "cueNumber": 212
+          },
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 5 lines (max 4 for 2-line source)",
+            "cueIndex": 848,
+            "cueNumber": 849
+          }
+        ]
+      }
+    ],
+    "allAttemptsBaseline": 69,
+    "donorOnlyValid": true,
+    "donorOnlyRepaired": [
+      863
+    ],
+    "donorOnlyUnresolved": [],
+    "donorOnlyIssues": [],
+    "donorHistory": [
+      {
+        "cueNumber": 863,
+        "sourceAttempt": 2,
+        "sourceAttemptId": 83
+      }
+    ],
+    "unresolvedText": []
+  },
+  {
+    "title": "Shameless (US) S09E11",
+    "attempts": [
+      {
+        "id": 70,
+        "attemptNumber": 1,
+        "originalIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 5 lines (max 4 without source)",
+            "cueIndex": 885,
+            "cueNumber": 886
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [],
+        "formatFixes": [],
+        "normalizedIssues": [
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (100% similar)",
+            "cueIndex": 622,
+            "cueNumber": 623
+          },
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 5 lines (max 4 for 2-line source)",
+            "cueIndex": 885,
+            "cueNumber": 886
+          }
+        ]
+      },
+      {
+        "id": 86,
+        "attemptNumber": 2,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 108 has invalid cue number 'Vad håller du på med? Det är mitt syrgas!'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 109 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 399 has invalid cue number 'Vår dröm'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 400 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          107,
+          396
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:17",
+          "folded_orphan_breaks:2",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 9 lines (max 4 for 1-line source)",
+            "cueIndex": 106,
+            "cueNumber": 107
+          },
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 9 lines (max 4 for 1-line source)",
+            "cueIndex": 395,
+            "cueNumber": 396
+          },
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (100% similar)",
+            "cueIndex": 622,
+            "cueNumber": 623
+          }
+        ]
+      },
+      {
+        "id": 97,
+        "attemptNumber": 3,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 397 has invalid cue number '(drömmar)'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 398 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 613 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          396,
+          610
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:24",
+          "folded_orphan_breaks:2",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 10 lines (max 4 for 1-line source)",
+            "cueIndex": 395,
+            "cueNumber": 396
+          },
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 5 lines (max 4 for 2-line source)",
+            "cueIndex": 609,
+            "cueNumber": 610
+          },
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (100% similar)",
+            "cueIndex": 622,
+            "cueNumber": 623
+          }
+        ]
+      },
+      {
+        "id": 110,
+        "attemptNumber": 4,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 397 has invalid cue number '(Laughing) → (naer)'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 398 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          396
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:22",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 9 lines (max 4 for 1-line source)",
+            "cueIndex": 395,
+            "cueNumber": 396
+          },
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (100% similar)",
+            "cueIndex": 622,
+            "cueNumber": 623
+          }
+        ]
+      }
+    ],
+    "allAttemptsBaseline": 110,
+    "donorOnlyValid": false,
+    "donorOnlyRepaired": [
+      396
+    ],
+    "donorOnlyUnresolved": [
+      623
+    ],
+    "donorOnlyIssues": [
+      {
+        "rule": "copied_source",
+        "detail": "translation matches source (100% similar)",
+        "cueIndex": 622,
+        "cueNumber": 623
+      }
+    ],
+    "donorHistory": [
+      {
+        "cueNumber": 396,
+        "sourceAttempt": 1,
+        "sourceAttemptId": 70
+      }
+    ],
+    "unresolvedText": [
+      {
+        "number": 623,
+        "source": "Alexandra galvez. G-a-I-v-e-z.",
+        "targets": [
+          {
+            "attempt": 70,
+            "target": "Alexandra Galvez. G-A-I-V-E-Z.",
+            "issues": [
+              "copied_source"
+            ]
+          },
+          {
+            "attempt": 86,
+            "target": "Alexandra Galvez. G-A-I-V-E-Z.",
+            "issues": [
+              "copied_source"
+            ]
+          },
+          {
+            "attempt": 97,
+            "target": "Alexandra Galvez. G-A-I-V-E-Z.",
+            "issues": [
+              "copied_source"
+            ]
+          },
+          {
+            "attempt": 110,
+            "target": "Alexandra Galvez. G-A-I-V-E-Z.",
+            "issues": [
+              "copied_source"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "title": "Shameless (US) S09E10",
+    "attempts": [
+      {
+        "id": 74,
+        "attemptNumber": 1,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 870 has invalid cue number 'Kom hit. Kom hit.'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 871 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          869
+        ],
+        "formatFixes": [
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (100% similar)",
+            "cueIndex": 722,
+            "cueNumber": 723
+          },
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 9 lines (max 4 for 1-line source)",
+            "cueIndex": 868,
+            "cueNumber": 869
+          }
+        ]
+      },
+      {
+        "id": 87,
+        "attemptNumber": 2,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 1093 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          1092
+        ],
+        "formatFixes": [
+          "trimmed_trailing_whitespace:1",
+          "collapsed_repeated_separators:21",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (100% similar)",
+            "cueIndex": 722,
+            "cueNumber": 723
+          },
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 7 lines (max 4 for 1-line source)",
+            "cueIndex": 798,
+            "cueNumber": 799
+          },
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (94% similar)",
+            "cueIndex": 1274,
+            "cueNumber": 1275
+          },
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (94% similar)",
+            "cueIndex": 1276,
+            "cueNumber": 1277
+          }
+        ]
+      },
+      {
+        "id": 99,
+        "attemptNumber": 3,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 870 has invalid cue number 'Kom hit. Kom hit.'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 871 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          869
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:16",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (100% similar)",
+            "cueIndex": 722,
+            "cueNumber": 723
+          },
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 9 lines (max 4 for 1-line source)",
+            "cueIndex": 868,
+            "cueNumber": 869
+          },
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (97% similar)",
+            "cueIndex": 1274,
+            "cueNumber": 1275
+          },
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (94% similar)",
+            "cueIndex": 1276,
+            "cueNumber": 1277
+          }
+        ]
+      },
+      {
+        "id": 112,
+        "attemptNumber": 4,
+        "originalIssues": [
+          {
+            "rule": "target_structure",
+            "detail": "block 870 has invalid cue number 'Kom hit. Kom hit.'",
+            "cueIndex": null,
+            "cueNumber": null
+          },
+          {
+            "rule": "target_structure",
+            "detail": "block 871 has fewer than two lines",
+            "cueIndex": null,
+            "cueNumber": null
+          }
+        ],
+        "originalRepairAttempts": 0,
+        "formatSafe": true,
+        "formatReason": "source anchors match",
+        "formatRecoveredCues": [
+          869
+        ],
+        "formatFixes": [
+          "collapsed_repeated_separators:17",
+          "folded_orphan_breaks:1",
+          "canonicalized_srt_structure"
+        ],
+        "normalizedIssues": [
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (100% similar)",
+            "cueIndex": 722,
+            "cueNumber": 723
+          },
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 5 lines (max 4 for 1-line source)",
+            "cueIndex": 798,
+            "cueNumber": 799
+          },
+          {
+            "rule": "excessive_lines",
+            "detail": "translation has 9 lines (max 4 for 1-line source)",
+            "cueIndex": 868,
+            "cueNumber": 869
+          },
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (100% similar)",
+            "cueIndex": 1274,
+            "cueNumber": 1275
+          },
+          {
+            "rule": "copied_source",
+            "detail": "translation matches source (97% similar)",
+            "cueIndex": 1276,
+            "cueNumber": 1277
+          }
+        ]
+      }
+    ],
+    "allAttemptsBaseline": 74,
+    "donorOnlyValid": false,
+    "donorOnlyRepaired": [
+      869
+    ],
+    "donorOnlyUnresolved": [
+      723
+    ],
+    "donorOnlyIssues": [
+      {
+        "rule": "copied_source",
+        "detail": "translation matches source (100% similar)",
+        "cueIndex": 722,
+        "cueNumber": 723
+      }
+    ],
+    "donorHistory": [
+      {
+        "cueNumber": 869,
+        "sourceAttempt": 2,
+        "sourceAttemptId": 87
+      }
+    ],
+    "unresolvedText": [
+      {
+        "number": 723,
+        "source": "Guacamole, mountain dew,",
+        "targets": [
+          {
+            "attempt": 74,
+            "target": "Guacamole, Mountain Dew.",
+            "issues": [
+              "copied_source"
+            ]
+          },
+          {
+            "attempt": 87,
+            "target": "Guacamole, Mountain Dew.",
+            "issues": [
+              "copied_source"
+            ]
+          },
+          {
+            "attempt": 99,
+            "target": "Guacamole, Mountain Dew...",
+            "issues": [
+              "copied_source"
+            ]
+          },
+          {
+            "attempt": 112,
+            "target": "Guacamole, Mountain Dew...",
+            "issues": [
+              "copied_source"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]

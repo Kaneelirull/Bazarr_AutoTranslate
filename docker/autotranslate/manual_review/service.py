@@ -51,13 +51,14 @@ class RecheckResult:
     details: dict[str, Any] = field(default_factory=dict)
 
 
-_EPISODE_RE = re.compile(r"(?i)\bS\d{1,3}E\d{1,4}\b")
+_EPISODE_RE = re.compile(r"(?i)\bS(?P<season>\d{1,3})E(?P<episode>\d{1,4})\b")
 _WINDOWS_PATH_RE = re.compile(r"(?i)\b[A-Z]:[\\/][^\r\n,;]+")
 _UNIX_PATH_RE = re.compile(r"(?<!\w)/(?:media|config)/[^\s,;]+")
 _SECRET_RE = re.compile(r"(?i)(api[-_ ]?key|authorization)(\s*[:=]\s*)\S+")
 _SAFE_CODE_RE = re.compile(r"[a-z][a-z0-9_:-]{0,79}")
-_SAFE_ACTIONS = {"recheck", "queue_retry", "dismiss", "bazarr_scan", "approve_name", "revoke_name"}
-_SAFE_OUTCOMES = {"invalid", "resolved", "queued", "dismissed", "pending", "failed", "dispatched"}
+_SAFE_ACTIONS = {"recheck", "queue_retry", "dismiss", "bazarr_scan", "approve_name", "revoke_name",
+                 "approve_cue", "retry_cue", "clear_cue_decision", "finish_review", "reopen"}
+_SAFE_OUTCOMES = {"invalid", "resolved", "queued", "dismissed", "pending", "failed", "dispatched", "saved", "cleared", "reopened"}
 _SAFE_DETAIL_KEYS = {
     "validationResult", "validationMode", "issueRules", "observationCount",
     "sourceAvailable", "targetAvailable", "artifactAvailable", "mediaAvailable",
@@ -273,14 +274,19 @@ class ManualReviewService(CueReviewMixin):
             "Movie" if plan.get("itemType") == "movies" else "Episode"
         )
         episode = None
+        season_number = episode_number = None
         for value in (plan.get("mediaTitle"), plan.get("targetPath"), plan.get("sourcePath")):
             match = _EPISODE_RE.search(str(value or ""))
             if match:
                 episode = match.group(0).upper()
+                season_number, episode_number = int(match.group("season")), int(match.group("episode"))
                 break
         return {
             "title": self._safe_operator_text(title, "Media item", limit=160),
             "episodeCode": episode,
+            "seasonNumber": season_number,
+            "episodeNumber": episode_number,
+            "episodeTitle": self._safe_operator_text(plan.get("mediaTitle"), limit=160),
         }
 
     def _public_action(self, action: dict) -> dict:
@@ -330,7 +336,7 @@ class ManualReviewService(CueReviewMixin):
         )
         scan_pending = scan_state in {"pending", "claimed", "failed"}
         identity = self._identity(plan)
-        allowed = ["recheck", "queue_retry", "dismiss"] if status == "needs_attention" else []
+        allowed = ["recheck", "queue_retry", "dismiss"] if status == "needs_attention" else (["reopen"] if status == "dismissed" else [])
         return {
             "id": int(plan["id"]),
             "media": identity,

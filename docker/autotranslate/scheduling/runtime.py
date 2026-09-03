@@ -4,8 +4,9 @@ from ..composition import runtime as _runtime
 def _ensemble_key(plan: dict, attempt_ids: list[int]) -> str:
     state = _runtime._get_validation_state()
     snapshot = state.name_approval_snapshot(plan)
+    decisions = state.cue_decision_snapshot(plan)
     hashes = sorted((a['id'], a['targetHash']) for a in state.quarantine_attempts(plan['itemType'], plan['itemId'], plan['targetLanguage']) if a['id'] in attempt_ids)
-    material = repr(('recovery-v2', int(plan['id']), plan['sourceHash'], plan.get('failedOutputHash'), hashes, state.validator_version, state.config_fingerprint, snapshot['scope'], snapshot['revision'], state.manual_review_action_count(plan['id'])))
+    material = repr(('recovery-v2', int(plan['id']), plan['sourceHash'], plan.get('failedOutputHash'), hashes, state.validator_version, state.config_fingerprint, snapshot['scope'], snapshot['revision'], decisions['revision'], state.manual_review_action_count(plan['id'])))
     return 'quarantine-ensemble:' + _runtime.hashlib.sha256(material.encode('utf-8')).hexdigest()
 
 def _persist_ensemble_cues(plan: dict, repair, source_cues: list) -> None:

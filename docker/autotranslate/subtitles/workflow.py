@@ -265,6 +265,8 @@ def _validation_kwargs(identity: dict | None = None) -> dict:
         options['approved_name_pairs'] = tuple(tuple(pair) for pair in snapshot['pairs'])
         options['approval_revision'] = snapshot['revision']
         options['approval_scope'] = snapshot['scope']
+        decisions = _runtime._get_validation_state().cue_decision_snapshot(identity)
+        options['approved_cue_findings'] = tuple(decisions['approved'])
     return options
 
 
