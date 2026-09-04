@@ -540,6 +540,34 @@ class StatusDashboardTests(unittest.TestCase):
             self.assertEqual(recovered.compact_history(), 22)
             self.assertEqual(recovered.snapshot()["validationObservations"], [])
 
+    def test_operator_approved_observation_is_bounded_and_private(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self.make_tracker(directory)
+            valid_rules = [f"rule_{index}" for index in range(20)]
+            tracker.record_validation_observation(
+                title="Shameless (US)", episode_code="S10E05",
+                item_type="episodes", item_id=12165, target_language="sv",
+                cue_number=1223, classification="operator_approved",
+                reason="Cue findings approved by operator.",
+                evidence={
+                    "operatorApproved": True,
+                    "rules": ["copied_source", "copied_source", "private/path", "line\nbreak", *valid_rules],
+                    "sourceText": "private subtitle dialogue",
+                    "sourcePath": "/media/private/show.srt",
+                    "targetHash": "private-hash",
+                },
+            )
+
+            observation = tracker.snapshot()["validationObservations"][0]
+            self.assertEqual(observation["classification"], "operator_approved")
+            self.assertEqual(observation["reason"], "Cue findings approved by operator.")
+            self.assertIs(observation["evidence"]["operatorApproved"], True)
+            self.assertEqual(len(observation["evidence"]["rules"]), 16)
+            self.assertEqual(observation["evidence"]["rules"][0], "copied_source")
+            encoded = json.dumps(observation)
+            for private in ("private/path", "line\\nbreak", "private subtitle", "/media/private", "private-hash"):
+                self.assertNotIn(private, encoded)
+
     def test_snapshot_writers_use_unique_temporary_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1010,7 +1038,7 @@ class StatusDashboardTests(unittest.TestCase):
     def test_dashboard_assets_render_accessible_validation_observations(self):
         script = (REPO_ROOT / "docker" / "frontend" / "src" / "dashboard" / "Observations.tsx").read_text(encoding="utf-8")
         stylesheet = (REPO_ROOT / "docker" / "static" / "dashboard.css").read_text(encoding="utf-8")
-        for text in ("Validation observations", "No copied-source repairs were suppressed.", "Repair skipped", "<details", "expanded", "View evidence"):
+        for text in ("Validation observations", "No copied-source repairs were suppressed.", "Repair skipped", "Operator approved", "Approved rules", "<details", "expanded", "View evidence"):
             self.assertIn(text, script)
         for selector in (".observation-filters", ".badge-warning", ".observation-details summary:focus-visible", ".observation-evidence"):
             self.assertIn(selector, stylesheet)

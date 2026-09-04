@@ -185,7 +185,7 @@ def classify_validation_failure(report: "ValidationReport") -> str:
         return "source_problem"
     return "whole_file"
 
-VALIDATOR_VERSION = "source-aware-v6-scoped-name-review"
+VALIDATOR_VERSION = "source-aware-v7-canonical-cue-approval"
 
 
 @dataclass
@@ -197,6 +197,20 @@ class SubtitleCue:
     @property
     def text(self) -> str:
         return " ".join(line.strip() for line in self.lines if line.strip()).strip()
+
+
+def cue_text_hash(cue: SubtitleCue) -> str:
+    """Return the canonical identity hash used for persisted cue decisions."""
+    return hashlib.sha256(cue.text.encode("utf-8")).hexdigest()
+
+
+def cue_text_hashes(cue: SubtitleCue) -> frozenset[str]:
+    """Return canonical and legacy hashes for backward-compatible matching."""
+    legacy_text = "\n".join(cue.lines)
+    return frozenset((
+        cue_text_hash(cue),
+        hashlib.sha256(legacy_text.encode("utf-8")).hexdigest(),
+    ))
 
 
 @dataclass(frozen=True)
@@ -1206,10 +1220,11 @@ def validate_subtitle_pair(
         approval = next((value for value in approved_cue_findings
             if int(value.get("cueNumber", -1)) == source.number
             and value.get("timestamp") == source.timestamp
-            and value.get("sourceCueHash") == hashlib.sha256(source.text.encode("utf-8")).hexdigest()
-            and value.get("targetCueHash") == hashlib.sha256(target.text.encode("utf-8")).hexdigest()), None)
+            and value.get("sourceCueHash") in cue_text_hashes(source)
+            and value.get("targetCueHash") in cue_text_hashes(target)), None)
         if approval is not None:
-            accepted = set(approval.get("findings") or ())
+            approved_rules = set(approval.get("findings") or ())
+            accepted = {issue.rule for issue in cue_issues if issue.rule in approved_rules}
             cue_issues = [issue for issue in cue_issues if issue.rule not in accepted]
             if accepted:
                 report.observations.append(ValidationObservation(
