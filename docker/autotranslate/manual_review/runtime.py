@@ -173,8 +173,10 @@ def build_manual_review_service(state_store) -> ManualReviewService:
 
 
 def _inspect_review_cues(plan, source, candidate, pairs):
-    import hashlib
-    from ..subtitles.foundation import parse_srt_cues, read_text_best_effort, validate_subtitle_pair, target_language_for_code
+    from ..subtitles.foundation import (
+        cue_text_hash, parse_srt_cues, read_text_best_effort,
+        target_language_for_code, validate_subtitle_pair,
+    )
     source_cues, errors = parse_srt_cues(read_text_best_effort(source) or '')
     target_cues, target_errors = parse_srt_cues(read_text_best_effort(candidate) or '')
     if errors or target_errors or len(source_cues) != len(target_cues):
@@ -192,8 +194,8 @@ def _inspect_review_cues(plan, source, candidate, pairs):
         source_text, target_text = '\n'.join(original.lines), '\n'.join(translated.lines)
         output.append({'cueNumber': original.number, 'timestamp': original.timestamp,
             'sourceText': source_text, 'targetText': target_text,
-            'sourceCueHash': hashlib.sha256(source_text.encode('utf-8')).hexdigest(),
-            'targetCueHash': hashlib.sha256(target_text.encode('utf-8')).hexdigest(),
+            'sourceCueHash': cue_text_hash(original),
+            'targetCueHash': cue_text_hash(translated),
             'rules': sorted({i.rule for i in issues}), 'reason': '; '.join(i.detail for i in issues),
             'canApproveCue': all(i.rule in {'copied_source','ambiguous_copied_source','unexpected_script',
                 'excessive_lines','cue_too_long','abnormal_expansion','garbage','prompt_marker'} for i in issues),

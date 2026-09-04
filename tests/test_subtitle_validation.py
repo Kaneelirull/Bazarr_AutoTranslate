@@ -188,6 +188,68 @@ class SubtitleValidationTests(unittest.TestCase):
             self.assertNotIn("copied_source", {issue.rule for issue in approved.issues})
             self.assertTrue(any(observation.evidence.get("operatorApproved") for observation in approved.observations))
 
+    def test_multiline_operator_approval_accepts_canonical_and_legacy_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, target = root / "episode.en.srt", root / "episode.sv.srt"
+            source.write_text(make_srt("At south side\ncommunity college."), encoding="utf-8")
+            target.write_text(make_srt("Vid South Side\nCommunity College."), encoding="utf-8")
+            source_cue = parse_srt_cues(source.read_text(encoding="utf-8"))[0][0]
+            target_cue = parse_srt_cues(target.read_text(encoding="utf-8"))[0][0]
+            baseline = validate_subtitle_pair(source, target, self.detector,
+                target_language_for_code("sv"), target_lang="sv", min_chars=1)
+            self.assertIn("copied_source", {issue.rule for issue in baseline.issues})
+
+            identities = {
+                "canonical": (
+                    subtitle_foundation.cue_text_hash(source_cue),
+                    subtitle_foundation.cue_text_hash(target_cue),
+                ),
+                "legacy": (
+                    hashlib.sha256("\n".join(source_cue.lines).encode("utf-8")).hexdigest(),
+                    hashlib.sha256("\n".join(target_cue.lines).encode("utf-8")).hexdigest(),
+                ),
+            }
+            self.assertNotEqual(identities["canonical"], identities["legacy"])
+            for identity, (source_hash, target_hash) in identities.items():
+                with self.subTest(identity=identity):
+                    approval = {"cueNumber": source_cue.number, "timestamp": source_cue.timestamp,
+                        "sourceCueHash": source_hash, "targetCueHash": target_hash,
+                        "findings": ["copied_source"]}
+                    report = validate_subtitle_pair(source, target, self.detector,
+                        target_language_for_code("sv"), target_lang="sv", min_chars=1,
+                        approved_cue_findings=[approval])
+                    self.assertNotIn("copied_source", {issue.rule for issue in report.issues})
+                    self.assertTrue(any(
+                        observation.classification == "operator_approved"
+                        and observation.cue_number == source_cue.number
+                        for observation in report.observations
+                    ))
+
+            changed = {"cueNumber": source_cue.number, "timestamp": source_cue.timestamp,
+                "sourceCueHash": identities["canonical"][0], "targetCueHash": "0" * 64,
+                "findings": ["copied_source"]}
+            rejected = validate_subtitle_pair(source, target, self.detector,
+                target_language_for_code("sv"), target_lang="sv", min_chars=1,
+                approved_cue_findings=[changed])
+            self.assertIn("copied_source", {issue.rule for issue in rejected.issues})
+            self.assertFalse(any(
+                observation.classification == "operator_approved"
+                for observation in rejected.observations
+            ))
+
+            wrong_finding = {"cueNumber": source_cue.number, "timestamp": source_cue.timestamp,
+                "sourceCueHash": identities["canonical"][0],
+                "targetCueHash": identities["canonical"][1], "findings": ["garbage"]}
+            rejected = validate_subtitle_pair(source, target, self.detector,
+                target_language_for_code("sv"), target_lang="sv", min_chars=1,
+                approved_cue_findings=[wrong_finding])
+            self.assertIn("copied_source", {issue.rule for issue in rejected.issues})
+            self.assertFalse(any(
+                observation.classification == "operator_approved"
+                for observation in rejected.observations
+            ))
+
     def test_one_kilobyte_movie_subtitle_is_undersized(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "movie.et.srt"

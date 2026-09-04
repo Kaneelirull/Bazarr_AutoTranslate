@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sys
@@ -20,7 +21,10 @@ from autotranslate.manual_review.runtime import build_manual_review_service
 from autotranslate.manual_review import ManualReviewConflict, ManualReviewUnavailable
 from autotranslate.status.server import start_status_server
 from autotranslate.status.tracker import StatusTracker
-from autotranslate.subtitles.foundation import file_sha256, validate_cue_pair, SubtitleCue
+from autotranslate.subtitles.foundation import (
+    SubtitleCue, build_detector, cue_text_hash, file_sha256, parse_srt_cues,
+    target_language_for_code, validate_cue_pair, validate_subtitle_pair,
+)
 from autotranslate.subtitles.names import normalize_name_phrase
 
 app = load_runtime(Config.from_env(), None)
@@ -35,8 +39,22 @@ class NameApprovalApiTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.source = self.root/'episode.en.srt'
         self.candidate = self.root/'candidate.srt'
-        self.source.write_text('1\n00:00:01,000 --> 00:00:02,000\nAlexandra morgenstern.\n\n2\n00:00:03,000 --> 00:00:04,000\nThis is an ordinary copied sentence.\n', encoding='utf-8')
-        self.candidate.write_text(self.source.read_text(encoding='utf-8').replace('morgenstern', 'Morgenstern'), encoding='utf-8')
+        source_text = (
+            '1\n00:00:01,000 --> 00:00:02,000\nAlexandra morgenstern.\n\n'
+            '2\n00:00:03,000 --> 00:00:04,000\nThis is an ordinary\ncopied sentence.\n\n'
+            '3\n00:00:05,000 --> 00:00:06,000\nWe should leave before the rain starts.\n\n'
+            '4\n00:00:07,000 --> 00:00:08,000\nI will meet you outside the station.\n\n'
+            '5\n00:00:09,000 --> 00:00:10,000\nThe children are already waiting at home.\n\n'
+            '6\n00:00:11,000 --> 00:00:12,000\nPlease remember to close the window.\n'
+        )
+        self.source.write_text(source_text, encoding='utf-8')
+        self.candidate.write_text(source_text
+            .replace('morgenstern', 'Morgenstern')
+            .replace('This is an ordinary\ncopied sentence.', 'This is an ordinary copied sentence.')
+            .replace('We should leave before the rain starts.', 'Vi borde gå innan regnet börjar.')
+            .replace('I will meet you outside the station.', 'Jag möter dig utanför stationen.')
+            .replace('The children are already waiting at home.', 'Barnen väntar redan hemma.')
+            .replace('Please remember to close the window.', 'Kom ihåg att stänga fönstret.'), encoding='utf-8')
         self.plan, _ = self.store.schedule_retry_plan(item_type='episodes', item_id=1, source_language='en', target_language='sv',
             source_path=self.source, source_hash=file_sha256(self.source), target_path=self.root/'episode.sv.srt',
             series_key='sonarr:44', failure_class='whole_file', rules=['copied_source'], state='regeneration_waiting',
@@ -103,6 +121,15 @@ class NameApprovalApiTests(unittest.TestCase):
         self.assertFalse(self.store.approval_cache_matches(details))
         self.assertEqual(self.store.reactivate_changed_manual_reviews('c'), 1)
 
+    def test_validator_version_change_reactivates_existing_review_hold(self):
+        self.assertEqual(self.store.retry_plan(self.plan['id'])['lastDeferralClass'], 'manual_review')
+        self.store.validator_version = 'source-aware-v6-scoped-name-review'
+        self.store.hold_retry_for_review(self.plan['id'], 'unresolved_cues')
+        self.store.validator_version = 'source-aware-v7-canonical-cue-approval'
+        self.assertEqual(self.store.reactivate_changed_manual_reviews('c'), 1)
+        reactivated = self.store.retry_plan(self.plan['id'])
+        self.assertIsNone(reactivated['lastDeferralClass'])
+
     def test_migration_from_v17_preserves_plans_and_adds_v18_atomically(self):
         self.store._connection.execute('DELETE FROM schema_migrations WHERE version=18')
         for table in ('name_approval_events','name_approvals','name_approval_scopes','subtitle_publications','recovery_review_holds'):
@@ -155,6 +182,11 @@ class NameApprovalApiTests(unittest.TestCase):
         detail = self.service.review_cues(self.plan['id'], 1, 100)
         self.assertEqual(detail['decisionRevision'], 0)
         self.assertTrue(all(cue['canApproveCue'] for cue in detail['items']))
+        source_cues = parse_srt_cues(self.source.read_text(encoding='utf-8'))[0]
+        multiline = next(cue for cue in detail['items'] if cue['cueNumber'] == 2)
+        self.assertEqual(multiline['sourceCueHash'], cue_text_hash(source_cues[1]))
+        self.assertNotEqual(multiline['sourceCueHash'],
+            hashlib.sha256(multiline['sourceText'].encode('utf-8')).hexdigest())
         for cue in detail['items']:
             payload = {**{key: detail[key] for key in ('expectedUpdatedAt','decisionRevision','sourceHash','candidateHash')},
                        'action': 'approve_cue', 'cueNumber': cue['cueNumber'],
@@ -172,3 +204,22 @@ class NameApprovalApiTests(unittest.TestCase):
         self.assertEqual((replay_status, replay['outcome']), (202, 'queued'))
         self.assertEqual(len([action for action in self.store.manual_review_actions(self.plan['id'])
                               if action['action'] == 'finish_review']), 1)
+        queued = self.store.retry_plan(self.plan['id'])
+        self.assertEqual(queued['state'], 'regeneration_waiting')
+        self.assertIsNone(queued['lastDeferralClass'])
+        decisions = self.store.cue_decision_snapshot(self.store.retry_plan(self.plan['id']))
+        report = validate_subtitle_pair(self.source, self.candidate, build_detector(),
+            target_language_for_code('sv'), target_lang='sv', min_chars=1,
+            approved_cue_findings=decisions['approved'])
+        self.assertNotIn('copied_source', {issue.rule for issue in report.issues})
+        self.assertEqual(
+            {observation.cue_number for observation in report.observations
+             if observation.classification == 'operator_approved'},
+            {1, 2},
+        )
+        self.assertTrue(report.valid, report.summary())
+        self.assertTrue(self.store.resolve_retry_plan(
+            self.plan['id'], file_sha256(self.source), outcome='accepted_after_retry'))
+        resolved = self.store.retry_plan(self.plan['id'])
+        self.assertEqual(resolved['state'], 'accepted_after_retry')
+        self.assertIsNone(resolved['lastDeferralClass'])
