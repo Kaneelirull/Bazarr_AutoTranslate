@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DashboardApp } from "../src/dashboard/App";
 import { attentionReasons } from "../src/dashboard/HealthHistory";
 import { StatusBadge } from "../src/dashboard/format";
+import { Observations } from "../src/dashboard/Observations";
 import { mergeRecentOutcomes } from "../src/dashboard/Work";
 import type { StatusSnapshot } from "../src/dashboard/types";
 
@@ -18,6 +19,25 @@ const snapshot: StatusSnapshot = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("DashboardApp", () => {
+  it("renders and filters operator-approved validation evidence", async () => {
+    const user = userEvent.setup();
+    render(<Observations timeZone="UTC" observations={[
+      { title: "Shameless (US)", episodeCode: "S10E05", itemType: "episodes", itemId: 12165,
+        targetLanguage: "sv", cueNumber: 1223, classification: "operator_approved",
+        reason: "Cue findings approved by operator.", timestamp: "2026-09-04T06:35:20Z",
+        evidence: { operatorApproved: true, rules: ["copied_source"] } },
+      { title: "Other", itemType: "movies", classification: "ambiguous", timestamp: "2026-09-04T06:34:20Z" },
+    ]} />);
+
+    expect(screen.getAllByText("Operator approved")).not.toHaveLength(0);
+    expect(screen.getByText("Approved rules")).toBeInTheDocument();
+    expect(screen.getByText("copied source")).toBeInTheDocument();
+    await user.click(screen.getByText("More filters"));
+    await user.selectOptions(screen.getByLabelText("Classification"), "operator_approved");
+    expect(screen.getByText("Shameless (US)")).toBeInTheDocument();
+    expect(screen.queryByText("Other")).not.toBeInTheDocument();
+  });
+
   it("merges translation and maintenance outcomes newest first", () => {
     const rows = mergeRecentOutcomes(
       [{ title: "Translation", timestamp: "2026-08-18T08:00:00Z" }],

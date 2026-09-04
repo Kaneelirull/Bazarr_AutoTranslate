@@ -89,15 +89,16 @@ MAINTENANCE_KEYS = (
     "variant_outputs",
     "failures",
 )
-VALIDATION_OBSERVATION_CLASSES = {"likely_invariant", "ambiguous"}
+VALIDATION_OBSERVATION_CLASSES = {"likely_invariant", "ambiguous", "operator_approved"}
 VALIDATION_OBSERVATION_REASONS = {
     "Copy retained because its structure indicates an invariant name or model.",
     "Exact Title Case copy retained by the balanced policy.",
+    "Cue findings approved by operator.",
 }
 VALIDATION_EVIDENCE_KEYS = {
     "similarity", "exactNormalizedCopy", "tokenCount", "tokenShape",
     "modelMarkerCount", "cueLanguage", "cueLanguageConfidence",
-    "wholeTargetConfidence", "contextConfidence",
+    "wholeTargetConfidence", "contextConfidence", "operatorApproved", "rules",
 }
 CYCLE_METRIC_KEYS = (
     "cycle_suppressions",
@@ -715,8 +716,20 @@ class StatusTracker:
         safe_evidence: dict[str, object] = {}
         for key in VALIDATION_EVIDENCE_KEYS:
             value = (evidence or {}).get(key)
-            if key in ("exactNormalizedCopy",):
+            if key in ("exactNormalizedCopy", "operatorApproved"):
                 safe_evidence[key] = bool(value)
+            elif key == "rules":
+                rules: list[str] = []
+                for rule in value if isinstance(value, (list, tuple)) else ():
+                    if (
+                        isinstance(rule, str)
+                        and re.fullmatch(r"[a-z0-9_:-]{1,32}", rule)
+                        and rule not in rules
+                    ):
+                        rules.append(rule)
+                        if len(rules) == 16:
+                            break
+                safe_evidence[key] = rules
             elif key in ("tokenCount", "modelMarkerCount"):
                 safe_evidence[key] = max(0, int(value or 0))
             elif key in (
