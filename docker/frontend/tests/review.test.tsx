@@ -14,7 +14,10 @@ const cueListing = { planId: 7, expectedUpdatedAt: item.updatedAt, sourceHash: "
 
 function requestPath(input: RequestInfo | URL) { return typeof input === "string" ? input : input.toString(); }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  window.history.replaceState(null, "", "/review");
+});
 
 describe("ReviewApp", () => {
   it("loads after Strict Mode replays the initial request effect", async () => {
@@ -48,7 +51,7 @@ describe("ReviewApp", () => {
     const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
       if (requestPath(input).includes("/cues")) return new Response(JSON.stringify(cueListing), { status: 200 });
       listCalls += 1;
-      return listCalls === 1 ? new Response(JSON.stringify(listing), { status: 200 }) : new Response(JSON.stringify({ error: { message: "temporarily unavailable" } }), { status: 503 });
+      return listCalls === 2 ? new Response(JSON.stringify({ error: { message: "temporarily unavailable" } }), { status: 503 }) : new Response(JSON.stringify(listing), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
@@ -57,6 +60,85 @@ describe("ReviewApp", () => {
     await user.click(screen.getByRole("button", { name: "Refresh now" }));
     expect(await screen.findByText(/Could not refresh manual reviews.*temporarily unavailable/)).toBeInTheDocument();
     expect(screen.getAllByText("Example Show").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Retry recovery" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Refresh now" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry recovery" })).toBeEnabled());
+  });
+
+  it("preserves draft filters when a background refresh completes", async () => {
+    let listCalls = 0;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      if (requestPath(input).includes("/cues")) return new Response(JSON.stringify(cueListing), { status: 200 });
+      listCalls += 1;
+      return new Response(JSON.stringify(listing), { status: 200 });
+    }));
+    const user = userEvent.setup();
+    render(<ReviewApp pollInterval={20} />);
+    await screen.findAllByText("Example Show");
+    await user.type(screen.getByLabelText("Search"), "unapplied draft");
+    await waitFor(() => expect(listCalls).toBeGreaterThan(1));
+    expect(screen.getByLabelText("Search")).toHaveValue("unapplied draft");
+  });
+
+  it("sanitizes bookmarked filters before the first request", async () => {
+    window.history.replaceState(null, "", `/review?page=oops&pageSize=500&status=unknown&itemType=bad&sort=nope&direction=sideways&q=${"x".repeat(120)}&language=${"e".repeat(30)}`);
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => new Response(JSON.stringify(requestPath(input).includes("/cues") ? cueListing : listing), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ReviewApp pollInterval={60_000} />);
+    await screen.findAllByText("Example Show");
+    const request = requestPath(fetchMock.mock.calls.find(([input]) => requestPath(input).startsWith("/api/manual-reviews?"))![0]);
+    const query = new URL(request, "http://example.test").searchParams;
+    expect(Object.fromEntries(query)).toMatchObject({ page: "1", pageSize: "20", status: "", itemType: "", sort: "updatedAt", direction: "desc" });
+    expect(query.get("q")).toHaveLength(100);
+    expect(query.get("language")).toHaveLength(20);
+  });
+
+  it("can reset filters after the initial list request fails", async () => {
+    window.history.replaceState(null, "", "/review?status=dismissed&q=example&review=7");
+    let listCalls = 0;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      if (requestPath(input).includes("/cues")) return new Response(JSON.stringify(cueListing), { status: 200 });
+      listCalls += 1;
+      return listCalls === 1
+        ? new Response(JSON.stringify({ error: { message: "temporarily unavailable" } }), { status: 503 })
+        : new Response(JSON.stringify(listing), { status: 200 });
+    }));
+    const user = userEvent.setup();
+    render(<ReviewApp pollInterval={60_000} />);
+    await user.click(await screen.findByRole("button", { name: "Reset filters" }));
+    await screen.findAllByText("Example Show");
+    expect(window.location.search).not.toContain("status=");
+    expect(window.location.search).not.toContain("q=");
+    expect(new URLSearchParams(window.location.search).get("review")).toBe("7");
+  });
+
+  it("resets cue pagination when finishing advances to the next review", async () => {
+    const nextItem = { ...item, id: 8, itemId: 5, updatedAt: item.updatedAt + 1, media: { title: "Next Show", episodeCode: "S01E03" } };
+    const cue = { cueNumber: 1, timestamp: "00:00:01,000 --> 00:00:02,000", sourceText: "Source", targetText: "Target", sourceCueHash: "c".repeat(64), targetCueHash: "d".repeat(64), reason: "Review", rules: ["copied_source"], canApproveName: true, canApproveCue: true, decision: "approve", context: [] };
+    let finished = false;
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestPath(input);
+      if (init?.method === "POST") { finished = true; return new Response(JSON.stringify({ outcome: "queued" }), { status: 202 }); }
+      if (path.includes("/cues")) {
+        const reviewId = Number(path.split("/")[3]);
+        const requestedPage = Number(new URL(path, "http://example.test").searchParams.get("page"));
+        const total = reviewId === 7 ? 2 : 1;
+        const page = Math.min(requestedPage, total);
+        return new Response(JSON.stringify({ ...cueListing, planId: reviewId, expectedUpdatedAt: reviewId === 7 ? item.updatedAt : nextItem.updatedAt, items: [{ ...cue, cueNumber: page }], pagination: { page, pageSize: 1, total }, decisionCounts: { approved: total, retry: 0, undecided: 0 } }), { status: 200 });
+      }
+      return new Response(JSON.stringify(finished
+        ? { ...listing, items: [nextItem], pagination: { page: 1, pageSize: 20, total: 1 } }
+        : { ...listing, items: [item, nextItem], pagination: { page: 1, pageSize: 20, total: 2 } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<ReviewApp pollInterval={60_000} />);
+    await user.click(await screen.findByRole("button", { name: "Next issue" }));
+    expect(await screen.findByText("2 of 2")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Finish review" }));
+    expect(await screen.findByText("1 of 1")).toBeInTheDocument();
+    expect(screen.getAllByText("Next Show").length).toBeGreaterThan(0);
+    expect(fetchMock.mock.calls.some(([input]) => requestPath(input).includes("/8/cues?page=1&pageSize=1"))).toBe(true);
   });
 
   it("keeps action controls disabled in read-only mode", async () => {

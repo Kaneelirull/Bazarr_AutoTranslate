@@ -34,7 +34,8 @@ class CueReviewMixin:
                 if self.hash_file(source) != source_hash or self.hash_file(candidate) != candidate_hash:
                     raise ManualReviewConflict('review files changed')
         page_size = max(1, min(100, int(page_size)))
-        page = max(1, int(page))
+        last_page = max(1, (len(cues) + page_size - 1) // page_size)
+        page = min(max(1, int(page)), last_page)
         saved = {int(value['cue_number']): value for value in decision_snapshot['decisions']
                  if value['source_hash'] == source_hash and value['candidate_hash'] == candidate_hash}
         for cue in cues:

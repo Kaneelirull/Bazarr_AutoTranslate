@@ -53,3 +53,35 @@ it("disables approval and revocation with global actions disabled", async () => 
   expect(await screen.findByRole("button", { name: "Approve cue" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "Forget approval" })).toBeDisabled();
 });
+
+it("keeps cue navigation available when mutations are disabled", async () => {
+  const fetch = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+    const page = Number(new URL(String(input), "http://example.test").searchParams.get("page"));
+    return response({ ...data, items: [{ ...cue, cueNumber: page }], pagination: { page, pageSize: 1, total: 2 } });
+  });
+  vi.stubGlobal("fetch", fetch);
+  const user = userEvent.setup();
+  render(<CueReview item={item} disabled onMutation={vi.fn()} />);
+  const next = await screen.findByRole("button", { name: "Next issue" });
+  expect(next).toBeEnabled();
+  await user.click(next);
+  expect(await screen.findByText("2 of 2")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Approve cue" })).toBeDisabled();
+});
+
+it("adopts a clamped page returned by the server", async () => {
+  let clamped = false;
+  const fetch = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+    const requested = Number(new URL(String(input), "http://example.test").searchParams.get("page"));
+    if (requested === 2) clamped = true;
+    const total = clamped ? 1 : 2;
+    const page = Math.min(requested, total);
+    return response({ ...data, items: [{ ...cue, cueNumber: page }], pagination: { page, pageSize: 1, total } });
+  });
+  vi.stubGlobal("fetch", fetch);
+  const user = userEvent.setup();
+  render(<CueReview item={item} disabled={false} onMutation={vi.fn()} />);
+  await user.click(await screen.findByRole("button", { name: "Next issue" }));
+  await waitFor(() => expect(screen.getByText("1 of 1")).toBeInTheDocument());
+  expect(screen.queryByText("2 of 1")).not.toBeInTheDocument();
+});

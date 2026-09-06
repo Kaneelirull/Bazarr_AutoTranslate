@@ -132,6 +132,54 @@ class ManualReviewTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_finish_ignores_stale_decisions_from_a_replaced_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self.make_store(root)
+            try:
+                plan = self.make_plan(store, root, failed_hash="old-candidate")
+                first = {
+                    "cueNumber": 1, "timestamp": "00:00:01,000 --> 00:00:02,000",
+                    "sourceCueHash": "a" * 64, "targetCueHash": "b" * 64,
+                    "sourceText": "First", "targetText": "Esimene", "rules": ["copied_source"],
+                }
+                second = {
+                    "cueNumber": 2, "timestamp": "00:00:03,000 --> 00:00:04,000",
+                    "sourceCueHash": "c" * 64, "targetCueHash": "d" * 64,
+                    "sourceText": "Second", "targetText": "Teine", "rules": ["copied_source"],
+                }
+                plan = store.save_cue_decision(
+                    plan["id"], plan["updatedAt"], 0, cue=first,
+                    decision="approve", remember_phrase=False,
+                )
+                plan = store.save_cue_decision(
+                    plan["id"], plan["updatedAt"], 1, cue=second,
+                    decision="approve", remember_phrase=True,
+                )
+                replacement, repeated = store.schedule_retry_plan(
+                    item_type="episodes", item_id=443, target_language="et",
+                    source_hash=plan["sourceHash"], source_path=plan["sourcePath"],
+                    source_language="en", target_path=plan["targetPath"],
+                    series_key="sonarr:77", series_title="Top Gear",
+                    media_title="Top Gear S14E01", failure_class="whole_file",
+                    rules=["copied_source"], state="regeneration_waiting",
+                    failed_output_hash="new-candidate", eligible_completed_cycle=4,
+                )
+                self.assertFalse(repeated)
+                replacement = store.save_cue_decision(
+                    replacement["id"], replacement["updatedAt"], 2, cue=first,
+                    decision="retry", remember_phrase=False,
+                )
+
+                finished = store.finish_cue_review(
+                    replacement["id"], replacement["updatedAt"], 3, [1], 9,
+                )
+
+                self.assertIsNone(finished["lastDeferralClass"])
+                self.assertEqual(store.name_approval_snapshot(finished)["pairs"], [])
+            finally:
+                store.close()
+
     def test_ignored_review_can_be_reopened_without_queueing_work(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

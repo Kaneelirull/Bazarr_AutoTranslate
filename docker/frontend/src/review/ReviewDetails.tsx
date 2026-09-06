@@ -13,7 +13,7 @@ export function ReviewDetails({ item, timeZone, disabled = false, onMutation = (
     ["Media", item.mediaRelativePath, item.mediaAvailable, item.mediaAvailabilityReason],
   ];
   return <>
-    <CueReview item={item} disabled={disabled} onMutation={onMutation} />
+    <CueReview key={item.id} item={item} disabled={disabled} onMutation={onMutation} />
     <details className="review-details">
     <summary>Recovery details</summary>
     <dl className="review-detail-grid">
