@@ -65,6 +65,8 @@ class ValidationTask:
     completeness_kwargs: dict = field(default_factory=dict)
     undersized_enabled: bool = True
     ffprobe_timeout: int = 15
+    duration_probed: bool = False
+    media_duration_seconds: float | None = None
     approval_revision: int = 0
     approval_scope: str | None = None
 
@@ -97,6 +99,22 @@ class ValidationResult:
         }
 
 
+@dataclass(frozen=True)
+class MediaProbeTask:
+    sequence: int
+    video_path: str
+    timeout: int = 15
+
+
+@dataclass(frozen=True)
+class MediaProbeResult:
+    sequence: int
+    video_path: str
+    video_stat: MaintenanceFileStat | None
+    duration_seconds: float | None
+    error: str | None = None
+
+
 def _file_sha256(path: str | Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -123,6 +141,22 @@ def _probe_duration(path: str | None, timeout: int) -> float | None:
         return duration if duration > 0 else None
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
+
+
+def analyze_media_probe_task(task: MediaProbeTask) -> MediaProbeResult:
+    stat = MaintenanceFileStat.capture(task.video_path)
+    if stat is None:
+        return MediaProbeResult(
+            task.sequence, task.video_path, None, None, "video_unavailable",
+        )
+    duration = _probe_duration(task.video_path, task.timeout)
+    return MediaProbeResult(
+        task.sequence,
+        task.video_path,
+        stat,
+        duration,
+        None if duration is not None else "duration_unavailable",
+    )
 
 
 def analyze_validation_task(task: ValidationTask) -> ValidationResult:
@@ -167,7 +201,10 @@ def analyze_validation_task(task: ValidationTask) -> ValidationResult:
             )
             result.target_hash = _file_sha256(task.target_path)
             result.report = validate_srt_structure(Path(task.target_path))
-            duration = _probe_duration(task.video_path, task.ffprobe_timeout)
+            duration = (
+                task.media_duration_seconds if task.duration_probed
+                else _probe_duration(task.video_path, task.ffprobe_timeout)
+            )
             if task.undersized_enabled and duration is not None:
                 result.completeness = evaluate_subtitle_completeness(
                     task.target_path, duration, **task.completeness_kwargs,
@@ -202,7 +239,10 @@ def analyze_validation_task(task: ValidationTask) -> ValidationResult:
                 Path(task.target_path), detector, language,
                 target_lang=task.target_language, **task.validation_kwargs,
             )
-        duration = _probe_duration(task.video_path, task.ffprobe_timeout)
+        duration = (
+            task.media_duration_seconds if task.duration_probed
+            else _probe_duration(task.video_path, task.ffprobe_timeout)
+        )
         if task.undersized_enabled and duration is not None:
             result.completeness = evaluate_subtitle_completeness(
                 task.target_path, duration, **task.completeness_kwargs,
@@ -238,12 +278,13 @@ class MaintenanceWorkerPool:
             )
         return self._executor
 
-    def map_ordered(
+    def _map_ordered(
         self,
-        tasks: Iterable[ValidationTask],
+        tasks: Iterable,
+        analyze: Callable,
         *,
         stop_requested: Callable[[], bool] = lambda: False,
-    ) -> Iterator[ValidationResult]:
+    ) -> Iterator:
         executor = self._executor_for_run()
         iterator = iter(tasks)
         pending: dict[Future, ValidationTask] = {}
@@ -264,7 +305,7 @@ class MaintenanceWorkerPool:
                     exhausted = True
                     return
                 submission_order.append(task.sequence)
-                pending[executor.submit(analyze_validation_task, task)] = task
+                pending[executor.submit(analyze, task)] = task
 
         fill()
         while pending:
@@ -278,22 +319,48 @@ class MaintenanceWorkerPool:
                 try:
                     buffered[task.sequence] = future.result()
                 except Exception as exc:
-                    buffered[task.sequence] = ValidationResult(
-                        sequence=task.sequence,
-                        target_path=task.target_path,
-                        target_language=task.target_language,
-                        target_stat=None,
-                        source_stat=None,
-                        video_stat=None,
-                        receipt_stat=None,
-                        error=type(exc).__name__,
-                    )
+                    if isinstance(task, MediaProbeTask):
+                        buffered[task.sequence] = MediaProbeResult(
+                            task.sequence, task.video_path, None, None,
+                            type(exc).__name__,
+                        )
+                    else:
+                        buffered[task.sequence] = ValidationResult(
+                            sequence=task.sequence,
+                            target_path=task.target_path,
+                            target_language=task.target_language,
+                            target_stat=None,
+                            source_stat=None,
+                            video_stat=None,
+                            receipt_stat=None,
+                            error=type(exc).__name__,
+                        )
             while submission_order and submission_order[0] in buffered:
                 yield buffered.pop(submission_order.popleft())
             fill()
         if stop_requested():
             for future in pending:
                 future.cancel()
+
+    def map_ordered(
+        self,
+        tasks: Iterable[ValidationTask],
+        *,
+        stop_requested: Callable[[], bool] = lambda: False,
+    ) -> Iterator[ValidationResult]:
+        return self._map_ordered(
+            tasks, analyze_validation_task, stop_requested=stop_requested,
+        )
+
+    def probe_media_ordered(
+        self,
+        tasks: Iterable[MediaProbeTask],
+        *,
+        stop_requested: Callable[[], bool] = lambda: False,
+    ) -> Iterator[MediaProbeResult]:
+        return self._map_ordered(
+            tasks, analyze_media_probe_task, stop_requested=stop_requested,
+        )
 
     def shutdown(
         self, *, wait_for_workers: bool = True, grace_seconds: float = 30.0,
@@ -340,6 +407,7 @@ def cache_entry_matches(
 
 
 __all__ = [
-    "MaintenanceFileStat", "MaintenanceWorkerPool", "ValidationResult",
-    "ValidationTask", "analyze_validation_task", "cache_entry_matches",
+    "MaintenanceFileStat", "MaintenanceWorkerPool", "MediaProbeResult",
+    "MediaProbeTask", "ValidationResult", "ValidationTask",
+    "analyze_media_probe_task", "analyze_validation_task", "cache_entry_matches",
 ]

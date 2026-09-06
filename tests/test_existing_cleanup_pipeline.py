@@ -511,6 +511,75 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             (root / f"movie.{language}.srt").write_text(make_srt(f"Valid {language}"), encoding="utf-8")
         return root, video
 
+    def test_full_scan_probes_once_reuses_cache_evidence_and_backfills_legacy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "media"
+            root.mkdir()
+            video = root / "movie.mkv"
+            target = root / "movie.et.srt"
+            extra = root / "movie.commentary.srt"
+            video.write_bytes(b"video")
+            target.write_text(
+                make_timed_srt(
+                    150, 3500,
+                    "See on selgelt eestikeelne dialoog terve filmi jaoks.",
+                ),
+                encoding="utf-8",
+            )
+            extra.write_text(make_srt("Extra subtitle"), encoding="utf-8")
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["et"],
+                    CLEANUP_LANGUAGES={"et"},
+                    CLEANUP_ROOTS=[root, root],
+                    CLEANUP_PRUNE_EXTRA_LANGUAGES=True,
+                    CLEANUP_PRUNE_ACTION="report",
+                    CLEANUP_PRUNE_SPECIAL_SIDECARS=True,
+                    CLEANUP_SCAN_EXISTING=True,
+                    CLEANUP_SCAN_DRY_RUN=False,
+                    CLEANUP_UNDERSIZED_ENABLED=True,
+                ),
+                patch.object(
+                    app, "_probe_media_duration", return_value=3600.0,
+                ) as probe,
+                patch.object(app, "_find_sidecar_video") as legacy_lookup,
+            ):
+                first = app.run_existing_cleanup_scan()
+                probe.assert_called_once_with(str(video))
+                legacy_lookup.assert_not_called()
+
+                cache_key = maintenance_runtime._maintenance_path_key(target)
+                cached = app._validation_state.maintenance_cache_entries([target])
+                self.assertIsInstance(
+                    cached[cache_key]["details"]["pruneEvidence"], dict,
+                )
+                self.assertEqual(
+                    cached[cache_key]["details"]["mediaDurationSeconds"], 3600.0,
+                )
+
+                with patch.object(
+                    app, "_managed_sidecar_is_valid",
+                    side_effect=AssertionError("cached evidence should be reused"),
+                ):
+                    second = app.run_existing_cleanup_scan()
+                self.assertEqual(second["tasks_submitted"], 0)
+
+                legacy = dict(cached[cache_key])
+                legacy["details"] = dict(legacy["details"])
+                legacy["details"].pop("mediaDurationSeconds")
+                legacy["details"].pop("pruneEvidence")
+                app._validation_state.upsert_maintenance_cache_entries([legacy])
+                third = app.run_existing_cleanup_scan()
+                self.assertGreaterEqual(third["tasks_submitted"], 1)
+                backfilled = app._validation_state.maintenance_cache_entries([target])
+                self.assertIn("mediaDurationSeconds", backfilled[cache_key]["details"])
+                self.assertIsInstance(
+                    backfilled[cache_key]["details"]["pruneEvidence"], dict,
+                )
+
+            self.assertEqual(first["prune_reported"], 1)
+
     def test_prune_quarantines_recognized_extra_languages_and_special_tracks(self):
         with tempfile.TemporaryDirectory() as directory:
             root, video = self._prune_fixture(directory)
@@ -561,6 +630,12 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 state="pruning",
             )
             self.assertEqual(complete_status.call_args.args[:2], ("prune-status", "accepted"))
+            completed_details = complete_status.call_args.kwargs["details"]
+            self.assertEqual(completed_details["maintenanceStage"], "pruning")
+            self.assertEqual(completed_details["stageItemsTotal"], 1)
+            self.assertEqual(completed_details["stageItemsCompleted"], 1)
+            self.assertEqual(completed_details["stageItemsRemaining"], 0)
+            self.assertEqual(completed_details["stageUnit"], "videos")
             self.assertEqual(record_outcome.call_count, 3)
             self.assertTrue(all(
                 call.args[0:2] == ("sidecar_pruning", "pruned")
@@ -2652,6 +2727,29 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(
                 snapshot["maintenance"]["lastScan"]["metrics"]["repaired"], 1
             )
+
+    def test_scan_stage_progress_reports_stage_eta_and_honest_total(self):
+        context = {
+            "started": 100.0,
+            "stage_started": 110.0,
+            "stats": {},
+            "files_discovered": 7429,
+            "files_checked": 7429,
+            "maintenance_stage": "pruning",
+            "stage_items_total": 5,
+            "stage_items_completed": 2,
+            "stage_unit": "videos",
+        }
+
+        with patch.object(status_runtime._runtime.time, "monotonic", return_value=120.0):
+            details = app._scan_progress_details(context)
+
+        self.assertEqual(details["maintenanceStage"], "pruning")
+        self.assertEqual(details["stageItemsCompleted"], 2)
+        self.assertEqual(details["stageItemsRemaining"], 3)
+        self.assertEqual(details["progress"], 40.0)
+        self.assertEqual(details["etaSeconds"], 15.0)
+        self.assertGreaterEqual(details["estimatedSeconds"], 20.0)
 
     def test_cleanup_scan_retries_terminal_persistence_without_double_counting(self):
         scan_id = "scan-retry"

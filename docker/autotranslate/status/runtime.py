@@ -228,26 +228,119 @@ def _scan_progress_details(context: dict) -> dict:
     discovered = int(context.get('files_discovered', 0))
     checked = int(context.get('files_checked', 0))
     elapsed = max(0.001, _runtime.time.monotonic() - context['started'])
-    remaining = max(0, discovered - checked)
-    eta = round(elapsed / checked * remaining, 1) if checked else None
-    details = {'filesDiscovered': discovered, 'filesChecked': checked, 'filesRemaining': remaining, 'unchangedFilesSkipped': stats.get('skipped_unchanged', 0), 'maintenanceWorkers': stats.get('maintenance_workers', 1), 'cacheHits': stats.get('cache_hits', 0), 'tasksSubmitted': stats.get('tasks_submitted', 0), 'tasksCompleted': stats.get('tasks_completed', 0), 'workerFailures': stats.get('worker_failures', 0), 'validationsPerformed': stats.get('files_checked', 0), 'formatRepairs': stats.get('formatted_files', 0), 'cueRepairsQueued': context.get('repairs_queued', 0), 'cueRepairsCompleted': context.get('repairs_completed', 0), 'quarantines': stats.get('quarantined_files', 0) + stats.get('undersized_quarantined', 0) + stats.get('prune_quarantined', 0), 'failures': _runtime._maintenance_metrics(stats)['failures'], 'progress': round(checked * 100 / max(1, discovered), 1), 'estimatedSeconds': round(elapsed + eta, 1) if eta is not None else None, 'etaSeconds': eta}
+    file_remaining = max(0, discovered - checked)
+    stage_total = context.get('stage_items_total')
+    stage_completed = int(context.get('stage_items_completed', 0))
+    stage_remaining = (
+        max(0, int(stage_total) - stage_completed)
+        if isinstance(stage_total, int) else None
+    )
+    stage_elapsed = max(
+        0.001, _runtime.time.monotonic() - context.get('stage_started', context['started'])
+    )
+    eta = (
+        round(stage_elapsed / stage_completed * stage_remaining, 1)
+        if stage_completed and stage_remaining is not None else None
+    )
+    has_stage = bool(context.get('maintenance_stage'))
+    if not has_stage:
+        stage_remaining = None
+        eta = round(elapsed / checked * file_remaining, 1) if checked else None
+        progress = round(checked * 100 / max(1, discovered), 1)
+    elif stage_total is None:
+        progress = 0
+    elif int(stage_total) == 0:
+        progress = 100
+        eta = 0.0
+    else:
+        progress = round(stage_completed * 100 / max(1, int(stage_total)), 1)
+    details = {
+        'filesDiscovered': discovered, 'filesChecked': checked,
+        'filesRemaining': file_remaining,
+        'unchangedFilesSkipped': stats.get('skipped_unchanged', 0),
+        'maintenanceWorkers': stats.get('maintenance_workers', 1),
+        'cacheHits': stats.get('cache_hits', 0),
+        'tasksSubmitted': stats.get('tasks_submitted', 0),
+        'tasksCompleted': stats.get('tasks_completed', 0),
+        'workerFailures': stats.get('worker_failures', 0),
+        'validationsPerformed': stats.get('files_checked', 0),
+        'formatRepairs': stats.get('formatted_files', 0),
+        'cueRepairsQueued': context.get('repairs_queued', 0),
+        'cueRepairsCompleted': context.get('repairs_completed', 0),
+        'quarantines': stats.get('quarantined_files', 0)
+        + stats.get('undersized_quarantined', 0)
+        + stats.get('prune_quarantined', 0),
+        'failures': _runtime._maintenance_metrics(stats)['failures'],
+        'maintenanceStage': context.get('maintenance_stage'),
+        'stageItemsTotal': stage_total,
+        'stageItemsCompleted': stage_completed,
+        'stageItemsRemaining': stage_remaining,
+        'stageUnit': context.get('stage_unit'),
+        'progress': progress,
+        'estimatedSeconds': round(max(elapsed, elapsed + eta), 1) if eta is not None else None,
+        'etaSeconds': eta,
+    }
     return details
+
+
+def _set_scan_stage(
+    scan_job_id: str | None, stage: str, *, total: int | None, unit: str,
+    state: str='scanning', completed: int=0,
+) -> None:
+    if not scan_job_id:
+        return
+    with _runtime._maintenance_scan_contexts_lock:
+        context = _runtime._maintenance_scan_contexts.get(scan_job_id)
+        if context is None:
+            return
+        context.update({
+            'maintenance_stage': stage,
+            'stage_items_total': None if total is None else max(0, int(total)),
+            'stage_items_completed': max(0, int(completed)),
+            'stage_unit': unit,
+            'stage_started': _runtime.time.monotonic(),
+            'stage_state': state,
+            'last_publish': 0.0,
+        })
+        details = _runtime._scan_progress_details(context)
+    _runtime._status_update_maintenance(scan_job_id, state, details=details)
+
+
+def _advance_scan_stage(scan_job_id: str | None, count: int=1, *, force: bool=False) -> None:
+    if not scan_job_id:
+        return
+    with _runtime._maintenance_scan_contexts_lock:
+        context = _runtime._maintenance_scan_contexts.get(scan_job_id)
+        if context is None:
+            return
+        total = context.get('stage_items_total')
+        completed = int(context.get('stage_items_completed', 0)) + max(0, int(count))
+        context['stage_items_completed'] = min(completed, total) if isinstance(total, int) else completed
+    _runtime._publish_scan_progress(scan_job_id, force=force)
 
 def _publish_scan_progress(scan_job_id: str | None, *, force: bool=False) -> None:
     if not scan_job_id:
         return
     details = None
+    state = 'scanning'
     with _runtime._maintenance_scan_contexts_lock:
         context = _runtime._maintenance_scan_contexts.get(scan_job_id)
         if context is None:
             return
         now = _runtime.time.monotonic()
-        should_publish = bool(force or context['files_checked'] == 1 or now - context.get('last_publish', 0) >= 0.5 or (context['files_checked'] >= context['files_discovered']))
+        stage_done = (
+            isinstance(context.get('stage_items_total'), int)
+            and context.get('stage_items_completed', 0) >= context['stage_items_total']
+        )
+        should_publish = bool(force or context['files_checked'] == 1 or now - context.get('last_publish', 0) >= 0.5 or stage_done)
         if should_publish:
             context['last_publish'] = now
             details = _runtime._scan_progress_details(context)
+            state = context.get('stage_state', 'scanning')
     if details is not None:
-        _runtime._status_update_maintenance(scan_job_id, 'scanning', details=details)
+        _runtime._status_update_maintenance(
+            scan_job_id, state, details=details,
+        )
 
 def _scan_child_queued(scan_job_id: str | None) -> None:
     if not scan_job_id:
@@ -440,8 +533,8 @@ EXPORTS = {
         '_status_record_maintenance', '_status_create_maintenance',
         '_status_update_maintenance', '_status_complete_maintenance',
         '_status_record_maintenance_outcome', '_maintenance_file_identity',
-        '_maintenance_metrics', '_scan_progress_details',
-        '_publish_scan_progress', '_scan_child_queued', '_scan_child_finished',
+        '_maintenance_metrics', '_scan_progress_details', '_set_scan_stage',
+        '_advance_scan_stage', '_publish_scan_progress', '_scan_child_queued', '_scan_child_finished',
         '_schedule_scan_finalization_retry', '_retry_scan_finalization',
         '_scan_enumeration_finished', '_status_compact_history',
         '_status_finish_validation', '_get_cleanup_detector',

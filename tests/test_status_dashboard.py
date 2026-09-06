@@ -1002,6 +1002,11 @@ class StatusDashboardTests(unittest.TestCase):
                 details={
                     "currentAttempt": 1,
                     "repairStage": "secret dialogue /media/private",
+                    "maintenanceStage": "pruning",
+                    "stageItemsTotal": 10,
+                    "stageItemsCompleted": 4,
+                    "stageItemsRemaining": 6,
+                    "stageUnit": "videos",
                     "responseBody": "unsafe provider response",
                     "sourceContext": "subtitle dialogue",
                 },
@@ -1025,6 +1030,12 @@ class StatusDashboardTests(unittest.TestCase):
                 "subtitle dialogue",
             ):
                 self.assertNotIn(unsafe, payload)
+            active = tracker.snapshot()["maintenance"]["activeJobs"][0]
+            self.assertEqual(active["maintenanceStage"], "pruning")
+            self.assertEqual(active["stageItemsTotal"], 10)
+            self.assertEqual(active["stageItemsCompleted"], 4)
+            self.assertEqual(active["stageItemsRemaining"], 6)
+            self.assertEqual(active["stageUnit"], "videos")
 
     def test_dashboard_assets_render_maintenance_and_adaptive_refresh(self):
         source_root = REPO_ROOT / "docker" / "frontend" / "src" / "dashboard"

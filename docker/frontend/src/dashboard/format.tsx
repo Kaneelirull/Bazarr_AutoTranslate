@@ -92,12 +92,22 @@ export function Progress({ row }: { row: DataRow }) {
   const total = numberValue(row.totalRepairableCues);
   const completed = numberValue(row.completedCues);
   const cue = row.currentCueNumber ?? row.currentCuePosition;
-  let detail = total ? `${completed} of ${total} cues${cue != null ? `; cue ${cue}` : ""}` : "";
+  let detail = "";
+  const stageTotal = row.stageItemsTotal == null ? 0 : numberValue(row.stageItemsTotal);
+  const stageCompleted = numberValue(row.stageItemsCompleted);
+  const stageLabels: Record<string, string> = { inventory: "Inventory", probing: "Probing media", validation: "Validating", pruning: "Pruning" };
+  const maintenanceStage = stageLabels[String(row.maintenanceStage || "")] || "";
+  if (maintenanceStage) {
+    detail = stageTotal
+      ? `${maintenanceStage}: ${stageCompleted.toLocaleString()} of ${stageTotal.toLocaleString()} ${String(row.stageUnit || "items")}`
+      : `${maintenanceStage} in progress`;
+  }
+  if (!detail && total) detail = `${completed} of ${total} cues${cue != null ? `; cue ${cue}` : ""}`;
   if (!detail && numberValue(row.filesDiscovered)) detail = `${numberValue(row.filesChecked)} of ${numberValue(row.filesDiscovered)} files`;
   const attempt = row.currentAttempt ? `Attempt ${numberValue(row.currentAttempt)} of ${numberValue(row.maxAttempts) || "n/a"}` : "";
-  const stage = ({ waiting_capacity: "Waiting for capacity", starting: "Starting repair", calling_lingarr: "Calling Lingarr", validating_candidate: "Validating returned cue", repairing: "Repairing cues", repair_validating: "Validating completed file", queued: "Queued" } as Record<string, string>)[row.repairStage] || "";
-  if (!detail && !attempt && !stage) return <span className="duration">n/a</span>;
-  return <div className="job-progress"><span>{[stage, detail, attempt].filter(Boolean).join(" / ")}</span><progress max={100} value={percent} aria-label={`${operationLabel(row.operation)} progress`}>{percent}%</progress></div>;
+  const repairStage = ({ waiting_capacity: "Waiting for capacity", starting: "Starting repair", calling_lingarr: "Calling Lingarr", validating_candidate: "Validating returned cue", repairing: "Repairing cues", repair_validating: "Validating completed file", queued: "Queued" } as Record<string, string>)[row.repairStage] || "";
+  if (!detail && !attempt && !repairStage) return <span className="duration">n/a</span>;
+  return <div className="job-progress"><span>{[repairStage, detail, attempt].filter(Boolean).join(" / ")}</span><progress max={100} value={percent} aria-label={`${operationLabel(row.operation)} progress`}>{percent}%</progress></div>;
 }
 
 export function Remaining({ row, now }: { row: DataRow; now: number }) {
