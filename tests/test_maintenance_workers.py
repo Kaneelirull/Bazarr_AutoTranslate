@@ -5,14 +5,17 @@ import threading
 import unittest
 from concurrent.futures import Future
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "docker"))
 
 from autotranslate.maintenance.workers import (  # noqa: E402
+    MediaProbeTask,
     MaintenanceWorkerPool,
     ValidationTask,
+    analyze_validation_task,
 )
 from autotranslate.persistence.state_store import StateStore  # noqa: E402
 
@@ -83,6 +86,56 @@ class _SlowHeadExecutor:
 
 
 class MaintenanceWorkerTests(unittest.TestCase):
+    def test_media_probe_pool_preserves_unique_submission_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            videos = []
+            for index in range(2):
+                video = Path(directory) / f"{index}.mkv"
+                video.write_bytes(b"video")
+                videos.append(video)
+            tasks = [
+                MediaProbeTask(sequence=index, video_path=str(video))
+                for index, video in enumerate(videos)
+            ]
+            pool = MaintenanceWorkerPool(2, executor_factory=_ImmediateExecutor)
+            try:
+                with patch(
+                    "autotranslate.maintenance.workers._probe_duration",
+                    return_value=120.0,
+                ) as probe:
+                    results = list(pool.probe_media_ordered(tasks))
+            finally:
+                pool.shutdown()
+            self.assertEqual([result.video_path for result in results], [str(path) for path in videos])
+            self.assertEqual(probe.call_count, 2)
+
+    def test_injected_duration_prevents_validation_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subtitle = Path(directory) / "movie.et.srt"
+            video = Path(directory) / "movie.mkv"
+            subtitle.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nText\n",
+                encoding="utf-8",
+            )
+            video.write_bytes(b"video")
+            task = ValidationTask(
+                sequence=0,
+                operation="structure",
+                target_path=str(subtitle),
+                target_language="et",
+                video_path=str(video),
+                duration_probed=True,
+                media_duration_seconds=120.0,
+            )
+
+            with patch(
+                "autotranslate.maintenance.workers._probe_duration"
+            ) as probe:
+                result = analyze_validation_task(task)
+
+            self.assertIsNone(result.error)
+            probe.assert_not_called()
+
     def test_non_contiguous_sequences_preserve_submission_order(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = []

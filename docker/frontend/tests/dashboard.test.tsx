@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DashboardApp } from "../src/dashboard/App";
 import { attentionReasons } from "../src/dashboard/HealthHistory";
-import { StatusBadge } from "../src/dashboard/format";
+import { Progress, StatusBadge } from "../src/dashboard/format";
 import { Observations } from "../src/dashboard/Observations";
 import { mergeRecentOutcomes } from "../src/dashboard/Work";
 import type { StatusSnapshot } from "../src/dashboard/types";
@@ -19,6 +19,23 @@ const snapshot: StatusSnapshot = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("DashboardApp", () => {
+  it("prefers maintenance-stage progress and supports legacy file counters", () => {
+    const { rerender } = render(<Progress row={{
+      operation: "existing-library scan", progress: 40,
+      maintenanceStage: "pruning", stageItemsCompleted: 1240,
+      stageItemsTotal: 3100, stageUnit: "videos",
+      filesChecked: 7429, filesDiscovered: 7429,
+      completedCues: 8, totalRepairableCues: 10,
+    }} />);
+    expect(screen.getByText("Pruning: 1,240 of 3,100 videos")).toBeInTheDocument();
+
+    rerender(<Progress row={{
+      operation: "existing-library scan", progress: 50,
+      filesChecked: 5, filesDiscovered: 10,
+    }} />);
+    expect(screen.getByText("5 of 10 files")).toBeInTheDocument();
+  });
+
   it("renders and filters operator-approved validation evidence", async () => {
     const user = userEvent.setup();
     render(<Observations timeZone="UTC" observations={[

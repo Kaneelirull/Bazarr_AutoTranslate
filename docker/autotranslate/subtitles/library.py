@@ -99,6 +99,17 @@ def discover_target_subtitles(
     roots: Iterable[Path],
     target_languages: Iterable[str],
 ) -> list[DiscoveredSubtitle]:
+    paths = (
+        path for root in roots if root.exists()
+        for path in root.rglob("*.srt")
+    )
+    return discover_target_subtitles_from_paths(paths, target_languages)
+
+
+def discover_target_subtitles_from_paths(
+    paths: Iterable[Path],
+    target_languages: Iterable[str],
+) -> list[DiscoveredSubtitle]:
     canonical_languages = {
         lang.strip().lower() for lang in target_languages if lang.strip()
     }
@@ -118,39 +129,36 @@ def discover_target_subtitles(
     from .sources import is_extracted_sidecar
     discovered: list[DiscoveredSubtitle] = []
     seen: set[Path] = set()
-    for root in roots:
-        if not root.exists():
+    for path in paths:
+        if not path.is_file() or path in seen or is_extracted_sidecar(path):
             continue
-        for path in root.rglob("*.srt"):
-            if not path.is_file() or path in seen or is_extracted_sidecar(path):
-                continue
-            match = pattern.search(path.name)
-            if match:
-                language_token = match.group("lang").lower()
-                seen.add(path)
-                discovered.append(DiscoveredSubtitle(
-                    path=path,
-                    target_lang=alias_to_language[language_token],
-                    variant=(match.group("variant") or "").lower(),
-                    language_token=language_token,
-                ))
+        match = pattern.search(path.name)
+        if match:
+            language_token = match.group("lang").lower()
+            seen.add(path)
+            discovered.append(DiscoveredSubtitle(
+                path=path,
+                target_lang=alias_to_language[language_token],
+                variant=(match.group("variant") or "").lower(),
+                language_token=language_token,
+            ))
     return sorted(discovered, key=lambda item: str(item.path).casefold())
 
 
 def find_preferred_source(
     candidate: DiscoveredSubtitle,
     source_codes: tuple[str, ...] = ("eng", "en"),
+    sibling_paths: Optional[Iterable[Path]] = None,
 ) -> tuple[Optional[Path], Optional[str]]:
     language_token = candidate.language_token or candidate.target_lang
     suffix = f".{language_token}{candidate.variant}.srt"
     if not candidate.path.name.lower().endswith(suffix):
         return None, None
     base_name = candidate.path.name[:-len(suffix)]
-    files_by_name = {
-        path.name.casefold(): path
-        for path in candidate.path.parent.iterdir()
-        if path.is_file()
-    }
+    siblings = sibling_paths
+    if siblings is None:
+        siblings = (path for path in candidate.path.parent.iterdir() if path.is_file())
+    files_by_name = {path.name.casefold(): path for path in siblings}
     variants = (candidate.variant, "") if candidate.variant else ("",)
     for variant in variants:
         for code in source_codes:

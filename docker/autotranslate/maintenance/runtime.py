@@ -1,85 +1,139 @@
 from __future__ import annotations
 from ..composition import runtime as _runtime
+from .inventory import (
+    MaintenanceInventory, build_inventory, build_scoped_inventory, path_key,
+)
 
-def _scan_undersized_sidecars(stats: dict) -> bool:
+def _scan_undersized_sidecars(
+    stats: dict, *, inventory: MaintenanceInventory | None=None,
+    durations: dict[str, float | None] | None=None,
+    prune_analyses: dict[str, object] | None=None,
+    existing_analyses: dict[str, object] | None=None,
+    prune_evidence: dict[str, dict] | None=None,
+    progress_callback=None,
+) -> bool:
     """Validate regular subtitle density for every language using sibling media duration."""
-    if not _runtime.CLEANUP_UNDERSIZED_ENABLED:
+    undersized_enabled = _runtime.CLEANUP_UNDERSIZED_ENABLED
+    if not undersized_enabled and prune_analyses is None:
         return False
     from ..subtitles.foundation import file_sha256, validate_srt_structure
     from ..subtitles.sources import is_extracted_sidecar
     from .workers import MaintenanceFileStat, ValidationTask
     changed = False
     seen: set[_runtime.Path] = set()
-    candidates: list[tuple[_runtime.Path, _runtime.Path, str]] = []
-    for root in _runtime.CLEANUP_ROOTS:
-        if not root.exists():
-            continue
-        for subtitle in root.rglob('*.srt'):
+    candidates: list[tuple[_runtime.Path, _runtime.Path, str, bool]] = []
+    roots_or_sidecars = (
+        (inventory.sidecars,) if inventory is not None
+        else tuple(root.rglob('*.srt') for root in _runtime.CLEANUP_ROOTS if root.exists())
+    )
+    for sidecars in roots_or_sidecars:
+        for subtitle in sidecars:
             if _runtime.shutdown_requested:
                 return changed
             if not subtitle.is_file() or subtitle in seen:
                 continue
             seen.add(subtitle)
-            video = _runtime._find_sidecar_video(subtitle)
+            video = (
+                inventory.video_for_sidecar(subtitle)
+                if inventory is not None else _runtime._find_sidecar_video(subtitle)
+            )
             if video is None:
                 continue
             if is_extracted_sidecar(subtitle, video):
                 continue
             exempt_token = _runtime._explicit_non_full_sidecar(video, subtitle)
             if exempt_token is not None:
-                stats['undersized_forced_exempt'] += 1
+                if undersized_enabled:
+                    stats['undersized_forced_exempt'] += 1
                 _runtime.dbg(f'Completeness exempt {subtitle.name}: explicit {exempt_token} track')
                 continue
-            stats['undersized_checked'] += 1
+            if undersized_enabled:
+                stats['undersized_checked'] += 1
+            classification = _runtime._classify_sidecar(video, subtitle)
+            if not undersized_enabled and classification.kind != 'managed':
+                continue
             tokens = _runtime._sidecar_tokens(video, subtitle)
-            language = next((token for token in tokens if len(token) in (2, 3) and token.isalpha()), 'unknown')
-            candidates.append((subtitle, video, language))
+            language = classification.language or next((token for token in tokens if len(token) in (2, 3) and token.isalpha()), 'unknown')
+            candidates.append((subtitle, video, language, classification.kind == 'managed'))
 
-    tasks = [
-        ValidationTask(
+    analyses = {}
+    for key, result in (existing_analyses or {}).items():
+        if (
+            getattr(result, 'validation_mode', None) == 'target-only'
+            and getattr(result, 'error', None) is None
+            and getattr(result, 'target_stat', None)
+            == MaintenanceFileStat.capture(getattr(result, 'target_path', None))
+        ):
+            analyses[key] = result
+    cached_evidence_keys = set(prune_evidence or {})
+    tasks = []
+    for sequence, (subtitle, video, language, managed) in enumerate(candidates):
+        key = _maintenance_path_key(subtitle)
+        if key in analyses or key in cached_evidence_keys:
+            if progress_callback is not None:
+                progress_callback()
+            continue
+        tasks.append(ValidationTask(
             sequence=sequence,
-            operation='structure',
+            operation='validate' if managed and prune_analyses is not None else 'structure',
             target_path=str(subtitle),
             target_language=language,
             video_path=str(video),
             completeness_kwargs=_runtime._completeness_kwargs(),
+            undersized_enabled=undersized_enabled,
             ffprobe_timeout=_runtime.CLEANUP_FFPROBE_TIMEOUT,
-        )
-        for sequence, (subtitle, video, language) in enumerate(candidates)
-    ]
-    analyses = {
-        _maintenance_path_key(result.target_path): result
+            duration_probed=durations is not None and path_key(video) in durations,
+            media_duration_seconds=durations.get(path_key(video)) if durations is not None else None,
+        ))
+    completed_results = 0
+    if tasks and _runtime._maintenance_worker_pool is not None:
         for result in _runtime._maintenance_worker_pool.map_ordered(
             tasks, stop_requested=lambda: _runtime.shutdown_requested,
-        )
-        if result.target_path
-    } if tasks and _runtime._maintenance_worker_pool is not None else {}
+        ):
+            if result.target_path:
+                analyses[_maintenance_path_key(result.target_path)] = result
+                completed_results += 1
+                if progress_callback is not None:
+                    progress_callback()
+    if prune_analyses is not None:
+        prune_analyses.update({
+            key: result for key, result in analyses.items()
+            if result.validation_mode == 'target-only'
+        })
     stats['tasks_submitted'] += len(tasks) if _runtime._maintenance_worker_pool is not None else 0
-    stats['tasks_completed'] += len(analyses)
-    stats['worker_failures'] += sum(bool(result.error) for result in analyses.values())
+    stats['tasks_completed'] += completed_results
+    stats['worker_failures'] += sum(
+        bool(result.error) for result in analyses.values()
+        if _maintenance_path_key(result.target_path) not in (existing_analyses or {})
+    )
+    if not undersized_enabled:
+        return False
 
-    for subtitle, video, language in candidates:
+    for subtitle, video, language, managed in candidates:
         if _runtime.shutdown_requested:
             return changed
-        prepared = analyses.get(_maintenance_path_key(subtitle))
+        subtitle_key = _maintenance_path_key(subtitle)
+        if subtitle_key in cached_evidence_keys:
+            continue
+        prepared = analyses.get(subtitle_key)
         current_stat = MaintenanceFileStat.capture(subtitle)
         reusable = bool(
             prepared is not None and prepared.error is None
             and prepared.target_stat == current_stat
         )
         if reusable:
-            report = prepared.report
+            report = validate_srt_structure(subtitle) if managed else prepared.report
             completeness = prepared.completeness
             subtitle_hash = prepared.target_hash
             if completeness is None:
-                duration = _runtime._probe_media_duration(video)
+                duration = _duration_from_map(video, durations)
                 if duration is None:
                     stats['undersized_duration_unavailable'] += 1
                     continue
                 completeness = _runtime._evaluate_completeness(subtitle, duration)
                 _runtime._add_completeness_issue(report, completeness)
         else:
-            duration = _runtime._probe_media_duration(video)
+            duration = _duration_from_map(video, durations)
             if duration is None:
                 stats['undersized_duration_unavailable'] += 1
                 continue
@@ -141,13 +195,152 @@ def _take_pending_prune_videos() -> list[tuple[_runtime.Path, str | None]]:
         _runtime._pending_prune_videos.clear()
     return pending
 
-def _video_has_pending_repair(video: _runtime.Path) -> bool:
+def _video_has_pending_repair(
+    video: _runtime.Path, inventory: MaintenanceInventory | None=None,
+) -> bool:
     with _runtime._pending_repairs_lock:
         target_paths = [metadata.get('target_path') for metadata in _runtime._pending_repairs.values()]
-    return any((target_path and _runtime._find_sidecar_video(target_path) == video for target_path in target_paths))
+    return any(
+        target_path and (
+            inventory.video_for_sidecar(target_path) if inventory is not None
+            else _runtime._find_sidecar_video(target_path)
+        ) == video
+        for target_path in target_paths
+    )
 
 def _prune_stats() -> dict:
     return {'prune_videos_checked': 0, 'prune_ready': 0, 'prune_deferred': 0, 'prune_missing_languages': 0, 'prune_invalid_languages': 0, 'prune_duration_unavailable': 0, 'prune_retained_unknown': 0, 'prune_candidates': 0, 'prune_quarantined': 0, 'prune_deleted': 0, 'prune_reported': 0, 'prune_failures': 0, 'prune_bazarr_rescan_batches': 0}
+
+
+def _build_maintenance_inventory(
+    videos: list[tuple[_runtime.Path, str | None]] | None=None,
+) -> MaintenanceInventory:
+    inventory = (
+        build_inventory(_runtime.CLEANUP_ROOTS, _runtime._VIDEO_EXTENSIONS)
+        if videos is None else
+        build_scoped_inventory((video for video, _item_type in videos), _runtime._VIDEO_EXTENSIONS)
+    )
+    for error in inventory.errors:
+        print(f'{_runtime.YELLOW}[SCAN] Could not inventory media directory: {error}{_runtime.RESET}')
+    return inventory
+
+
+def _duration_cache_key(video: str | _runtime.Path):
+    from .workers import MaintenanceFileStat
+    stat = MaintenanceFileStat.capture(video)
+    if stat is None:
+        return None
+    return (path_key(video), stat.size, stat.modified_ns)
+
+
+def _duration_from_map(
+    video: str | _runtime.Path, durations: dict[str, float | None] | None,
+) -> float | None:
+    if durations is not None and path_key(video) in durations:
+        return durations[path_key(video)]
+    return _runtime._probe_media_duration(video)
+
+
+def _seed_duration_cache_from_maintenance_cache(
+    inventory: MaintenanceInventory, state,
+) -> int:
+    from .workers import MaintenanceFileStat
+    entries = state.maintenance_cache_entries(inventory.sidecars)
+    seeded = 0
+    for sidecar in inventory.sidecars:
+        entry = entries.get(path_key(sidecar))
+        details = (entry or {}).get('details') or {}
+        if (
+            not entry or 'mediaDurationSeconds' not in details
+            or entry.get('validatorVersion') != state.validator_version
+            or entry.get('configFingerprint') != _runtime._MAINTENANCE_CONFIG_FINGERPRINT
+        ):
+            continue
+        target_stat = MaintenanceFileStat.capture(sidecar)
+        video = inventory.video_for_sidecar(sidecar)
+        video_stat = MaintenanceFileStat.capture(video)
+        dependency = (entry.get('dependencyFingerprint') or {}).get('video')
+        if (
+            target_stat is None or video_stat is None
+            or entry.get('targetSize') != target_stat.size
+            or entry.get('targetModifiedNs') != target_stat.modified_ns
+            or dependency != video_stat.to_dict()
+        ):
+            continue
+        cache_key = _duration_cache_key(video)
+        if cache_key is None:
+            continue
+        cached_duration = details.get('mediaDurationSeconds')
+        if not isinstance(cached_duration, (int, float)) or cached_duration <= 0:
+            continue
+        with _runtime._duration_cache_lock:
+            if cache_key not in _runtime._duration_cache:
+                _runtime._duration_cache[cache_key] = float(cached_duration)
+                seeded += 1
+    return seeded
+
+
+def _probe_inventory_durations(
+    inventory: MaintenanceInventory, scan_job_id: str | None=None,
+) -> dict[str, float | None]:
+    from .workers import MediaProbeTask
+    videos = [entry.path for entry in inventory.videos if entry.sidecars]
+    _runtime._set_scan_stage(
+        scan_job_id, 'probing', total=len(videos), unit='videos',
+    )
+    durations: dict[str, float | None] = {}
+    tasks = []
+    for video in videos:
+        cache_key = _duration_cache_key(video)
+        with _runtime._duration_cache_lock:
+            cached = cache_key is not None and cache_key in _runtime._duration_cache
+            value = _runtime._duration_cache.get(cache_key) if cached else None
+        if cached:
+            durations[path_key(video)] = value
+            _runtime._advance_scan_stage(scan_job_id)
+            continue
+        tasks.append(MediaProbeTask(
+            sequence=len(tasks), video_path=str(video),
+            timeout=_runtime.CLEANUP_FFPROBE_TIMEOUT,
+        ))
+
+    probe_function = _runtime._probe_media_duration
+    use_worker_pool = (
+        _runtime._maintenance_worker_pool is not None
+        and str(getattr(probe_function, '__module__', '')).endswith(
+            '.subtitles.workflow'
+        )
+    )
+    if tasks and use_worker_pool:
+        for result in _runtime._maintenance_worker_pool.probe_media_ordered(
+            tasks, stop_requested=lambda: _runtime.shutdown_requested,
+        ):
+            key = path_key(result.video_path)
+            durations[key] = result.duration_seconds
+            if result.duration_seconds is None:
+                print(
+                    f'{_runtime.YELLOW}[SIZE] ffprobe unavailable for '
+                    f'{_runtime.Path(result.video_path).name}: '
+                    f'{result.error or "duration_unavailable"}{_runtime.RESET}'
+                )
+            cache_key = _duration_cache_key(result.video_path)
+            if cache_key is not None and result.duration_seconds is not None:
+                with _runtime._duration_cache_lock:
+                    _runtime._duration_cache[cache_key] = result.duration_seconds
+            _runtime._advance_scan_stage(scan_job_id)
+    elif tasks:
+        for task in tasks:
+            if _runtime.shutdown_requested:
+                break
+            duration = probe_function(task.video_path)
+            durations[path_key(task.video_path)] = duration
+            cache_key = _duration_cache_key(task.video_path)
+            if cache_key is not None and duration is not None:
+                with _runtime._duration_cache_lock:
+                    _runtime._duration_cache[cache_key] = duration
+            _runtime._advance_scan_stage(scan_job_id)
+    _runtime._publish_scan_progress(scan_job_id, force=True)
+    return durations
 
 
 def _merge_prune_stats(stats: dict, prune_stats: dict) -> None:
@@ -163,7 +356,9 @@ def _maintenance_path_key(path: str | _runtime.Path) -> str:
     return _runtime.os.path.normcase(_runtime.os.path.abspath(str(path)))
 
 
-def _maintenance_preflight_source(candidate, video):
+def _maintenance_preflight_source(
+    candidate, video, inventory: MaintenanceInventory | None=None,
+):
     """Resolve a read-only source candidate before worker submission."""
     from ..subtitles.library import find_preferred_source
     receipt = None
@@ -182,11 +377,18 @@ def _maintenance_preflight_source(candidate, video):
             ), None)
             if source is not None:
                 return source.path, source.canonical_language, receipt
-    source_path, source_language = find_preferred_source(candidate)
+    sibling_paths = inventory.sidecars_for(video) if inventory is not None and video is not None else None
+    source_path, source_language = find_preferred_source(
+        candidate, sibling_paths=sibling_paths,
+    )
     return source_path, source_language, receipt
 
 
-def _maintenance_preflight(candidates: list) -> tuple[dict[str, object], set[str], int]:
+def _maintenance_preflight(
+    candidates: list, *, inventory: MaintenanceInventory | None=None,
+    durations: dict[str, float | None] | None=None,
+    existing_analyses: dict[str, object] | None=None, progress_callback=None,
+) -> tuple[dict[str, object], set[str], int, dict[str, dict], int]:
     """Skip metadata-stable files and analyze changed files in worker processes."""
     from .workers import (
         MaintenanceFileStat, ValidationTask, cache_entry_matches,
@@ -194,12 +396,16 @@ def _maintenance_preflight(candidates: list) -> tuple[dict[str, object], set[str
     state = _runtime._get_validation_state()
     cached = state.maintenance_cache_entries(candidate.path for candidate in candidates)
     tasks = []
+    reused: dict[str, object] = {}
     cache_hits: set[str] = set()
     for sequence, candidate in enumerate(candidates):
         target_stat = MaintenanceFileStat.capture(candidate.path)
-        video = _runtime._find_sidecar_video(candidate.path)
+        video = (
+            inventory.video_for_sidecar(candidate.path)
+            if inventory is not None else _runtime._find_sidecar_video(candidate.path)
+        )
         source_path, _source_language, receipt = _maintenance_preflight_source(
-            candidate, video
+            candidate, video, inventory
         )
         source_stat = MaintenanceFileStat.capture(source_path)
         video_stat = MaintenanceFileStat.capture(video)
@@ -224,6 +430,18 @@ def _maintenance_preflight(candidates: list) -> tuple[dict[str, object], set[str
             config_fingerprint=_runtime._MAINTENANCE_CONFIG_FINGERPRINT,
         ):
             cache_hits.add(key)
+            if progress_callback is not None:
+                progress_callback()
+            continue
+        existing = (existing_analyses or {}).get(key)
+        if (
+            source_path is None and existing is not None
+            and existing.error is None and existing.target_stat == target_stat
+            and existing.validation_mode == 'target-only'
+        ):
+            reused[key] = existing
+            if progress_callback is not None:
+                progress_callback()
             continue
         same_inputs = bool(
             entry and target_stat
@@ -248,22 +466,29 @@ def _maintenance_preflight(candidates: list) -> tuple[dict[str, object], set[str
             completeness_kwargs=_runtime._completeness_kwargs(),
             undersized_enabled=_runtime.CLEANUP_UNDERSIZED_ENABLED,
             ffprobe_timeout=_runtime.CLEANUP_FFPROBE_TIMEOUT,
+            duration_probed=durations is not None and video is not None and path_key(video) in durations,
+            media_duration_seconds=(
+                durations.get(path_key(video))
+                if durations is not None and video is not None else None
+            ),
         ))
-    results = {
-        _maintenance_path_key(result.target_path): result
+    results = dict(reused)
+    if tasks and _runtime._maintenance_worker_pool is not None:
         for result in _runtime._maintenance_worker_pool.map_ordered(
-            tasks,
-            stop_requested=lambda: _runtime.shutdown_requested,
-        )
-        if result.target_path
-    } if tasks and _runtime._maintenance_worker_pool is not None else {}
+            tasks, stop_requested=lambda: _runtime.shutdown_requested,
+        ):
+            if result.target_path:
+                results[_maintenance_path_key(result.target_path)] = result
+                if progress_callback is not None:
+                    progress_callback()
     failures = sum(bool(getattr(result, 'error', None)) for result in results.values())
-    return results, cache_hits, failures
+    return results, cache_hits, failures, cached, len(tasks)
 
 
 def _maintenance_cache_update(
     *, target_path, source_path, video_path, receipt_path, action, report,
-    source_aligned: bool, prepared,
+    source_aligned: bool, prepared, media_duration_seconds: float | None=None,
+    prune_evidence: dict | None=None,
 ) -> dict | None:
     from .workers import MaintenanceFileStat, STABLE_CACHE_ACTIONS
     if action not in STABLE_CACHE_ACTIONS:
@@ -303,6 +528,8 @@ def _maintenance_cache_update(
         'details': {
             'sourceAligned': bool(source_aligned),
             'validation': report.to_dict() if report is not None else {},
+            'mediaDurationSeconds': media_duration_seconds,
+            'pruneEvidence': prune_evidence,
         },
     }
 
@@ -316,7 +543,10 @@ def _candidate_videos() -> list[_runtime.Path]:
                 videos.add(path)
     return sorted(videos, key=lambda path: str(path).casefold())
 
-def _managed_sidecar_is_valid(classification: _runtime.SidecarClassification, duration: float, detector, prepared=None) -> tuple[bool, dict]:
+def _managed_sidecar_is_valid(
+    classification: _runtime.SidecarClassification, duration: float, detector,
+    prepared=None, *, video: _runtime.Path | None=None,
+) -> tuple[bool, dict]:
     from ..subtitles.foundation import file_sha256, target_language_for_code, validate_srt_structure
     from ..subtitles.library import validate_subtitle_without_source
     language = classification.language
@@ -356,7 +586,8 @@ def _managed_sidecar_is_valid(classification: _runtime.SidecarClassification, du
         evidence['reason'] = 'undersized' if any((issue.rule == 'undersized_subtitle' for issue in structure.issues)) else 'structure_invalid'
         evidence['validation'] = structure.to_dict()
         return (False, evidence)
-    video = _runtime._find_sidecar_video(classification.path)
+    if video is None:
+        video = _runtime._find_sidecar_video(classification.path)
     trusted = _runtime._get_validation_state().source_readiness(media_identity=_runtime._media_identity_for_video(video), source_language=language, source_hash=target_hash, media_duration_seconds=duration) if video is not None else None
     cached = _runtime._get_validation_state().current_valid_details(classification.path, target_hash)
     cached_completeness = cached.get('completeness') if cached is not None else None
@@ -432,43 +663,14 @@ def _apply_prune_action(video: _runtime.Path, classification: _runtime.SidecarCl
         return 'failed'
 
 
-def _prune_parallel_analyses(
-    requested: list[tuple[_runtime.Path, str | None]],
-) -> tuple[dict[str, object], int, int]:
-    from .workers import ValidationTask
-    tasks = []
-    sequence = 0
-    for video, _item_type in requested:
-        for path in _runtime._video_sidecars(video):
-            classification = _runtime._classify_sidecar(video, path)
-            if classification.kind != 'managed' or classification.language is None:
-                continue
-            if _runtime._explicit_non_full_sidecar(video, path) is not None:
-                continue
-            tasks.append(ValidationTask(
-                sequence=sequence,
-                target_path=str(path),
-                target_language=classification.language,
-                video_path=str(video),
-                validation_kwargs=_runtime._validation_kwargs(),
-                completeness_kwargs=_runtime._completeness_kwargs(),
-                undersized_enabled=_runtime.CLEANUP_UNDERSIZED_ENABLED,
-                ffprobe_timeout=_runtime.CLEANUP_FFPROBE_TIMEOUT,
-            ))
-            sequence += 1
-    if not tasks or _runtime._maintenance_worker_pool is None:
-        return {}, 0, 0
-    analyses = {
-        _maintenance_path_key(result.target_path): result
-        for result in _runtime._maintenance_worker_pool.map_ordered(
-            tasks, stop_requested=lambda: _runtime.shutdown_requested,
-        )
-        if result.target_path
-    }
-    failures = sum(bool(result.error) for result in analyses.values())
-    return analyses, len(tasks), failures
-
-def run_extra_sidecar_prune(videos: list[tuple[_runtime.Path, str | None]] | None=None, *, already_locked: bool=False, status_job_id: str | None=None) -> tuple[dict, bool, bool]:
+def run_extra_sidecar_prune(
+    videos: list[tuple[_runtime.Path, str | None]] | None=None, *,
+    already_locked: bool=False, status_job_id: str | None=None,
+    inventory: MaintenanceInventory | None=None,
+    durations: dict[str, float | None] | None=None,
+    prune_analyses: dict[str, object] | None=None,
+    prune_evidence: dict[str, dict] | None=None,
+) -> tuple[dict, bool, bool]:
     """Prune recognized unmanaged sidecars after all managed languages are ready."""
     stats = _runtime._prune_stats()
     if not _runtime.CLEANUP_PRUNE_EXTRA_LANGUAGES:
@@ -476,26 +678,54 @@ def run_extra_sidecar_prune(videos: list[tuple[_runtime.Path, str | None]] | Non
 
     def run() -> tuple[dict, bool, bool]:
         detector = _runtime._get_cleanup_detector()
-        requested = videos if videos is not None else [(video, None) for video in _runtime._candidate_videos()]
-        analyses, tasks_submitted, worker_failures = _prune_parallel_analyses(requested)
+        if inventory is None:
+            _runtime._set_scan_stage(
+                prune_job_id, 'inventory', total=None, unit='directories',
+            )
+            scan_inventory = _build_maintenance_inventory(videos)
+            _runtime._set_scan_stage(
+                prune_job_id, 'inventory',
+                total=scan_inventory.directories_scanned, unit='directories',
+                completed=scan_inventory.directories_scanned,
+            )
+        else:
+            scan_inventory = inventory
+        duration_map = durations if durations is not None else _probe_inventory_durations(scan_inventory, prune_job_id)
+        item_types = {
+            path_key(video): item_type for video, item_type in (videos or [])
+        }
+        requested = [
+            (entry.path, item_types.get(path_key(entry.path)))
+            for entry in scan_inventory.videos
+        ]
+        analyses = prune_analyses or {}
+        evidence_by_path = prune_evidence if prune_evidence is not None else {}
         stats['maintenance_workers'] = _runtime.MAINTENANCE_WORKERS
-        stats['tasks_submitted'] = tasks_submitted
-        stats['tasks_completed'] = len(analyses)
-        stats['worker_failures'] = worker_failures
         changed_episodes = False
         changed_movies = False
+        _runtime._set_scan_stage(
+            prune_job_id, 'pruning', total=len(requested), unit='videos',
+            state='pruning',
+        )
+
+        def finish_video() -> None:
+            _runtime._advance_scan_stage(prune_job_id)
+
         for video, item_type in requested:
             if _runtime.shutdown_requested or not video.exists():
+                finish_video()
                 continue
-            sidecars = _runtime._video_sidecars(video)
+            sidecars = list(scan_inventory.sidecars_for(video))
             if not sidecars:
+                finish_video()
                 continue
             stats['prune_videos_checked'] += 1
-            duration = _runtime._probe_media_duration(video)
+            duration = _duration_from_map(video, duration_map)
             if duration is None:
                 stats['prune_duration_unavailable'] += 1
                 stats['prune_deferred'] += 1
                 print(f'{_runtime.YELLOW}[PRUNE] Deferred {video.name}: media duration unavailable{_runtime.RESET}')
+                finish_video()
                 continue
             classified = [_runtime._classify_sidecar(video, path) for path in sidecars]
             readiness: dict[str, dict] = {}
@@ -511,14 +741,27 @@ def run_extra_sidecar_prune(videos: list[tuple[_runtime.Path, str | None]] | Non
                 evidence = []
                 language_ready = False
                 for entry in full_candidates:
-                    prepared = analyses.get(_maintenance_path_key(entry.path))
+                    key = _maintenance_path_key(entry.path)
+                    prepared = analyses.get(key)
+                    cached_evidence = evidence_by_path.get(key)
                     validator = _runtime._managed_sidecar_is_valid
-                    if prepared is not None and validator is _managed_sidecar_is_valid:
+                    cached_hash = cached_evidence.get('hash') if isinstance(cached_evidence, dict) else None
+                    if cached_hash and _runtime._file_hash_or_none(entry.path) == cached_hash:
+                        candidate_evidence = dict(cached_evidence)
+                        valid = bool(candidate_evidence.get('valid'))
+                    elif prepared is not None and validator is _managed_sidecar_is_valid:
                         valid, candidate_evidence = validator(
-                            entry, duration, detector, prepared,
+                            entry, duration, detector, prepared, video=video,
+                        )
+                    elif validator is _managed_sidecar_is_valid:
+                        valid, candidate_evidence = validator(
+                            entry, duration, detector, video=video,
                         )
                     else:
-                        valid, candidate_evidence = validator(entry, duration, detector)
+                        valid, candidate_evidence = validator(
+                            entry, duration, detector,
+                        )
+                    evidence_by_path[key] = candidate_evidence
                     evidence.append(candidate_evidence)
                     language_ready = language_ready or valid
                 reasons = sorted({str(candidate.get('reason') or 'language_validation_failed') for candidate in evidence if not candidate.get('valid')})
@@ -528,7 +771,9 @@ def run_extra_sidecar_prune(videos: list[tuple[_runtime.Path, str | None]] | Non
                     ready = False
             if not ready:
                 stats['prune_deferred'] += 1
-                if videos is None and _runtime._video_has_pending_repair(video):
+                if videos is None and _runtime._video_has_pending_repair(
+                    video, scan_inventory,
+                ):
                     _runtime._queue_video_for_pruning(video, item_type)
                 missing = ','.join((code for code, value in readiness.items() if not value['ready']))
                 reason_parts = []
@@ -546,6 +791,7 @@ def run_extra_sidecar_prune(videos: list[tuple[_runtime.Path, str | None]] | Non
                     )
                 reason_codes = '; '.join(reason_parts)
                 print(f'{_runtime.YELLOW}[PRUNE] Deferred {video.name}: managed language(s) not ready: {missing} ({reason_codes}){_runtime.RESET}')
+                finish_video()
                 continue
             stats['prune_ready'] += 1
             for entry in classified:
@@ -573,12 +819,30 @@ def run_extra_sidecar_prune(videos: list[tuple[_runtime.Path, str | None]] | Non
                         changed_movies = True
                     else:
                         changed_episodes = changed_movies = True
+            finish_video()
+        _runtime._publish_scan_progress(prune_job_id, force=True)
         print(f"[PRUNE] Summary: videos={stats['prune_videos_checked']} ready={stats['prune_ready']} deferred={stats['prune_deferred']} candidates={stats['prune_candidates']} quarantined={stats['prune_quarantined']} deleted={stats['prune_deleted']} missing={stats['prune_missing_languages']} invalid={stats['prune_invalid_languages']} no-duration={stats['prune_duration_unavailable']} retained-unknown={stats['prune_retained_unknown']} failures={stats['prune_failures']}")
         return (stats, changed_episodes, changed_movies)
     owns_status_job = status_job_id is None
     prune_job_id = status_job_id
+    standalone_context = False
     if owns_status_job:
         prune_job_id = _runtime._status_create_maintenance('sidecar_pruning', {'title': 'Subtitle sidecar pruning'}, state='pruning')
+        if prune_job_id:
+            with _runtime._maintenance_scan_contexts_lock:
+                started = _runtime.time.monotonic()
+                _runtime._maintenance_scan_contexts[prune_job_id] = {
+                    'started': started,
+                    'stage_started': started,
+                    'stats': stats,
+                    'files_discovered': 0,
+                    'files_checked': 0,
+                    'pending': 0,
+                    'repairs_queued': 0,
+                    'repairs_completed': 0,
+                    'last_publish': 0.0,
+                }
+            standalone_context = True
     else:
         _runtime._status_update_maintenance(prune_job_id, 'pruning')
     try:
@@ -590,10 +854,23 @@ def run_extra_sidecar_prune(videos: list[tuple[_runtime.Path, str | None]] | Non
     except Exception:
         if owns_status_job:
             _runtime._status_complete_maintenance(prune_job_id, 'failed', reason='validation action failed')
+        if standalone_context:
+            with _runtime._maintenance_scan_contexts_lock:
+                _runtime._maintenance_scan_contexts.pop(prune_job_id, None)
         raise
     prune_details = {'filesDiscovered': result[0]['prune_candidates'], 'filesChecked': result[0]['prune_videos_checked'], 'maintenanceWorkers': result[0].get('maintenance_workers', 1), 'tasksSubmitted': result[0].get('tasks_submitted', 0), 'tasksCompleted': result[0].get('tasks_completed', 0), 'workerFailures': result[0].get('worker_failures', 0), 'failures': result[0]['prune_failures'] + result[0].get('worker_failures', 0), 'quarantines': result[0]['prune_quarantined']}
+    if standalone_context:
+        with _runtime._maintenance_scan_contexts_lock:
+            context = _runtime._maintenance_scan_contexts.get(prune_job_id)
+            if context is not None:
+                stage_details = _runtime._scan_progress_details(context)
+                stage_details.update(prune_details)
+                prune_details = stage_details
     if owns_status_job:
         _runtime._status_complete_maintenance(prune_job_id, 'accepted', details=prune_details)
+    if standalone_context:
+        with _runtime._maintenance_scan_contexts_lock:
+            _runtime._maintenance_scan_contexts.pop(prune_job_id, None)
     return result
 
 def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
@@ -606,8 +883,17 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
     if not _runtime.CLEANUP_SCAN_EXISTING:
         return stats
     from ..subtitles.foundation import file_sha256, target_language_for_code
-    from ..subtitles.library import discover_target_subtitles, find_preferred_source, validate_subtitle_without_source
+    from ..subtitles.library import discover_target_subtitles_from_paths, find_preferred_source, validate_subtitle_without_source
     with _runtime._cleanup_scan_lock:
+        _runtime._set_scan_stage(
+            maintenance_scan_job_id, 'inventory', total=None, unit='directories',
+        )
+        inventory = _build_maintenance_inventory()
+        _runtime._set_scan_stage(
+            maintenance_scan_job_id, 'inventory',
+            total=inventory.directories_scanned, unit='directories',
+            completed=inventory.directories_scanned,
+        )
         managed_validation_languages = {
             str(code).strip().casefold()
             for code in (*_runtime.LANGUAGES, *_runtime.CLEANUP_LANGUAGES)
@@ -615,21 +901,55 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
         }
         detector = _runtime._get_cleanup_detector()
         state = _runtime._get_validation_state()
-        changed = _runtime._scan_undersized_sidecars(stats)
+        _seed_duration_cache_from_maintenance_cache(inventory, state)
+        durations = _probe_inventory_durations(inventory, maintenance_scan_job_id)
+        candidates = discover_target_subtitles_from_paths(
+            inventory.sidecars, managed_validation_languages
+        )
+        prune_analyses: dict[str, object] | None = (
+            {} if _runtime.CLEANUP_PRUNE_EXTRA_LANGUAGES else None
+        )
+        prune_evidence: dict[str, dict] = {}
         if detector is None or not managed_validation_languages:
-            prune_stats, prune_episodes, prune_movies = _runtime.run_extra_sidecar_prune(already_locked=True, status_job_id=maintenance_scan_job_id)
+            _runtime._set_scan_stage(
+                maintenance_scan_job_id, 'validation',
+                total=len(inventory.sidecars), unit='files',
+            )
+            changed = _runtime._scan_undersized_sidecars(
+                stats, inventory=inventory, durations=durations,
+                prune_analyses=prune_analyses,
+                progress_callback=lambda: _runtime._advance_scan_stage(maintenance_scan_job_id),
+            )
+            _runtime._advance_scan_stage(
+                maintenance_scan_job_id, len(inventory.sidecars), force=True,
+            )
+            prune_stats, prune_episodes, prune_movies = _runtime.run_extra_sidecar_prune(
+                already_locked=True, status_job_id=maintenance_scan_job_id,
+                inventory=inventory, durations=durations,
+                prune_analyses=prune_analyses, prune_evidence=prune_evidence,
+            )
             prune_stats['prune_bazarr_rescan_batches'] = int(prune_episodes or prune_movies)
             _merge_prune_stats(stats, prune_stats)
             changed = changed or prune_episodes or prune_movies
             if changed and (not _runtime.shutdown_requested):
                 _runtime._tracked_bazarr_sync(True, True, _runtime.SYNC_TIMEOUT)
             return stats
-        candidates = discover_target_subtitles(
-            _runtime.CLEANUP_ROOTS, managed_validation_languages
+        if maintenance_scan_job_id:
+            with _runtime._maintenance_scan_contexts_lock:
+                context = _runtime._maintenance_scan_contexts.get(maintenance_scan_job_id)
+                if context is not None:
+                    context['files_discovered'] = len(candidates)
+                    context['last_publish'] = _runtime.time.monotonic()
+        _runtime._set_scan_stage(
+            maintenance_scan_job_id, 'validation',
+            total=len(candidates) + len(inventory.sidecars), unit='files',
         )
-        analyses, cache_hits, worker_failures = _maintenance_preflight(candidates)
+        analyses, cache_hits, worker_failures, cached_entries, submitted_tasks = _maintenance_preflight(
+            candidates, inventory=inventory, durations=durations,
+            progress_callback=lambda: _runtime._advance_scan_stage(maintenance_scan_job_id),
+        )
         stats['cache_hits'] = len(cache_hits)
-        stats['tasks_submitted'] += len(candidates) - len(cache_hits)
+        stats['tasks_submitted'] += submitted_tasks
         stats['tasks_completed'] += len(analyses)
         stats['worker_failures'] += worker_failures
         cache_updates: list[dict] = []
@@ -637,15 +957,21 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
             candidate.path for candidate in candidates
             if _maintenance_path_key(candidate.path) not in cache_hits
         )
-        if maintenance_scan_job_id:
-            with _runtime._maintenance_scan_contexts_lock:
-                context = _runtime._maintenance_scan_contexts.get(maintenance_scan_job_id)
-                if context is not None:
-                    context['files_discovered'] = len(candidates)
-                    context['last_publish'] = _runtime.time.monotonic()
-                    details = _runtime._scan_progress_details(context)
-            if context is not None:
-                _runtime._status_update_maintenance(maintenance_scan_job_id, 'scanning', details=details)
+        for key in cache_hits:
+            evidence = ((cached_entries.get(key) or {}).get('details') or {}).get('pruneEvidence')
+            if isinstance(evidence, dict):
+                prune_evidence[key] = evidence
+        changed = _runtime._scan_undersized_sidecars(
+            stats, inventory=inventory, durations=durations,
+            prune_analyses=prune_analyses,
+            existing_analyses=analyses,
+            prune_evidence=prune_evidence,
+            progress_callback=lambda: _runtime._advance_scan_stage(maintenance_scan_job_id),
+        )
+        _runtime._advance_scan_stage(
+            maintenance_scan_job_id,
+            len(candidates) + len(inventory.sidecars), force=True,
+        )
         print(f"[SCAN] Existing subtitle cleanup found {len(candidates)} target file(s) under {', '.join((str(root) for root in _runtime.CLEANUP_ROOTS))}")
         for candidate in candidates:
             if _runtime.shutdown_requested:
@@ -668,7 +994,7 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 continue
             source_path = None
             source_lang = None
-            candidate_video = _runtime._find_sidecar_video(candidate.path)
+            candidate_video = inventory.video_for_sidecar(candidate.path)
             receipt_path = None
             if candidate_video is not None:
                 from ..subtitles.foundation import normalize_managed_file
@@ -696,7 +1022,13 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                     if source_path is not None:
                         break
             if source_path is None:
-                source_path, source_lang = find_preferred_source(candidate)
+                source_path, source_lang = find_preferred_source(
+                    candidate,
+                    sibling_paths=(
+                        inventory.sidecars_for(candidate_video)
+                        if candidate_video is not None else None
+                    ),
+                )
             if source_path is not None and candidate.variant:
                 print(f'[SCAN] Paired {candidate.path.name} with variant-aware source {source_path.name}')
             try:
@@ -770,6 +1102,11 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                     report=None,
                     source_aligned=False,
                     prepared=prepared_analysis,
+                    media_duration_seconds=(
+                        durations.get(path_key(candidate_video))
+                        if candidate_video is not None else None
+                    ),
+                    prune_evidence=prune_evidence.get(candidate_key),
                 )
                 if cache_entry is not None:
                     cache_updates.append(cache_entry)
@@ -777,7 +1114,7 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 continue
             stats['files_checked'] += 1
             if source_path is not None and source_lang is not None:
-                action, report = _runtime._validate_translated_file(str(source_path), str(candidate.path), source_lang, candidate.target_lang, validation_item_id, title=candidate.path.name, dry_run=_runtime.CLEANUP_SCAN_DRY_RUN, defer_repair=not _runtime.CLEANUP_SCAN_DRY_RUN, item_type=validation_item_type, media_duration=_runtime._probe_media_duration(candidate_video) if candidate_video is not None else None, origin=validation_origin, provenance_source_hash=validation_source_hash, maintenance_scan_job_id=maintenance_scan_job_id, prepared_analysis=prepared_analysis)
+                action, report = _runtime._validate_translated_file(str(source_path), str(candidate.path), source_lang, candidate.target_lang, validation_item_id, title=candidate.path.name, dry_run=_runtime.CLEANUP_SCAN_DRY_RUN, defer_repair=not _runtime.CLEANUP_SCAN_DRY_RUN, item_type=validation_item_type, media_duration=_duration_from_map(candidate_video, durations) if candidate_video is not None else None, origin=validation_origin, provenance_source_hash=validation_source_hash, maintenance_scan_job_id=maintenance_scan_job_id, prepared_analysis=prepared_analysis)
             else:
                 stats['without_source'] += 1
                 reusable = bool(
@@ -797,7 +1134,7 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 if completeness is None:
                     completeness = _runtime._evaluate_completeness(
                         candidate.path,
-                        _runtime._probe_media_duration(candidate_video)
+                        _duration_from_map(candidate_video, durations)
                         if candidate_video is not None else None,
                     )
                     _runtime._add_completeness_issue(report, completeness)
@@ -876,6 +1213,11 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 report=report,
                 source_aligned=bool(getattr(report, 'source_aligned', False)),
                 prepared=prepared_analysis,
+                media_duration_seconds=(
+                    durations.get(path_key(candidate_video))
+                    if candidate_video is not None else None
+                ),
+                prune_evidence=prune_evidence.get(candidate_key),
             )
             if cache_entry is not None:
                 cache_updates.append(cache_entry)
@@ -889,9 +1231,32 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 )
                 _runtime._status_record_maintenance_outcome(operation, outcome, _runtime._maintenance_file_identity(candidate.path, candidate.target_lang), reason=reason)
             _runtime._publish_scan_progress(maintenance_scan_job_id)
-        state.upsert_maintenance_cache_entries(cache_updates)
         _runtime._publish_scan_progress(maintenance_scan_job_id, force=True)
-        prune_stats, prune_episodes, prune_movies = _runtime.run_extra_sidecar_prune(already_locked=True, status_job_id=maintenance_scan_job_id)
+        prune_stats, prune_episodes, prune_movies = _runtime.run_extra_sidecar_prune(
+            already_locked=True, status_job_id=maintenance_scan_job_id,
+            inventory=inventory, durations=durations,
+            prune_analyses=prune_analyses, prune_evidence=prune_evidence,
+        )
+        updates_by_key = {
+            _maintenance_path_key(entry['targetPath']): entry for entry in cache_updates
+        }
+        for candidate in candidates:
+            key = _maintenance_path_key(candidate.path)
+            evidence = prune_evidence.get(key)
+            duration = (
+                durations.get(path_key(inventory.video_for_sidecar(candidate.path)))
+                if inventory.video_for_sidecar(candidate.path) is not None else None
+            )
+            entry = updates_by_key.get(key)
+            if entry is None and key in cache_hits:
+                entry = dict(cached_entries[key])
+                entry['details'] = dict(entry.get('details') or {})
+                cache_updates.append(entry)
+                updates_by_key[key] = entry
+            if entry is not None:
+                entry['details']['mediaDurationSeconds'] = duration
+                entry['details']['pruneEvidence'] = evidence
+        state.upsert_maintenance_cache_entries(cache_updates)
         prune_stats['prune_bazarr_rescan_batches'] = int(prune_episodes or prune_movies)
         _merge_prune_stats(stats, prune_stats)
         changed = changed or prune_episodes or prune_movies
@@ -932,7 +1297,8 @@ def _run_existing_cleanup_scan_safely() -> dict | None:
     scan_job_id = _runtime._status_create_maintenance('existing_library_scan', {'title': 'Existing subtitle library'}, state='scanning', details={'filesDiscovered': 0, 'filesChecked': 0, 'filesRemaining': 0, 'progress': 0})
     if scan_job_id:
         with _runtime._maintenance_scan_contexts_lock:
-            _runtime._maintenance_scan_contexts[scan_job_id] = {'started': _runtime.time.monotonic(), 'stats': {}, 'files_discovered': 0, 'files_checked': 0, 'pending': 0, 'repairs_queued': 0, 'repairs_completed': 0, 'enumeration_done': False, 'last_publish': 0.0}
+            started = _runtime.time.monotonic()
+            _runtime._maintenance_scan_contexts[scan_job_id] = {'started': started, 'stats': {}, 'files_discovered': 0, 'files_checked': 0, 'pending': 0, 'repairs_queued': 0, 'repairs_completed': 0, 'enumeration_done': False, 'last_publish': 0.0, 'maintenance_stage': 'inventory', 'stage_items_total': None, 'stage_items_completed': 0, 'stage_unit': 'directories', 'stage_started': started, 'stage_state': 'scanning'}
     try:
         stats = _runtime.run_existing_cleanup_scan(scan_job_id)
         if _runtime._pending_repairs:
@@ -986,6 +1352,9 @@ EXPORTS = {
         '_scan_undersized_sidecars', '_video_sidecars',
         '_queue_video_for_pruning', '_take_pending_prune_videos',
         '_video_has_pending_repair', '_prune_stats', '_candidate_videos',
+        '_build_maintenance_inventory', '_duration_cache_key',
+        '_duration_from_map', '_seed_duration_cache_from_maintenance_cache',
+        '_probe_inventory_durations',
         '_managed_sidecar_is_valid', '_apply_prune_action',
         'run_extra_sidecar_prune', 'run_existing_cleanup_scan',
         '_run_existing_cleanup_scan_safely', 'run_retention_housekeeping',

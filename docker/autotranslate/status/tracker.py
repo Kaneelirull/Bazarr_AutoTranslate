@@ -64,6 +64,8 @@ MAINTENANCE_PROGRESS_KEYS = (
     "rejectedAttempts", "successfulCues", "unresolvedCues",
     "progress", "estimatedSeconds", "etaSeconds", "attempts", "lane", "repairStage",
     "secondsPerCue", "timingSampleCount", "timingScope",
+    "maintenanceStage", "stageItemsTotal", "stageItemsCompleted",
+    "stageItemsRemaining", "stageUnit",
 )
 HISTORY_WINDOWS = {
     "1h": 3600,
@@ -537,7 +539,10 @@ class StatusTracker:
                 value = details[key]
                 if key == "contextEnabled":
                     job[key] = bool(value)
-                elif key in ("lane", "repairStage", "timingScope"):
+                elif key in (
+                    "lane", "repairStage", "timingScope", "maintenanceStage",
+                    "stageUnit",
+                ):
                     safe_value = _safe_maintenance_text(value, limit=64)
                     if safe_value and re.fullmatch(r"[A-Za-z0-9 _-]+", safe_value):
                         job[key] = safe_value
