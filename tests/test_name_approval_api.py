@@ -98,6 +98,15 @@ class NameApprovalApiTests(unittest.TestCase):
         with self.assertRaises(ManualReviewConflict):
             self.service.perform_name_action(self.plan['id'], payload)
 
+    def test_cue_pages_are_clamped_to_available_evidence(self):
+        detail = self.service.review_cues(self.plan['id'], 99, 1)
+        self.assertEqual(detail['pagination'], {'page': 2, 'pageSize': 1, 'total': 2})
+        self.assertEqual(len(detail['items']), 1)
+        with patch.object(self.service, 'inspect_cues', return_value=[]):
+            empty = self.service.review_cues(self.plan['id'], 99, 1)
+        self.assertEqual(empty['pagination'], {'page': 1, 'pageSize': 1, 'total': 0})
+        self.assertEqual(empty['items'], [])
+
     def test_revision_invalidation_and_restart_stable_hold(self):
         payload = self.payload()
         self.service.perform_name_action(self.plan['id'], payload)

@@ -144,9 +144,11 @@ class CueDecisionsRepositoryMixin:
             current = db.execute("SELECT revision FROM manual_review_decision_scopes WHERE retry_plan_id=?", (plan_id,)).fetchone()
             if (int(current[0]) if current else 0) != int(expected_revision):
                 raise RuntimeError("review decisions changed")
-            rows = db.execute("SELECT * FROM manual_review_cue_decisions WHERE retry_plan_id=?", (plan_id,)).fetchall()
-            if any(value["source_hash"] != row["source_hash"] or value["candidate_hash"] != row["failed_output_hash"] for value in rows):
-                raise RuntimeError("cue evidence changed")
+            rows = db.execute(
+                """SELECT * FROM manual_review_cue_decisions
+                   WHERE retry_plan_id=? AND source_hash=? AND candidate_hash=?""",
+                (plan_id, row["source_hash"], row["failed_output_hash"]),
+            ).fetchall()
             if {int(value["cue_number"]) for value in rows} != {int(value) for value in expected_cues}:
                 raise RuntimeError("every cue needs a decision")
             remembered = [value for value in rows if value["decision"] == "approve" and value["remember_phrase"]]

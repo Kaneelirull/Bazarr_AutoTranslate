@@ -11,7 +11,24 @@ function queryString(filters: ReviewFilters) {
 
 function filtersFromUrl(): ReviewFilters {
   const values = new URLSearchParams(window.location.search);
-  return Object.fromEntries(Object.entries(DEFAULT_FILTERS).map(([key, fallback]) => [key, values.get(key) ?? fallback])) as ReviewFilters;
+  const integer = (name: string, fallback: string, maximum?: number) => {
+    const parsed = Number(values.get(name));
+    return Number.isInteger(parsed) && parsed >= 1 && (maximum === undefined || parsed <= maximum) ? String(parsed) : fallback;
+  };
+  const allowed = (name: string, fallback: string, options: readonly string[]) => {
+    const value = values.get(name);
+    return value !== null && options.includes(value) ? value : fallback;
+  };
+  return {
+    page: integer("page", DEFAULT_FILTERS.page),
+    pageSize: integer("pageSize", DEFAULT_FILTERS.pageSize, 100),
+    q: (values.get("q") ?? DEFAULT_FILTERS.q).slice(0, 100),
+    status: allowed("status", DEFAULT_FILTERS.status, ["", "needs_attention", "manually_queued", "resolved", "dismissed"]),
+    itemType: allowed("itemType", DEFAULT_FILTERS.itemType, ["", "episodes", "movies"]),
+    language: (values.get("language") ?? DEFAULT_FILTERS.language).slice(0, 20),
+    sort: allowed("sort", DEFAULT_FILTERS.sort, ["updatedAt", "media", "language", "attempts", "status"]),
+    direction: allowed("direction", DEFAULT_FILTERS.direction, ["asc", "desc"]),
+  };
 }
 
 function actionResult(payload: ActionPayload) {
@@ -79,7 +96,6 @@ export function ReviewApp({ timeZone = "UTC", pollInterval = 20_000 }: { timeZon
         return selectedId ? new Set([selectedId]) : new Set();
       });
       setAppliedFilters(next);
-      setFilters(next);
       const url = new URL(window.location.href);
       Object.entries(next).forEach(([key, value]) => value ? url.searchParams.set(key, value) : url.searchParams.delete(key));
       window.history.replaceState(null, "", url);
@@ -167,12 +183,23 @@ export function ReviewApp({ timeZone = "UTC", pollInterval = 20_000 }: { timeZon
 
   const updateFilter = (key: keyof ReviewFilters, value: string) => setFilters((current) => ({ ...current, [key]: value }));
 
+  const resetUnavailableFilters = () => {
+    setFilters(DEFAULT_FILTERS);
+    setAppliedFilters(DEFAULT_FILTERS);
+    appliedRef.current = DEFAULT_FILTERS;
+    const url = new URL(window.location.href);
+    [...Object.keys(DEFAULT_FILTERS), "review"].forEach((key) => url.searchParams.delete(key));
+    window.history.replaceState(null, "", url);
+    void load(DEFAULT_FILTERS, "initial");
+  };
+
   if (!payload && initialLoading) return <main className="dashboard-shell review-shell" aria-busy="true"><h1>Manual review</h1><p className="loading">Loading manual reviews…</p></main>;
 
   if (!payload) return <main className="dashboard-shell review-shell">
     <AppHeader eyebrow="Operator recovery" title="Manual review" description="Review unresolved cues, remember names, or queue recovery." current="review" />
     <Panel className="review-unavailable"><div role="alert"><h2>Manual reviews are unavailable</h2><p>{loadError || "The review service could not be reached."}</p></div>
-      <button className="btn btn-primary" type="button" onClick={() => void load(appliedFilters, "initial")}>Retry</button>
+      <div className="review-filter-actions"><button className="btn btn-primary" type="button" onClick={() => void load(appliedFilters, "initial")}>Retry</button>
+        <button className="btn btn-secondary" type="button" onClick={resetUnavailableFilters}>Reset filters</button></div>
     </Panel>
   </main>;
 
@@ -180,6 +207,7 @@ export function ReviewApp({ timeZone = "UTC", pollInterval = 20_000 }: { timeZon
   const page = numberValue(payload.pagination?.page) || 1;
   const pageSize = numberValue(payload.pagination?.pageSize) || 20;
   const total = numberValue(payload.pagination?.total);
+  const mutationsDisabled = actionPending || !payload.actionsEnabled || Boolean(loadError);
 
   return <main className="dashboard-shell review-shell" aria-busy={foregroundLoading || actionPending}>
     <AppHeader
@@ -223,12 +251,12 @@ export function ReviewApp({ timeZone = "UTC", pollInterval = 20_000 }: { timeZon
           const title = item.media?.title || `${item.itemType || "media"} ${item.itemId}`;
           return <><header className="selected-media-header"><div><p className="eyebrow">{item.itemType === "episodes" ? `Season ${item.media?.seasonNumber ?? "—"} · Episode ${item.media?.episodeNumber ?? "—"}` : operatorLabel(item.itemType || "media")}</p><h2>{title}{item.media?.episodeCode ? ` · ${item.media.episodeCode}` : ""}</h2><p>{item.media?.episodeTitle || ""} · {item.sourceLanguage || "—"} → {item.targetLanguage || "—"}</p></div><ReviewTime value={item.updatedAt} timeZone={timeZone} /></header>
             <div className="review-actions">
-              {item.allowedActions?.includes("recheck") && <button className="btn btn-sm btn-primary" disabled={actionPending || !payload.actionsEnabled} onClick={(event) => void performAction(item, "recheck", event.currentTarget)}>Recheck files</button>}
-              {item.allowedActions?.includes("queue_retry") && <button className="btn btn-sm btn-secondary" disabled={actionPending || !payload.actionsEnabled} onClick={(event) => void performAction(item, "queue_retry", event.currentTarget)}>Retry recovery</button>}
-              {item.allowedActions?.includes("dismiss") && <button className="btn btn-sm btn-danger" disabled={actionPending || !payload.actionsEnabled} onClick={(event) => void performAction(item, "dismiss", event.currentTarget)}>Ignore review</button>}
-              {item.allowedActions?.includes("reopen") && <button className="btn btn-sm btn-primary" disabled={actionPending || !payload.actionsEnabled} onClick={(event) => void performAction(item, "reopen", event.currentTarget)}>Reopen review</button>}
+              {item.allowedActions?.includes("recheck") && <button className="btn btn-sm btn-primary" disabled={mutationsDisabled} onClick={(event) => void performAction(item, "recheck", event.currentTarget)}>Recheck files</button>}
+              {item.allowedActions?.includes("queue_retry") && <button className="btn btn-sm btn-secondary" disabled={mutationsDisabled} onClick={(event) => void performAction(item, "queue_retry", event.currentTarget)}>Retry recovery</button>}
+              {item.allowedActions?.includes("dismiss") && <button className="btn btn-sm btn-danger" disabled={mutationsDisabled} onClick={(event) => void performAction(item, "dismiss", event.currentTarget)}>Ignore review</button>}
+              {item.allowedActions?.includes("reopen") && <button className="btn btn-sm btn-primary" disabled={mutationsDisabled} onClick={(event) => void performAction(item, "reopen", event.currentTarget)}>Reopen review</button>}
             </div>
-            <ReviewDetails item={item} timeZone={timeZone} disabled={actionPending || !payload.actionsEnabled} onMutation={(pending, message) => { mutationRef.current = pending; setActionPending(pending); if (pending) { listAbortRef.current?.abort(); listAbortRef.current = null; } else if (message) { setActionMessage(message); setActionError(false); void load(appliedRef.current, "foreground"); } }} /></>;
+            <ReviewDetails item={item} timeZone={timeZone} disabled={mutationsDisabled} onMutation={(pending, message) => { mutationRef.current = pending; setActionPending(pending); if (pending) { listAbortRef.current?.abort(); listAbortRef.current = null; } else if (message) { setActionMessage(message); setActionError(false); void load(appliedRef.current, "foreground"); } }} /></>;
         })()}</section>
       </div>}
       <nav className="review-pagination" aria-label="Manual review pages">
