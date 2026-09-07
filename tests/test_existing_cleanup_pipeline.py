@@ -368,6 +368,11 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
 
     def setUp(self):
         self._state_directory = tempfile.TemporaryDirectory()
+        app._pending_lingarr_sync.clear()
+        app._media_catalog_ready = True
+        with app._media_cache_lock:
+            app._episode_cache.clear()
+            app._movie_cache.clear()
         app._validation_state = StateStore(
             Path(self._state_directory.name) / "state.sqlite3",
             validator_version=cleanup.VALIDATOR_VERSION,
@@ -2521,6 +2526,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
                 ),
                 patch.object(app, "trigger_bazarr_sync") as trigger,
                 patch.object(app, "wait_for_bazarr_sync", return_value=True) as wait,
+                patch.object(app, "_tracked_lingarr_media_sync", return_value=True) as lingarr,
             ):
                 stats = app.run_existing_cleanup_scan()
 
@@ -2531,6 +2537,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(stats["excessive_line_cues"], 1)
             trigger.assert_called_once_with(True, True)
             wait.assert_called_once_with(True, True, app.SYNC_TIMEOUT)
+            lingarr.assert_called_once_with(True, True, app.SYNC_TIMEOUT)
 
     def test_dry_run_does_not_repair_move_or_rescan(self):
         with tempfile.TemporaryDirectory() as directory:

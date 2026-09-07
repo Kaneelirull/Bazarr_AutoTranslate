@@ -33,6 +33,16 @@ class LingarrActiveTranslation:
         return self.media_id, self.media_type.lower()
 
 
+@dataclass(frozen=True)
+class LingarrRecurringJob:
+    job_id: str
+    last_run_id: str | None
+    last_run_state: str | None
+    current_state: str
+    is_running: bool
+    current_run_id: str | None
+
+
 @dataclass
 class LingarrClient:
     base_url: str
@@ -41,6 +51,9 @@ class LingarrClient:
     get: Callable[..., Any]
     post: Callable[..., Any]
     connect_timeout: int
+    sync_poll_interval: int = 15
+    time_value: Callable[[], float] = time.time
+    sleep: Callable[[float], None] = time.sleep
     shutdown_requested: Callable[[], bool] = lambda: False
     emit: Callable[[str], None] = print
 
@@ -108,6 +121,114 @@ class LingarrClient:
                 )
             result.append(LingarrActiveTranslation(media_id, media_type, status))
         return result
+
+    def recurring_jobs(self) -> dict[str, LingarrRecurringJob]:
+        payload = self.request_json(
+            "get", self._url("Schedule/jobs"),
+            service="Lingarr", operation="fetch recurring jobs",
+            headers=self.headers, timeout=self.connect_timeout,
+        )
+        if not isinstance(payload, list):
+            raise ServiceRequestError(
+                "Lingarr", "fetch recurring jobs", "unexpected response schema"
+            )
+        jobs: dict[str, LingarrRecurringJob] = {}
+        for index, entry in enumerate(payload):
+            if not isinstance(entry, dict):
+                raise ServiceRequestError(
+                    "Lingarr", "fetch recurring jobs",
+                    f"malformed job entry at index {index}",
+                )
+            job_id = entry.get("id")
+            current_state = entry.get("currentState")
+            is_running = entry.get("isCurrentlyRunning")
+            optional_strings = (
+                entry.get("lastJobId"), entry.get("lastJobState"),
+                entry.get("currentJobId"),
+            )
+            if (
+                not isinstance(job_id, str) or not job_id
+                or not isinstance(current_state, str) or not current_state
+                or not isinstance(is_running, bool)
+                or any(value is not None and not isinstance(value, str)
+                       for value in optional_strings)
+            ):
+                raise ServiceRequestError(
+                    "Lingarr", "fetch recurring jobs",
+                    f"malformed job entry at index {index}",
+                )
+            jobs[job_id] = LingarrRecurringJob(
+                job_id=job_id,
+                last_run_id=entry.get("lastJobId"),
+                last_run_state=entry.get("lastJobState"),
+                current_state=current_state,
+                is_running=is_running,
+                current_run_id=entry.get("currentJobId"),
+            )
+        return jobs
+
+    def trigger_recurring_job(self, job_name: str) -> None:
+        try:
+            response = self.post(
+                self._url("Schedule/job/start"), headers=self.headers,
+                json={"jobName": job_name}, timeout=self.connect_timeout,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            raise ServiceRequestError(
+                "Lingarr", f"start {job_name}", str(exc)
+            ) from exc
+
+    def run_recurring_jobs(self, job_names: Sequence[str], timeout: int) -> bool:
+        requested = tuple(dict.fromkeys(job_names))
+        if not requested:
+            return True
+        before = self.recurring_jobs()
+        missing = [name for name in requested if name not in before]
+        if missing:
+            raise ServiceRequestError(
+                "Lingarr", "start media synchronization",
+                f"recurring job not found: {', '.join(missing)}",
+            )
+        baseline_ids = {name: before[name].last_run_id for name in requested}
+        for name in requested:
+            self.trigger_recurring_job(name)
+            self.emit(f"[INFO] Triggered Lingarr recurring job: {name}")
+
+        deadline = self.time_value() + timeout
+        pending = set(requested)
+        terminal_success = {"succeeded"}
+        terminal_failure = {"failed", "cancelled"}
+        while pending and not self.shutdown_requested():
+            jobs = self.recurring_jobs()
+            for name in tuple(pending):
+                job = jobs.get(name)
+                if job is None:
+                    raise ServiceRequestError(
+                        "Lingarr", "wait for media synchronization",
+                        f"recurring job disappeared: {name}",
+                    )
+                if not job.last_run_id or job.last_run_id == baseline_ids[name]:
+                    continue
+                state = (job.last_run_state or job.current_state).casefold()
+                if state in terminal_failure:
+                    self.emit(f"[WARNING] Lingarr recurring job {name} {state}")
+                    return False
+                if state in terminal_success and not job.is_running:
+                    pending.remove(name)
+                    self.emit(f"[OK] Lingarr recurring job completed: {name}")
+            if not pending:
+                return True
+            if self.time_value() >= deadline:
+                self.emit(
+                    f"[WARNING] Lingarr media synchronization timed out after {timeout}s"
+                )
+                return False
+            for _ in range(max(1, self.sync_poll_interval)):
+                if self.shutdown_requested() or self.time_value() >= deadline:
+                    break
+                self.sleep(1)
+        return False
 
     def media_cache(self) -> tuple[dict[int, int], dict[int, int]]:
         movies: dict[int, int] = {}
