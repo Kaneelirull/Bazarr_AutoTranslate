@@ -102,7 +102,7 @@ docker compose up -d
 
 Existing-library cleanup runs after startup synchronization and then on its own interval. New translations are validated immediately. Quarantine is the default action; permanent deletion must be selected explicitly.
 
-CPU-heavy maintenance analysis uses a bounded process pool so Python validation can use multiple cores. File discovery, SQLite writes, status updates, quarantine/deletion, Bazarr rescans, and AI-backed repair remain in the coordinator process. Top-level maintenance jobs stay serialized, and results are applied in discovery order. Stable validation outcomes are cached by target metadata plus source/video/receipt metadata, validator version, and cleanup configuration; unchanged files skip hashing and validation on later scans.
+CPU-heavy maintenance analysis uses a bounded process pool so Python validation can use multiple cores. File discovery, SQLite writes, status updates, quarantine/deletion, Bazarr rescans, and AI-backed repair remain in the coordinator process. Top-level maintenance jobs stay serialized, and results are applied in discovery order. Stable validation outcomes are cached by target metadata plus source/video/receipt metadata, validator version, and cleanup configuration; unchanged files skip hashing and validation on later scans. A validator-version change deliberately causes one full revalidation pass before stable results are cached again.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -150,6 +150,8 @@ CPU-heavy maintenance analysis uses a bounded process pool so Python validation 
 | `END_OF_CYCLE_REPAIR_RETRY_ENABLED` | `true` | Allow one low-priority retry for a deferred cue repair |
 | `RETENTION_CHECK_INTERVAL` | `3600` | Seconds between retention checks; cleanup also runs at startup |
 | `LOG_DIR` | `/var/log/bazarr-autotranslate` | Daily application log directory |
+
+Source-anchored format recovery also restores numeric-only source cues that Lingarr omitted when every remaining cue number and timestamp aligns in order. The original numeric text and markup are copied unchanged without an AI call; missing dialogue or ambiguous alignment still fails closed.
 
 ## Translation status dashboard
 

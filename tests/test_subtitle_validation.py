@@ -363,6 +363,105 @@ class SubtitleValidationTests(unittest.TestCase):
         self.assertFalse(recovery.safe)
         self.assertIn("anchor count differs", recovery.reason)
 
+    def test_source_anchored_recovery_restores_missing_numeric_only_cue(self):
+        source = (
+            "582\n00:10:00,000 --> 00:10:01,000\nHow old are you?\n\n"
+            "583\n00:10:01,000 --> 00:10:02,000\n<i>30</i>\n\n"
+            "584\n00:10:02,000 --> 00:10:04,000\nCome back at 6 and we'll see how it goes.\n"
+        )
+        target = (
+            "582\n00:10:00,000 --> 00:10:01,000\nHur gammal är du?\n\n"
+            "584\n00:10:02,000 --> 00:10:04,000\nKom tillbaka klockan sex.\n"
+        )
+
+        recovery = recover_srt_structure(source, target)
+
+        self.assertTrue(recovery.safe, recovery.reason)
+        self.assertTrue(recovery.changed)
+        self.assertEqual(recovery.recovered_cues, [583])
+        self.assertIn("restored_numeric_only_cues:1", recovery.fixes)
+        cues, errors = parse_srt_cues(recovery.raw)
+        self.assertEqual(errors, [])
+        self.assertEqual([cue.number for cue in cues], [582, 583, 584])
+        self.assertEqual(cues[1].lines, ["<i>30</i>"])
+        self.assertEqual(cues[1].timestamp, "00:10:01,000 --> 00:10:02,000")
+
+    def test_source_anchored_recovery_restores_multiple_numeric_formats(self):
+        source = make_srt("Before", "12:30", "€50", "After")
+        target = (
+            "1\n00:00:01,000 --> 00:00:01,900\nEnne\n\n"
+            "4\n00:00:04,000 --> 00:00:04,900\nPärast\n"
+        )
+
+        recovery = recover_srt_structure(source, target)
+
+        self.assertTrue(recovery.safe, recovery.reason)
+        self.assertEqual(recovery.recovered_cues, [2, 3])
+        self.assertIn("restored_numeric_only_cues:2", recovery.fixes)
+        cues, errors = parse_srt_cues(recovery.raw)
+        self.assertEqual(errors, [])
+        self.assertEqual([cue.text for cue in cues], ["Enne", "12:30", "€50", "Pärast"])
+
+    def test_source_anchored_recovery_restores_all_numeric_cues_from_empty_target(self):
+        source = make_srt("30", "$1,000", "12:30")
+
+        recovery = recover_srt_structure(source, "")
+
+        self.assertTrue(recovery.safe, recovery.reason)
+        self.assertEqual(recovery.recovered_cues, [1, 2, 3])
+        cues, errors = parse_srt_cues(recovery.raw)
+        self.assertEqual(errors, [])
+        self.assertEqual([cue.text for cue in cues], ["30", "$1,000", "12:30"])
+
+    def test_source_anchored_recovery_refuses_lettered_or_reordered_gap(self):
+        source = make_srt("Before", "30th", "After")
+        target = (
+            "1\n00:00:01,000 --> 00:00:01,900\nEnne\n\n"
+            "3\n00:00:03,000 --> 00:00:03,900\nPärast\n"
+        )
+        reordered = (
+            "3\n00:00:03,000 --> 00:00:03,900\nPärast\n\n"
+            "1\n00:00:01,000 --> 00:00:01,900\nEnne\n"
+        )
+
+        self.assertFalse(recover_srt_structure(source, target).safe)
+        numeric_source = make_srt("Before", "30", "After")
+        self.assertFalse(recover_srt_structure(numeric_source, reordered).safe)
+
+        wrong_timestamp = (
+            "1\n00:00:01,000 --> 00:00:01,900\nEnne\n\n"
+            "3\n00:00:03,100 --> 00:00:03,900\nPärast\n"
+        )
+        self.assertFalse(recover_srt_structure(numeric_source, wrong_timestamp).safe)
+
+        braced_dialogue = make_srt("Before", "{minutes}30", "After")
+        self.assertFalse(recover_srt_structure(braced_dialogue, target).safe)
+
+    def test_source_anchored_recovery_refuses_duplicate_or_extra_target_cues(self):
+        source = make_srt("Before", "30", "After")
+        duplicate = (
+            "1\n00:00:01,000 --> 00:00:01,900\nEnne\n\n"
+            "1\n00:00:01,100 --> 00:00:01,800\nDuplikaat\n"
+        )
+        extra = (
+            "1\n00:00:01,000 --> 00:00:01,900\nEnne\n\n"
+            "3\n00:00:03,000 --> 00:00:03,900\nPärast\n\n"
+            "4\n00:00:04,000 --> 00:00:04,900\nLisa\n"
+        )
+
+        self.assertFalse(recover_srt_structure(source, duplicate).safe)
+        self.assertFalse(recover_srt_structure(source, extra).safe)
+
+    def test_source_anchored_numeric_recovery_is_noop_for_complete_target(self):
+        source = make_srt("Before", "30", "After")
+        target = make_srt("Enne", "30", "Pärast")
+
+        recovery = recover_srt_structure(source, target)
+
+        self.assertTrue(recovery.safe, recovery.reason)
+        self.assertFalse(recovery.changed)
+        self.assertEqual(recovery.recovered_cues, [])
+
     def test_source_anchored_recovery_repairs_one_missing_number(self):
         source = make_srt("One", "Two", "Three")
         target = (

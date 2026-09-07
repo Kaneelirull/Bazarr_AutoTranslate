@@ -1892,6 +1892,82 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(action, "dry-run")
             self.assertIn("cue_count_mismatch", {issue.rule for issue in report.issues})
 
+    def test_recorded_lingarr_target_restores_numeric_gap_without_ai(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "episode.eng.srt"
+            target = root / "episode.sv.srt"
+            source.write_text(
+                make_multi_srt(
+                    "How old are you?",
+                    "30",
+                    "Come back at six and we will see how it goes.",
+                ),
+                encoding="utf-8",
+            )
+            target.write_text(
+                "1\n00:00:01,000 --> 00:00:01,900\nHur gammal är du?\n\n"
+                "3\n00:00:03,000 --> 00:00:03,900\nKom tillbaka klockan sex så får vi se.\n",
+                encoding="utf-8",
+            )
+            state = app._validation_state
+            self._record_lingarr_artifact(source, target, "sv")
+            original_target = target.read_text(encoding="utf-8")
+
+            with (
+                patch.multiple(
+                    app,
+                    _validation_state=state,
+                    CLEANUP_LANGUAGES={"sv"},
+                    CLEANUP_FORMAT_REPAIR_ENABLED=True,
+                    CLEANUP_REPAIR_ENABLED=True,
+                ),
+                patch.object(app, "lingarr_translate_line") as translate,
+            ):
+                dry_run_action, dry_run_report = app._validate_translated_file(
+                    str(source),
+                    str(target),
+                    "en",
+                    "sv",
+                    12161,
+                    title="Shameless (US) S10E01",
+                    item_type="episodes",
+                    origin="lingarr",
+                    provenance_source_hash=app._file_hash_or_none(source),
+                    dry_run=True,
+                )
+                self.assertEqual(dry_run_action, "dry-run")
+                self.assertFalse(dry_run_report.valid)
+                self.assertEqual(target.read_text(encoding="utf-8"), original_target)
+
+                action, report = app._validate_translated_file(
+                    str(source),
+                    str(target),
+                    "en",
+                    "sv",
+                    12161,
+                    title="Shameless (US) S10E01",
+                    item_type="episodes",
+                    origin="lingarr",
+                    provenance_source_hash=app._file_hash_or_none(source),
+                )
+
+            self.assertEqual(action, "formatted")
+            self.assertTrue(report.valid, report.summary())
+            translate.assert_not_called()
+            source_cues, source_errors = subtitle_foundation.parse_srt_cues(
+                source.read_text(encoding="utf-8")
+            )
+            target_cues, target_errors = subtitle_foundation.parse_srt_cues(
+                target.read_text(encoding="utf-8")
+            )
+            self.assertEqual(source_errors + target_errors, [])
+            self.assertEqual(len(target_cues), len(source_cues))
+            self.assertEqual(target_cues[1].text, "30")
+            record = state.matching_record(target, app._file_hash_or_none(target))
+            self.assertEqual(record["details"]["formatRecoveredCues"], [2])
+            self.assertIn("restored_numeric_only_cues:1", record["details"]["formatFixes"])
+
     def test_changed_source_drops_stale_exact_alignment_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
