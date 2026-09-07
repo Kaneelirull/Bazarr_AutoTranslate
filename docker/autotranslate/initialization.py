@@ -16,6 +16,9 @@ def initialize_runtime_state():
     _runtime._episode_cache: dict[int, int] = {}
     _runtime._movie_cache: dict[int, int] = {}
     _runtime._media_cache_lock = _runtime.threading.Lock()
+    _runtime._pending_lingarr_sync: set[str] = set()
+    _runtime._lingarr_sync_lock = _runtime.threading.Lock()
+    _runtime._media_catalog_ready = True
     _runtime._cycle_suppressions = _runtime.CycleSuppressionRegistry()
     _runtime._translation_capacity = _runtime.TranslationCapacityGate(_runtime.PARALLEL_TRANSLATES)
     _runtime._shared_capacity = _runtime.SharedCapacityCoordinator(_runtime.PARALLEL_TRANSLATES)

@@ -75,15 +75,68 @@ def _tracked_bazarr_sync(had_episodes: bool, had_movies: bool, timeout: int) -> 
         _runtime.trigger_bazarr_sync(had_episodes, had_movies)
         success = _runtime.wait_for_bazarr_sync(had_episodes, had_movies, timeout)
     except Exception:
+        _runtime._media_catalog_ready = False
         _runtime._status_complete_maintenance(
             job_id, 'failed', reason='Bazarr synchronization failed'
         )
         raise
     _runtime._status_complete_maintenance(job_id, 'accepted' if success else 'failed', reason=None if success else 'Bazarr synchronization did not complete')
-    return success
+    if not success:
+        _runtime._media_catalog_ready = False
+        return False
+    return _runtime._tracked_lingarr_media_sync(had_episodes, had_movies, timeout)
 
 def _lingarr_client() -> _runtime.LingarrClient:
-    return _runtime.LingarrClient(_runtime.LINGARR_URL, _runtime.LINGARR_HEADERS, request_json=lambda *args, **kwargs: _runtime._request_json(*args, **kwargs), get=lambda *args, **kwargs: _runtime.requests.get(*args, **kwargs), post=lambda *args, **kwargs: _runtime.requests.post(*args, **kwargs), connect_timeout=_runtime.CONNECT_TIMEOUT, shutdown_requested=lambda: _runtime.shutdown_requested, emit=print)
+    return _runtime.LingarrClient(_runtime.LINGARR_URL, _runtime.LINGARR_HEADERS, request_json=lambda *args, **kwargs: _runtime._request_json(*args, **kwargs), get=lambda *args, **kwargs: _runtime.requests.get(*args, **kwargs), post=lambda *args, **kwargs: _runtime.requests.post(*args, **kwargs), connect_timeout=_runtime.CONNECT_TIMEOUT, sync_poll_interval=_runtime.SYNC_POLL_INTERVAL, time_value=lambda: _runtime.time.time(), sleep=lambda seconds: _runtime.time.sleep(seconds), shutdown_requested=lambda: _runtime.shutdown_requested, emit=print)
+
+def _lingarr_job_names(had_episodes: bool, had_movies: bool) -> set[str]:
+    names: set[str] = set()
+    if had_episodes:
+        names.add('SyncShowJob')
+    if had_movies:
+        names.add('SyncMovieJob')
+    return names
+
+def _tracked_lingarr_media_sync(had_episodes: bool, had_movies: bool, timeout: int) -> bool:
+    requested = _runtime._lingarr_job_names(had_episodes, had_movies)
+    with _runtime._lingarr_sync_lock:
+        _runtime._pending_lingarr_sync.update(requested)
+        pending = tuple(sorted(_runtime._pending_lingarr_sync))
+        if not pending:
+            _runtime._media_catalog_ready = True
+            return True
+        title = 'Shows and movies' if len(pending) == 2 else 'Shows' if pending[0] == 'SyncShowJob' else 'Movies'
+        job_id = _runtime._status_create_maintenance(
+            'lingarr_media_sync', {'title': title}, state='synchronizing'
+        )
+        try:
+            success = _runtime._lingarr_client().run_recurring_jobs(pending, timeout)
+            if success:
+                _runtime.lingarr_build_media_cache()
+        except Exception as exc:
+            print(f'{_runtime.YELLOW}[WARNING] Lingarr media synchronization failed: {exc}{_runtime.RESET}')
+            success = False
+        if success:
+            _runtime._pending_lingarr_sync.difference_update(pending)
+            _runtime._media_catalog_ready = not _runtime._pending_lingarr_sync
+        else:
+            _runtime._media_catalog_ready = False
+        _runtime._status_complete_maintenance(
+            job_id, 'accepted' if success else 'failed',
+            reason=None if success else 'Lingarr media synchronization did not complete',
+        )
+        return success
+
+def _ensure_media_catalog_ready(timeout: int) -> bool:
+    with _runtime._lingarr_sync_lock:
+        ready = _runtime._media_catalog_ready
+        pending = set(_runtime._pending_lingarr_sync)
+    if ready:
+        return True
+    if pending:
+        return _runtime._tracked_lingarr_media_sync(False, False, timeout)
+    print('[INFO] Media catalog is not ready; retrying full Bazarr synchronization')
+    return _runtime._tracked_bazarr_sync(True, True, timeout)
 
 def lingarr_get_languages() -> list[_runtime.LingarrSourceLanguage]:
     return _runtime._lingarr_client().languages()
@@ -289,7 +342,9 @@ EXPORTS = {
         '_clear_submission_for_path', 'bazarr_url', 'lingarr_url',
         '_request_json', '_bazarr_client', 'fetch_wanted', 'fetch_subtitles',
         'trigger_bazarr_sync', '_job_matches_scan', 'wait_for_bazarr_sync',
-        '_tracked_bazarr_sync', '_lingarr_client', 'lingarr_get_languages',
+        '_tracked_bazarr_sync', '_lingarr_client', '_lingarr_job_names',
+        '_tracked_lingarr_media_sync', '_ensure_media_catalog_ready',
+        'lingarr_get_languages',
         'lingarr_build_media_cache', 'lingarr_resolve_media_id',
         'lingarr_get_active_translations', 'lingarr_submit_file',
         'lingarr_translate_line', 'lingarr_get_job', 'lingarr_cancel_job',

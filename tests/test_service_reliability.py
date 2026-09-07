@@ -56,6 +56,11 @@ class ServiceReliabilityTests(unittest.TestCase):
             Path(self._state_directory.name) / "state.sqlite3",
             validator_version=cleanup.VALIDATOR_VERSION,
         )
+        app._pending_lingarr_sync.clear()
+        app._media_catalog_ready = True
+        with app._media_cache_lock:
+            app._episode_cache.clear()
+            app._movie_cache.clear()
 
     def tearDown(self):
         app._translation_capacity.reset()
@@ -126,6 +131,7 @@ class ServiceReliabilityTests(unittest.TestCase):
             patch.object(app, "_status_complete_maintenance") as complete,
             patch.object(app, "trigger_bazarr_sync") as trigger,
             patch.object(app, "wait_for_bazarr_sync", return_value=True) as wait,
+            patch.object(app, "_tracked_lingarr_media_sync", return_value=True) as lingarr,
         ):
             self.assertTrue(app._tracked_bazarr_sync(True, True, 45))
         create.assert_called_once_with(
@@ -133,6 +139,7 @@ class ServiceReliabilityTests(unittest.TestCase):
         )
         trigger.assert_called_once_with(True, True)
         wait.assert_called_once_with(True, True, 45)
+        lingarr.assert_called_once_with(True, True, 45)
         complete.assert_called_once_with(
             "sync-job", "accepted", reason=None
         )
@@ -147,6 +154,70 @@ class ServiceReliabilityTests(unittest.TestCase):
         complete.assert_called_once_with(
             "sync-job", "failed", reason="Bazarr synchronization failed"
         )
+
+        with (
+            patch.object(app, "_status_create_maintenance", return_value="sync-job"),
+            patch.object(app, "_status_complete_maintenance"),
+            patch.object(app, "trigger_bazarr_sync"),
+            patch.object(app, "wait_for_bazarr_sync", return_value=False),
+            patch.object(app, "_tracked_lingarr_media_sync") as lingarr,
+        ):
+            self.assertFalse(app._tracked_bazarr_sync(False, True, 45))
+        lingarr.assert_not_called()
+        self.assertFalse(app._media_catalog_ready)
+
+    def test_tracked_lingarr_sync_scopes_jobs_refreshes_cache_and_retries(self):
+        self.assertEqual(app._lingarr_job_names(True, False), {"SyncShowJob"})
+        self.assertEqual(app._lingarr_job_names(False, True), {"SyncMovieJob"})
+        self.assertEqual(
+            app._lingarr_job_names(True, True),
+            {"SyncShowJob", "SyncMovieJob"},
+        )
+        client = Mock()
+        client.run_recurring_jobs.return_value = False
+        with (
+            patch.object(app, "_lingarr_client", return_value=client),
+            patch.object(app, "_status_create_maintenance", return_value="lingarr-sync"),
+            patch.object(app, "_status_complete_maintenance") as complete,
+            patch.object(app, "lingarr_build_media_cache") as cache,
+        ):
+            self.assertFalse(app._tracked_lingarr_media_sync(True, False, 60))
+        client.run_recurring_jobs.assert_called_once_with(("SyncShowJob",), 60)
+        cache.assert_not_called()
+        self.assertEqual(app._pending_lingarr_sync, {"SyncShowJob"})
+        self.assertFalse(app._media_catalog_ready)
+        complete.assert_called_once_with(
+            "lingarr-sync", "failed",
+            reason="Lingarr media synchronization did not complete",
+        )
+
+        client.reset_mock()
+        client.run_recurring_jobs.return_value = True
+        def refresh_cache():
+            with app._media_cache_lock:
+                app._episode_cache = {42: 9001}
+        with (
+            patch.object(app, "_lingarr_client", return_value=client),
+            patch.object(app, "_status_create_maintenance", return_value="lingarr-sync"),
+            patch.object(app, "_status_complete_maintenance"),
+            patch.object(app, "lingarr_build_media_cache", side_effect=refresh_cache) as cache,
+        ):
+            self.assertTrue(app._ensure_media_catalog_ready(60))
+        client.run_recurring_jobs.assert_called_once_with(("SyncShowJob",), 60)
+        cache.assert_called_once_with()
+        self.assertEqual(app._pending_lingarr_sync, set())
+        self.assertTrue(app._media_catalog_ready)
+        self.assertEqual(app.lingarr_resolve_media_id("episodes", 42), 9001)
+
+    def test_cycle_defers_before_work_when_media_catalog_is_stale(self):
+        with (
+            patch.object(app, "_ensure_media_catalog_ready", return_value=False),
+            patch.object(app, "lingarr_build_media_cache") as cache,
+            patch.object(app, "fetch_wanted") as wanted,
+        ):
+            self.assertFalse(app.run_cycle(4))
+        cache.assert_not_called()
+        wanted.assert_not_called()
 
     def test_request_json_retries_transient_failures_with_bounded_backoff(self):
         response = FakeResponse({"data": []})

@@ -300,6 +300,7 @@ def main(config=None) -> int:
 
         print('[INFO] Running initial Bazarr subtitle synchronization...')
         startup_phase('startup_sync')
+        _runtime._media_catalog_ready = False
         _runtime._tracked_bazarr_sync(True, True, _runtime.SYNC_TIMEOUT)
         if _runtime.shutdown_requested:
             return stop_during_startup()

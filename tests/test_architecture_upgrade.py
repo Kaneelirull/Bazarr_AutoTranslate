@@ -9,6 +9,7 @@ import unittest
 import os
 from concurrent.futures import Future
 from pathlib import Path
+from unittest.mock import Mock, call
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,7 @@ from autotranslate.services.lingarr import (  # noqa: E402
     ProviderResponseError,
     parse_cue_response,
 )
+from autotranslate.services.bazarr import ServiceRequestError  # noqa: E402
 from autotranslate.subtitles.library import (  # noqa: E402
     build_detector,
     cue_source_signature,
@@ -178,6 +180,96 @@ class ArchitectureUpgradeTests(unittest.TestCase):
         self.assertEqual(client.media_cache(), ({}, {}))
         self.assertIsNone(client.get_job(7))
         self.assertTrue(any("response must be an object" in event for event in events))
+
+    def test_lingarr_recurring_jobs_are_correlated_and_polled_to_completion(self):
+        def jobs(movie_id, movie_state, show_id, show_state):
+            return [
+                {
+                    "id": "SyncMovieJob", "lastJobId": movie_id,
+                    "lastJobState": movie_state, "currentState": movie_state,
+                    "isCurrentlyRunning": movie_state == "Processing",
+                    "currentJobId": movie_id if movie_state == "Processing" else None,
+                },
+                {
+                    "id": "SyncShowJob", "lastJobId": show_id,
+                    "lastJobState": show_state, "currentState": show_state,
+                    "isCurrentlyRunning": show_state == "Processing",
+                    "currentJobId": show_id if show_state == "Processing" else None,
+                },
+            ]
+
+        request_json = Mock(side_effect=[
+            jobs("old-movie", "Succeeded", "old-show", "Succeeded"),
+            jobs("new-movie", "Enqueued", "new-show", "Enqueued"),
+            jobs("new-movie", "Processing", "new-show", "Succeeded"),
+            jobs("new-movie", "Succeeded", "new-show", "Succeeded"),
+        ])
+        post = Mock(return_value=type(
+            "Response", (), {"raise_for_status": lambda self: None}
+        )())
+        now = {"value": 0.0}
+        client = LingarrClient(
+            "http://lingarr", {"X-Api-Key": "secret"}, request_json,
+            get=Mock(), post=post, connect_timeout=10,
+            sync_poll_interval=1, time_value=lambda: now["value"],
+            sleep=lambda seconds: now.__setitem__("value", now["value"] + seconds),
+        )
+
+        self.assertTrue(client.run_recurring_jobs(
+            ("SyncMovieJob", "SyncShowJob"), 30
+        ))
+        self.assertEqual(post.call_args_list, [
+            call(
+                "http://lingarr/api/Schedule/job/start",
+                headers={"X-Api-Key": "secret"},
+                json={"jobName": "SyncMovieJob"}, timeout=10,
+            ),
+            call(
+                "http://lingarr/api/Schedule/job/start",
+                headers={"X-Api-Key": "secret"},
+                json={"jobName": "SyncShowJob"}, timeout=10,
+            ),
+        ])
+
+    def test_lingarr_recurring_job_failure_timeout_and_shutdown_are_bounded(self):
+        base = {
+            "id": "SyncMovieJob", "lastJobId": "old",
+            "lastJobState": "Succeeded", "currentState": "Succeeded",
+            "isCurrentlyRunning": False, "currentJobId": None,
+        }
+        failed = dict(base, lastJobId="new", lastJobState="Failed", currentState="Failed")
+        response = type("Response", (), {"raise_for_status": lambda self: None})()
+        client = LingarrClient(
+            "http://lingarr", {}, Mock(side_effect=[[base], [failed]]),
+            get=Mock(), post=Mock(return_value=response), connect_timeout=10,
+        )
+        self.assertFalse(client.run_recurring_jobs(("SyncMovieJob",), 30))
+
+        client = LingarrClient(
+            "http://lingarr", {}, Mock(return_value=[{"id": "SyncMovieJob"}]),
+            get=Mock(), post=Mock(return_value=response), connect_timeout=10,
+        )
+        with self.assertRaisesRegex(
+            ServiceRequestError, "malformed job entry at index 0"
+        ):
+            client.run_recurring_jobs(("SyncMovieJob",), 30)
+
+        now = {"value": 0.0}
+        client = LingarrClient(
+            "http://lingarr", {}, Mock(return_value=[base]), get=Mock(),
+            post=Mock(return_value=response), connect_timeout=10,
+            sync_poll_interval=1, time_value=lambda: now["value"],
+            sleep=lambda seconds: now.__setitem__("value", now["value"] + seconds),
+        )
+        self.assertFalse(client.run_recurring_jobs(("SyncMovieJob",), 2))
+        self.assertEqual(now["value"], 2.0)
+
+        client = LingarrClient(
+            "http://lingarr", {}, Mock(return_value=[base]), get=Mock(),
+            post=Mock(return_value=response), connect_timeout=10,
+            shutdown_requested=lambda: True,
+        )
+        self.assertFalse(client.run_recurring_jobs(("SyncMovieJob",), 30))
 
     def test_status_facade_redacts_private_keys_paths_and_objects(self):
         safe = sanitize_public({

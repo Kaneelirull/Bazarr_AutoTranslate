@@ -573,6 +573,9 @@ def run_cycle(cycle_num: int) -> bool:
     _runtime._status_set_phase('cycle_work')
     stats: dict = {'submitted': 0, 'completed': 0, 'timed_out': 0, 'failed': 0, 'deferred': 0, 'api_errors': 0, 'degraded': False, 'cycle_suppressions': 0, 'cooldown_deferrals': 0, 'circuit_deferrals': 0, 'variant_outputs_discovered': 0, 'recovered_pending_outputs': 0, 'translations': [], 'episode_activity': False, 'movie_activity': False}
     stats_lock = _runtime.threading.Lock()
+    if not _runtime._ensure_media_catalog_ready(_runtime.SYNC_TIMEOUT):
+        print(f'{_runtime.YELLOW}[WARNING] Deferring cycle #{cycle_num}: media catalog synchronization is incomplete{_runtime.RESET}')
+        return False
     from ..subtitles.publication import reconcile_publication_receipts
     reconcile_publication_receipts(_runtime._get_validation_state())
     _resume_publications(stats)
