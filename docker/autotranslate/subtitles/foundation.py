@@ -9,6 +9,7 @@ import sys
 import signal
 import tempfile
 import time
+import unicodedata
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -185,7 +186,7 @@ def classify_validation_failure(report: "ValidationReport") -> str:
         return "source_problem"
     return "whole_file"
 
-VALIDATOR_VERSION = "source-aware-v7-canonical-cue-approval"
+VALIDATOR_VERSION = "source-aware-v8-numeric-cue-recovery"
 
 
 @dataclass
@@ -685,6 +686,71 @@ def _canonical_timestamp(value: str) -> Optional[str]:
     return f"{match.group(1)},{match.group(2)} --> {match.group(3)},{match.group(4)}"
 
 
+def _is_numeric_only_cue(cue: SubtitleCue) -> bool:
+    """Return whether a cue can be copied unchanged without translation."""
+    plaintext = TAG_RE.sub("", cue.text)
+    plaintext = re.sub(r"\{\\[^}]*\}", "", plaintext).strip()
+    if not plaintext or not any(character.isdigit() for character in plaintext):
+        return False
+    return all(
+        character.isdigit()
+        or character.isspace()
+        or unicodedata.category(character)[0] in {"P", "S"}
+        for character in plaintext
+    )
+
+
+def _restore_missing_numeric_cues(
+    source_cues: list[SubtitleCue],
+    target_cues: list[SubtitleCue],
+) -> tuple[list[SubtitleCue], list[int]] | None:
+    """Align a target subsequence and restore only missing numeric source cues."""
+    if len(target_cues) >= len(source_cues):
+        return None
+
+    source_anchors = [
+        (cue.number, _canonical_timestamp(cue.timestamp)) for cue in source_cues
+    ]
+    target_anchors = [
+        (cue.number, _canonical_timestamp(cue.timestamp)) for cue in target_cues
+    ]
+    if (
+        any(timestamp is None for _, timestamp in source_anchors)
+        or any(timestamp is None for _, timestamp in target_anchors)
+        or len({number for number, _ in source_anchors}) != len(source_anchors)
+        or len({number for number, _ in target_anchors}) != len(target_anchors)
+    ):
+        return None
+
+    restored: list[SubtitleCue] = []
+    recovered_numbers: list[int] = []
+    target_index = 0
+    for source_cue, source_anchor in zip(source_cues, source_anchors):
+        if (
+            target_index < len(target_cues)
+            and target_anchors[target_index] == source_anchor
+        ):
+            target_cue = target_cues[target_index]
+            restored.append(
+                SubtitleCue(
+                    source_cue.number,
+                    source_cue.timestamp.strip(),
+                    target_cue.lines,
+                )
+            )
+            target_index += 1
+            continue
+
+        if not _is_numeric_only_cue(source_cue):
+            return None
+        restored.append(source_cue)
+        recovered_numbers.append(source_cue.number)
+
+    if target_index != len(target_cues) or not recovered_numbers:
+        return None
+    return restored, recovered_numbers
+
+
 def recover_srt_structure(source_raw: str, target_raw: str) -> FormatRecoveryResult:
     """Conservatively rebuild target blocks when all source anchors still match in order."""
     source_cues, source_errors = parse_srt_cues(source_raw)
@@ -693,6 +759,26 @@ def recover_srt_structure(source_raw: str, target_raw: str) -> FormatRecoveryRes
 
     had_bom = target_raw.startswith("\ufeff")
     had_crlf = "\r\n" in target_raw
+    target_cues, target_errors = parse_srt_cues(target_raw)
+    if not target_errors:
+        numeric_recovery = _restore_missing_numeric_cues(source_cues, target_cues)
+        if numeric_recovery is not None:
+            recovered, recovered_numbers = numeric_recovery
+            newline = "\r\n" if had_crlf else "\n"
+            rendered = render_srt_cues(recovered, newline=newline)
+            fixes = []
+            if had_bom:
+                fixes.append("removed_bom")
+            fixes.append(f"restored_numeric_only_cues:{len(recovered_numbers)}")
+            return FormatRecoveryResult(
+                True,
+                True,
+                rendered,
+                fixes=fixes,
+                recovered_cues=recovered_numbers,
+                reason="restored missing numeric-only source cues",
+            )
+
     lines = target_raw.lstrip("\ufeff").splitlines()
     anchors: list[tuple[int, int, str]] = []
     timestamp_fixes = 0
