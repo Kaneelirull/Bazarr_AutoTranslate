@@ -92,7 +92,7 @@ class ArchitectureUpgradeTests(unittest.TestCase):
             self.assertNotIn("os.getenv", source, str(path))
             self.assertNotIn("os.environ", source, str(path))
 
-    def test_both_existing_output_paths_use_retry_identity_settlement(self):
+    def test_all_on_disk_acceptance_paths_use_retry_identity_settlement(self):
         path = REPO_ROOT / "docker" / "autotranslate" / "items_workflow.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))
         calls = [
@@ -101,7 +101,7 @@ class ArchitectureUpgradeTests(unittest.TestCase):
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "_resolve_existing_retry_success"
         ]
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         self.assertTrue(all(len(call.args) == 3 for call in calls))
 
     def test_startup_reenables_stale_end_cycle_repairs_before_recovery(self):

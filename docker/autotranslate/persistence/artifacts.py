@@ -789,11 +789,9 @@ class ArtifactsRepositoryMixin:
             and entry.get("result") in ("valid", "valid_with_warnings")
             and self.approval_cache_matches(entry.get("details") or {}, self.approval_identity_for_target(target_path))
             and (
-                (
-                    entry.get("origin") == "lingarr"
-                    and entry.get("sourceHash") == source_hash
-                )
-                or entry.get("origin") != "lingarr"
+                entry.get("sourceHash") == source_hash
+                if entry.get("validationMode") in ("source-aware", "embedded-reference")
+                else True
             )
         )
 

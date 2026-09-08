@@ -252,6 +252,21 @@ class SubmissionsRepositoryMixin:
             return None
         return self._submission_dict(row)
 
+    def matching_submission_output(
+        self, target_path: str | Path, target_language: str, target_hash: str,
+    ) -> dict | None:
+        """Return durable provenance for an exact provider-created output."""
+        row = self._fetchone(
+            """
+            SELECT * FROM translation_attempts
+            WHERE actual_target_path = ? AND target_language = ?
+              AND target_hash = ?
+            ORDER BY submitted_at DESC LIMIT 1
+            """,
+            (_path_key(target_path), target_language, target_hash),
+        )
+        return self._submission_dict(row) if row else None
+
     def find_recoverable_submission(
         self,
         *,
