@@ -3,10 +3,20 @@
 .env.*
 !.env.example
 
-# Local assistant and agent state
-.claude/
-.codex/
+# Local AI assistant and agent state
 .agents/
+.aider/
+.claude/
+.cline/
+.codex/
+.codex-remote-attachments/
+.continue/
+.cursor/
+.gemini/
+.kiro/
+.openhands/
+.roo/
+.windsurf/
 
 # Python caches, tooling, and virtual environments
 __pycache__/
