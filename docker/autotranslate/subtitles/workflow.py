@@ -113,13 +113,32 @@ def _explicit_non_full_sidecar(video_path: str | _runtime.Path, subtitle_path: s
     return next((token for token in _runtime._sidecar_tokens(video_path, subtitle_path) if token in _runtime._NON_FULL_SUBTITLE_TOKENS), None)
 
 def _classify_sidecar(video_path: str | _runtime.Path, subtitle_path: str | _runtime.Path) -> _runtime.SidecarClassification:
-    from .sources import is_extracted_sidecar
+    from .foundation import file_sha256
+    from .sources import extracted_receipt_owned_paths, is_extracted_sidecar
     path = _runtime.Path(subtitle_path)
+    video = _runtime.Path(video_path)
     tokens = tuple(_runtime._sidecar_tokens(video_path, path))
     language = next((_runtime._ALIAS_TO_LANGUAGE[token] for token in tokens if token in _runtime._ALIAS_TO_LANGUAGE), None)
     managed = {code.casefold() for code in _runtime.LANGUAGES}
     if is_extracted_sidecar(path, video_path):
-        kind = 'source'
+        owned = {
+            _runtime.os.path.normcase(_runtime.os.path.abspath(value))
+            for value in extracted_receipt_owned_paths(video)
+        }
+        if _runtime.os.path.normcase(_runtime.os.path.abspath(path)) in owned:
+            kind = 'source'
+        else:
+            submission_owned = False
+            if language is not None:
+                try:
+                    submission_owned = bool(
+                        _runtime._get_validation_state().matching_submission_output(
+                            path, language, file_sha256(path),
+                        )
+                    )
+                except (OSError, _runtime.StateStoreError):
+                    submission_owned = False
+            kind = 'provider' if submission_owned else 'unknown'
     elif language in managed:
         kind = 'managed'
     elif language is not None:
@@ -650,6 +669,156 @@ def _publish_canonical_target(source_path: str | _runtime.Path, canonical_path: 
         except OSError as exc:
             print(f'{_runtime.RED}[ERROR] Could not publish canonical target for {label}: {exc}{_runtime.RESET}')
             return None
+
+def _promote_embedded_target(
+    video_path, candidate, reference_path, target_lang: str, media_duration,
+    label: str, *, item_type: str | None=None, item_id: int | None=None,
+) -> dict:
+    """Validate and atomically copy one receipt-backed target to its canonical path."""
+    from .foundation import file_sha256, target_language_for_code
+    from .publication import PublicationDeferred, publish_journaled, retain_publication
+    from .sources import (
+        canonical_target_path, discover_extracted_sources, validate_embedded_target,
+    )
+
+    video = _runtime.Path(video_path)
+    reference = _runtime.Path(reference_path)
+    target = canonical_target_path(video, target_lang, candidate.variant)
+    state = _runtime._get_validation_state()
+    target_language = target_language_for_code(target_lang)
+    if target_language is None:
+        return {'action': 'invalid', 'targetPath': str(target), 'reason': 'unsupported target language'}
+
+    with _runtime._artifact_access.hold(
+        video, candidate.path, candidate.receipt_path, reference, target,
+    ), state.approval_guard():
+        current_candidates, receipt_error = discover_extracted_sources(
+            video, _runtime._LANGUAGE_ALIASES, _runtime.LANGUAGES,
+        )
+        current = next((
+            item for item in current_candidates
+            if item.path == candidate.path
+            and item.canonical_language == target_lang
+            and item.variant == candidate.variant
+        ), None)
+        if receipt_error or current is None or current.current_hash != candidate.current_hash:
+            return {
+                'action': 'deferred', 'targetPath': str(target),
+                'reason': receipt_error or 'extracted target or receipt changed',
+            }
+        try:
+            receipt_hash = file_sha256(candidate.receipt_path)
+            video_stat = video.stat()
+            video_identity = {
+                'name': video.name,
+                'size': video_stat.st_size,
+                'mtimeNs': video_stat.st_mtime_ns,
+            }
+        except OSError as exc:
+            return {'action': 'deferred', 'targetPath': str(target), 'reason': str(exc)}
+        validation = validate_embedded_target(
+            candidate.path, reference, _runtime._get_cleanup_detector(), target_language,
+            target_lang=target_lang, media_duration_seconds=media_duration,
+            validation_kwargs=_runtime._validation_kwargs(),
+            completeness_kwargs=_runtime._completeness_kwargs(),
+        )
+        if not validation.report.valid:
+            evidence = {
+                **validation.evidence(), 'receiptHash': receipt_hash,
+                'receiptPath': str(candidate.receipt_path),
+                'referencePath': str(reference), 'videoIdentity': video_identity,
+            }
+            return {
+                'action': 'invalid', 'targetPath': str(target),
+                'reason': validation.report.summary(), 'report': validation.report,
+                'evidence': evidence,
+            }
+        try:
+            verified_candidates, verified_error = discover_extracted_sources(
+                video, _runtime._LANGUAGE_ALIASES, _runtime.LANGUAGES,
+            )
+            verified = next((
+                item for item in verified_candidates
+                if item.path == candidate.path
+                and item.canonical_language == target_lang
+                and item.variant == candidate.variant
+            ), None)
+            candidate_hash = file_sha256(candidate.path)
+            reference_hash = file_sha256(reference)
+            current_receipt_hash = file_sha256(candidate.receipt_path)
+            current_video_stat = video.stat()
+            existing_hash = file_sha256(target) if target.exists() else None
+        except OSError as exc:
+            return {'action': 'deferred', 'targetPath': str(target), 'reason': str(exc)}
+        if (
+            verified_error or verified is None
+            or verified.current_hash != candidate_hash
+            or candidate_hash != candidate.current_hash
+            or reference_hash != validation.reference_hash
+            or current_receipt_hash != receipt_hash
+            or current_video_stat.st_size != video_identity['size']
+            or current_video_stat.st_mtime_ns != video_identity['mtimeNs']
+        ):
+            return {'action': 'deferred', 'targetPath': str(target), 'reason': 'promotion input changed'}
+
+        evidence = {
+            **validation.evidence(), 'receiptHash': receipt_hash,
+            'receiptPath': str(candidate.receipt_path),
+            'referencePath': str(reference), 'videoIdentity': video_identity,
+        }
+
+        action = 'already-current'
+        if existing_hash != candidate_hash:
+            if existing_hash is not None and state.matching_origin(target, existing_hash) not in ('lingarr', 'embedded'):
+                return {
+                    'action': 'conflict', 'targetPath': str(target),
+                    'reason': 'existing canonical subtitle is not Lingarr-owned',
+                    'report': validation.report, 'evidence': evidence,
+                }
+            payload = {
+                'sourceLanguage': 'en', 'targetLanguage': target_lang,
+                'origin': 'embedded', 'operation': 'embedded_promotion',
+                'embeddedPath': str(candidate.path),
+                'receiptPath': str(candidate.receipt_path),
+                'referenceEvidence': evidence,
+            }
+            try:
+                record = retain_publication(
+                    state, candidate.path, target,
+                    source_path=reference, source_hash=reference_hash,
+                    expected_target_hash=existing_hash, payload=payload,
+                    expected_candidate_hash=candidate_hash,
+                )
+                published = publish_journaled(
+                    record, state, completed_cycle=_runtime._completed_cycle,
+                    lock=_runtime._target_repair_lock(target),
+                )
+            except (OSError, ValueError, _runtime.StateStoreError, PublicationDeferred) as exc:
+                return {'action': 'deferred', 'targetPath': str(target), 'reason': str(exc)}
+            if not published:
+                return {'action': 'deferred', 'targetPath': str(target), 'reason': 'publication superseded'}
+            action = 'promoted'
+
+        target_hash = _runtime._file_hash_or_none(target)
+        if target_hash != candidate_hash:
+            return {'action': 'deferred', 'targetPath': str(target), 'reason': 'published target hash mismatch'}
+        recorded = _runtime._record_validation_result(
+            target, reference_hash, target_hash, 'valid', validation.report,
+            origin='embedded', trustedSource=True,
+            sourcePath=str(reference), sourceLanguage='en', targetLanguage=target_lang,
+            targetVariant=candidate.variant if candidate.variant in ('.hi', '.sdh') else '',
+            itemType=item_type, itemId=item_id,
+            operation='embedded_promotion', validationMode='embedded-reference',
+            completeness=validation.completeness.to_dict(),
+            embeddedPath=str(candidate.path), receiptPath=str(candidate.receipt_path),
+            embeddedReference=evidence,
+        )
+        if not recorded:
+            return {'action': 'deferred', 'targetPath': str(target), 'reason': 'validation state was not recorded'}
+        return {
+            'action': action, 'targetPath': str(target),
+            'report': validation.report, 'evidence': evidence,
+        }
 
 def _replace_managed_file_if_current(candidate, target, *, source_path, expected_source_hash,
                                      expected_target_hash, source_language, target_language, origin,
@@ -1723,6 +1892,7 @@ EXPORTS = {
         '_record_quarantine_event', '_apply_cleanup_action',
         '_target_repair_lock', '_write_recovery_candidate',
         '_normalize_managed_output', '_publish_canonical_target',
+        '_promote_embedded_target',
         '_replace_managed_file_if_current', '_perform_repair',
         '_get_repair_executor', '_run_repair_with_capacity',
         '_publish_repair_status', '_queue_repair', '_defer_linked_repair_trial',

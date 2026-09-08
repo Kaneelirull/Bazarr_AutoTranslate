@@ -9,7 +9,7 @@ The container includes a read-only status dashboard at `http://<docker-host>:876
 1. Synchronizes Bazarr's subtitle inventory.
 2. Scans every regular sidecar SRT for media-duration completeness, then scans configured target languages, at startup and every `CLEANUP_SCAN_INTERVAL`.
 3. Uses `ffprobe` plus cue, text, byte, and timeline density to quarantine high-confidence forced/truncated fragments that are mislabeled as full subtitles.
-4. Prefers valid receipt-backed `.extracted.<language>.srt` sources, then falls back through Bazarr subtitles in `LANGUAGES` order.
+4. Promotes a valid receipt-backed embedded track already in a required language, otherwise prefers extracted translation sources and then falls back through Bazarr subtitles in `LANGUAGES` order.
 5. Collapses consecutive rolling-caption duplicates in extracted sources into one full-span cue before hashing or translation.
 6. Rejects incomplete or explicitly forced sources before submitting a translation.
 7. Uses source cue anchors to repair safe SRT formatting damage before validation.
@@ -29,7 +29,9 @@ schema version 1 receipts whose video name, size, and modification time match
 the current media file. Track paths must be basenames beside that video, their
 hashes must match the receipt, and forced tracks are ignored. Host-only absolute
 paths in the receipt are never used because every container must resolve the
-shared `/media` mount independently.
+shared `/media` mount independently. Modification times allow only one
+microsecond of filesystem precision loss so Linux-created receipts remain valid
+when read through SMB without accepting meaningfully changed media.
 
 Valid extracted tracks are tried before every Bazarr source. Non-HI tracks are
 preferred over HI tracks, then default and plain variants are preferred. A
@@ -43,10 +45,20 @@ file and receipt are updated with same-directory temporary files, managed
 ownership, atomic replacement, hashes, and crash-recoverable preparation
 metadata. Bazarr-owned source subtitles are never rewritten.
 
+When a receipt-backed extracted track is already in a required language,
+AutoTranslate validates its language and whole-file completeness, then requires
+at least 90% of English-reference cue midpoints to overlap its cues with a
+two-second tolerance. A successful track is copied through the publication
+journal to the canonical sidecar name, such as `Movie.sv.srt`; the extracted
+track and receipt remain unchanged. Existing canonical files are replaced only
+when durable provenance identifies them as Lingarr- or embedded-owned.
+
 Lingarr may initially write `Movie.extracted.et.srt`; AutoTranslate publishes
 that result as the canonical `Movie.et.srt` (preserving HI or numeric variants)
-before provenance recording and validation. Extracted source artifacts do not
-count as translated-language readiness and are excluded from pruning.
+before provenance recording and validation. A receipt-unowned extracted name is
+treated as Lingarr output only when an exact durable submission record matches
+its path and hash. Arbitrary receipt-unowned files remain retained and reported.
+Receipt-owned extracted artifacts remain protected sources during pruning.
 
 ## Requirements
 

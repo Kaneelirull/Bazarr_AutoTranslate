@@ -12,10 +12,16 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
 from .foundation import (
+    CompletenessResult,
     SubtitleCue,
+    ValidationIssue,
+    ValidationReport,
+    completeness_issue,
+    evaluate_subtitle_completeness,
     file_sha256,
     parse_srt_cues,
     read_text_best_effort,
+    validate_srt_structure,
     render_srt_cues,
 )
 
@@ -23,6 +29,9 @@ from .foundation import (
 RECEIPT_SCHEMA_VERSION = 1
 DEDUPLICATION_ALGORITHM = "adjacent-exact-v1"
 EXTRACTED_MARKER = ".extracted."
+EMBEDDED_REFERENCE_COVERAGE = 0.90
+EMBEDDED_REFERENCE_TOLERANCE_MS = 2_000
+RECEIPT_MTIME_TOLERANCE_NS = 1_000
 _TIMESTAMP_RE = re.compile(
     r"^\s*(?P<start>\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*"
     r"(?P<end>\d{2}:\d{2}:\d{2}[,.]\d{3})(?P<tail>.*)$"
@@ -62,6 +71,28 @@ class PreparedSource:
     duplicate_groups: int
     removed_cues: int
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class EmbeddedTargetValidation:
+    report: ValidationReport
+    completeness: CompletenessResult
+    target_hash: str | None
+    reference_hash: str | None
+    covered_reference_cues: int
+    reference_cues: int
+    coverage: float
+
+    def evidence(self) -> dict:
+        return {
+            "targetHash": self.target_hash,
+            "referenceHash": self.reference_hash,
+            "coveredReferenceCues": self.covered_reference_cues,
+            "referenceCues": self.reference_cues,
+            "coverage": round(self.coverage, 4),
+            "minimumCoverage": EMBEDDED_REFERENCE_COVERAGE,
+            "toleranceMs": EMBEDDED_REFERENCE_TOLERANCE_MS,
+        }
 
 
 def extracted_receipt_path(video_path: str | Path) -> Path:
@@ -155,7 +186,8 @@ def discover_extracted_sources(
             raise ValueError("video name does not match")
         if int(video_metadata.get("size", -1)) != stat.st_size:
             raise ValueError("video size does not match")
-        if int(video_metadata.get("mtimeNs", -1)) != stat.st_mtime_ns:
+        receipt_mtime_ns = int(video_metadata.get("mtimeNs", -1))
+        if abs(receipt_mtime_ns - stat.st_mtime_ns) > RECEIPT_MTIME_TOLERANCE_NS:
             raise ValueError("video modification time does not match")
         tracks = receipt.get("tracks")
         if not isinstance(tracks, list):
@@ -233,11 +265,186 @@ def discover_extracted_sources(
     return (candidates, None)
 
 
+def select_extracted_target(
+    candidates: Iterable[ExtractedSource], target_language: str,
+) -> ExtractedSource | None:
+    """Return the highest-ranked receipt-backed track for one target language."""
+    wanted = str(target_language).casefold()
+    return next((
+        candidate for candidate in candidates
+        if candidate.canonical_language == wanted
+    ), None)
+
+
+def find_embedded_english_reference(
+    video_path: str | Path,
+    target: ExtractedSource,
+    extracted: Iterable[ExtractedSource],
+    language_aliases: Mapping[str, Iterable[str]],
+    sibling_paths: Iterable[Path] | None = None,
+) -> Path | None:
+    """Find the best English reference without accepting an unreceipted extract."""
+    candidates = list(extracted)
+    for variant in tuple(dict.fromkeys((target.variant, ""))):
+        receipt_match = next((
+            candidate.path for candidate in candidates
+            if candidate.canonical_language == "en" and candidate.variant == variant
+        ), None)
+        if receipt_match is not None:
+            return receipt_match
+
+    video = Path(video_path)
+    siblings = sibling_paths
+    if siblings is None:
+        try:
+            siblings = tuple(path for path in video.parent.iterdir() if path.is_file())
+        except OSError:
+            return None
+    files = {path.name.casefold(): path for path in siblings}
+    english_aliases = sorted(
+        {str(alias).casefold() for alias in language_aliases.get("en", ("en", "eng"))},
+        key=len,
+        reverse=True,
+    )
+    for variant in tuple(dict.fromkeys((target.variant, ""))):
+        for alias in english_aliases:
+            match = files.get(f"{video.stem}.{alias}{variant}.srt".casefold())
+            if match is not None and not is_extracted_sidecar(match, video):
+                return match
+    return None
+
+
 def _timestamp_ms(value: str) -> int:
     hours, minutes, seconds, milliseconds = (
         int(part) for part in re.split(r"[:,.]", value)
     )
     return ((hours * 60 + minutes) * 60 + seconds) * 1000 + milliseconds
+
+
+def _cue_interval(cue: SubtitleCue) -> tuple[int, int] | None:
+    parts = _timestamp_parts(cue)
+    return (parts[3], parts[4]) if parts is not None else None
+
+
+def _reference_midpoint_coverage(
+    reference_cues: list[SubtitleCue], target_cues: list[SubtitleCue],
+) -> tuple[int, int, float]:
+    intervals = sorted(
+        interval for cue in target_cues
+        if (interval := _cue_interval(cue)) is not None
+    )
+    midpoints = sorted(
+        (interval[0] + interval[1]) // 2
+        for cue in reference_cues
+        if (interval := _cue_interval(cue)) is not None
+    )
+    if not midpoints or not intervals:
+        return (0, len(midpoints), 0.0)
+    covered = 0
+    interval_index = 0
+    for midpoint in midpoints:
+        while (
+            interval_index < len(intervals)
+            and intervals[interval_index][1] + EMBEDDED_REFERENCE_TOLERANCE_MS < midpoint
+        ):
+            interval_index += 1
+        if interval_index >= len(intervals):
+            break
+        start, end = intervals[interval_index]
+        if (
+            start - EMBEDDED_REFERENCE_TOLERANCE_MS <= midpoint
+            <= end + EMBEDDED_REFERENCE_TOLERANCE_MS
+        ):
+            covered += 1
+    return (covered, len(midpoints), covered / len(midpoints))
+
+
+def validate_embedded_target(
+    target_path: str | Path,
+    reference_path: str | Path,
+    detector,
+    target_language,
+    *,
+    target_lang: str,
+    media_duration_seconds: float | None,
+    validation_kwargs: Mapping[str, object] | None = None,
+    completeness_kwargs: Mapping[str, object] | None = None,
+) -> EmbeddedTargetValidation:
+    """Validate an independent embedded track without assuming cue alignment."""
+    from .library import validate_subtitle_without_source
+
+    target = Path(target_path)
+    reference = Path(reference_path)
+    if detector is None or target_language is None:
+        report = validate_srt_structure(target)
+        report.issues.append(ValidationIssue(
+            "embedded_language_detector_unavailable",
+            "whole-file target language could not be verified",
+        ))
+    else:
+        report = validate_subtitle_without_source(
+            target,
+            detector,
+            target_language,
+            target_lang=target_lang,
+            **dict(validation_kwargs or {}),
+        )
+    completeness = evaluate_subtitle_completeness(
+        target,
+        media_duration_seconds or 0.0,
+        **dict(completeness_kwargs or {}),
+    )
+    issue = completeness_issue(completeness)
+    if issue is not None:
+        report.issues.append(issue)
+    elif not completeness.evaluated:
+        report.issues.append(ValidationIssue(
+            "embedded_completeness_unavailable", completeness.reason,
+        ))
+
+    reference_raw = read_text_best_effort(reference)
+    target_raw = read_text_best_effort(target)
+    reference_cues: list[SubtitleCue] = []
+    target_cues: list[SubtitleCue] = []
+    if reference_raw is None:
+        report.issues.append(ValidationIssue(
+            "embedded_reference_unreadable", "English reference subtitle is unreadable",
+        ))
+    else:
+        reference_cues, reference_errors = parse_srt_cues(reference_raw)
+        if reference_errors or not reference_cues:
+            report.issues.append(ValidationIssue(
+                "embedded_reference_structure", "English reference subtitle structure is invalid",
+            ))
+    if target_raw is not None:
+        target_cues, _target_errors = parse_srt_cues(target_raw)
+    covered, reference_count, coverage = _reference_midpoint_coverage(
+        reference_cues, target_cues,
+    )
+    if reference_count and coverage < EMBEDDED_REFERENCE_COVERAGE:
+        report.issues.append(ValidationIssue(
+            "embedded_reference_coverage",
+            f"target covers {coverage:.1%} of English dialogue cues "
+            f"(minimum {EMBEDDED_REFERENCE_COVERAGE:.0%})",
+        ))
+    elif not reference_count and not any(
+        issue.rule.startswith("embedded_reference_") for issue in report.issues
+    ):
+        report.issues.append(ValidationIssue(
+            "embedded_reference_structure", "English reference subtitle contains no timed cues",
+        ))
+    try:
+        target_hash = file_sha256(target)
+    except OSError:
+        target_hash = None
+    try:
+        reference_hash = file_sha256(reference)
+    except OSError:
+        reference_hash = None
+    return EmbeddedTargetValidation(
+        report, completeness, target_hash, reference_hash,
+        covered, reference_count, coverage,
+    )
 
 
 def _timestamp_parts(cue: SubtitleCue) -> tuple[str, str, str, int, int] | None:
@@ -463,6 +670,10 @@ def lingarr_output_candidates(
 __all__ = [
     "DEDUPLICATION_ALGORITHM",
     "DeduplicationResult",
+    "EmbeddedTargetValidation",
+    "EMBEDDED_REFERENCE_COVERAGE",
+    "EMBEDDED_REFERENCE_TOLERANCE_MS",
+    "RECEIPT_MTIME_TOLERANCE_NS",
     "ExtractedSource",
     "PreparedSource",
     "canonical_target_path",
@@ -471,6 +682,9 @@ __all__ = [
     "discover_extracted_sources",
     "extracted_receipt_path",
     "extracted_receipt_owned_paths",
+    "find_embedded_english_reference",
     "is_extracted_sidecar",
     "prepare_extracted_source",
+    "select_extracted_target",
+    "validate_embedded_target",
 ]

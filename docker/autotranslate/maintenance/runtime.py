@@ -356,6 +356,85 @@ def _maintenance_path_key(path: str | _runtime.Path) -> str:
     return _runtime.os.path.normcase(_runtime.os.path.abspath(str(path)))
 
 
+def _promote_inventory_embedded_targets(
+    inventory: MaintenanceInventory, durations: dict[str, float | None], stats: dict,
+) -> bool:
+    """Adopt validated receipt-backed managed-language tracks before maintenance."""
+    from ..subtitles.sources import (
+        discover_extracted_sources, find_embedded_english_reference,
+        select_extracted_target,
+    )
+
+    changed = False
+    for entry in inventory.videos:
+        if _runtime.shutdown_requested:
+            break
+        extracted, receipt_error = discover_extracted_sources(
+            entry.path, _runtime._LANGUAGE_ALIASES, _runtime.LANGUAGES,
+        )
+        if receipt_error:
+            _runtime.dbg(f'Ignored extracted-subtitle receipt for {entry.path.name}: {receipt_error}')
+            continue
+        for target_lang in _runtime.LANGUAGES:
+            candidate = select_extracted_target(extracted, target_lang)
+            if candidate is None:
+                continue
+            reference = find_embedded_english_reference(
+                entry.path, candidate, extracted, _runtime._LANGUAGE_ALIASES,
+                sibling_paths=entry.sidecars,
+            )
+            if reference is None:
+                stats['embedded_promotion_invalid'] += 1
+                continue
+            if _runtime.CLEANUP_SCAN_DRY_RUN:
+                stats['embedded_promotion_reported'] += 1
+                continue
+            result = _runtime._promote_embedded_target(
+                entry.path, candidate, reference, target_lang,
+                durations.get(path_key(entry.path)), entry.path.name,
+            )
+            action = result['action']
+            if action in ('promoted', 'already-current'):
+                target_path = result['targetPath']
+                _runtime._clear_submission_for_path(target_path, target_lang)
+                try:
+                    normalized_target = _runtime.os.path.normcase(
+                        _runtime.os.path.abspath(target_path)
+                    )
+                    retry_plans = _runtime._get_validation_state().retry_plans(
+                        include_terminal=False,
+                    )
+                    for plan in retry_plans:
+                        if (
+                            plan.get('targetLanguage') == target_lang
+                            and _runtime.os.path.normcase(_runtime.os.path.abspath(
+                                plan.get('targetPath') or ''
+                            )) == normalized_target
+                        ):
+                            _runtime._resolve_existing_retry_success(
+                                plan,
+                                plan.get('seriesKey') or f'maintenance:{normalized_target}',
+                                plan.get('seriesTitle') or entry.path.stem,
+                            )
+                except _runtime.StateStoreError as exc:
+                    _runtime.dbg(
+                        f'Could not settle embedded promotion retry for {target_path}: {exc}'
+                    )
+            if action == 'promoted':
+                stats['embedded_targets_promoted'] += 1
+                changed = True
+                print(f"[SCAN] Promoted {candidate.path.name} to {_runtime.Path(result['targetPath']).name}")
+            elif action == 'already-current':
+                stats['embedded_targets_current'] += 1
+            elif action == 'conflict':
+                stats['embedded_promotion_conflicts'] += 1
+                print(f"{_runtime.YELLOW}[SCAN] Preserved {_runtime.Path(result['targetPath']).name}: {result['reason']}{_runtime.RESET}")
+            else:
+                stats['embedded_promotion_invalid'] += 1
+                _runtime.dbg(f"Could not promote {candidate.path.name}: {result['reason']}")
+    return changed
+
+
 def _maintenance_preflight_source(
     candidate, video, inventory: MaintenanceInventory | None=None,
 ):
@@ -588,8 +667,66 @@ def _managed_sidecar_is_valid(
         return (False, evidence)
     if video is None:
         video = _runtime._find_sidecar_video(classification.path)
-    trusted = _runtime._get_validation_state().source_readiness(media_identity=_runtime._media_identity_for_video(video), source_language=language, source_hash=target_hash, media_duration_seconds=duration) if video is not None else None
-    cached = _runtime._get_validation_state().current_valid_details(classification.path, target_hash)
+    state = _runtime._get_validation_state()
+    recorded = state.matching_record(classification.path, target_hash)
+    if (
+        video is not None and recorded is not None
+        and recorded.get('origin') == 'embedded'
+        and recorded.get('validationMode') == 'embedded-reference'
+    ):
+        from ..subtitles.sources import (
+            discover_extracted_sources, find_embedded_english_reference,
+            select_extracted_target, validate_embedded_target,
+        )
+        extracted, receipt_error = discover_extracted_sources(
+            video, _runtime._LANGUAGE_ALIASES, _runtime.LANGUAGES,
+        )
+        embedded_target = select_extracted_target(extracted, language)
+        reference = (
+            find_embedded_english_reference(
+                video, embedded_target, extracted, _runtime._LANGUAGE_ALIASES,
+            ) if embedded_target is not None else None
+        )
+        if receipt_error or embedded_target is None or embedded_target.current_hash != target_hash:
+            evidence['reason'] = 'embedded_receipt_changed'
+            return (False, evidence)
+        if reference is None:
+            evidence['reason'] = 'embedded_reference_missing'
+            return (False, evidence)
+        validation = validate_embedded_target(
+            classification.path, reference, detector, target_language,
+            target_lang=language, media_duration_seconds=duration,
+            validation_kwargs=_runtime._validation_kwargs(),
+            completeness_kwargs=_runtime._completeness_kwargs(),
+        )
+        embedded_evidence = {
+            **validation.evidence(),
+            'receiptHash': _runtime._file_hash_or_none(embedded_target.receipt_path),
+            'receiptPath': str(embedded_target.receipt_path),
+            'referencePath': str(reference),
+        }
+        evidence.update({
+            'validation': validation.report.to_dict(),
+            'embeddedReference': embedded_evidence,
+            'referencePath': str(reference),
+        })
+        if not validation.report.valid:
+            evidence['reason'] = 'embedded_reference_validation_failed'
+            return (False, evidence)
+        evidence.update({'valid': True, 'reason': 'embedded_reference_validation'})
+        _runtime._record_validation_result(
+            classification.path, validation.reference_hash, target_hash,
+            'valid', validation.report, origin='embedded', trustedSource=True,
+            sourcePath=str(reference), sourceLanguage='en', targetLanguage=language,
+            operation='embedded_promotion', validationMode='embedded-reference',
+            completeness=validation.completeness.to_dict(),
+            embeddedPath=str(embedded_target.path),
+            receiptPath=str(embedded_target.receipt_path),
+            embeddedReference=embedded_evidence,
+        )
+        return (True, evidence)
+    trusted = state.source_readiness(media_identity=_runtime._media_identity_for_video(video), source_language=language, source_hash=target_hash, media_duration_seconds=duration) if video is not None else None
+    cached = state.current_valid_details(classification.path, target_hash)
     cached_completeness = cached.get('completeness') if cached is not None else None
     cached_duration = cached_completeness.get('mediaDurationSeconds') if isinstance(cached_completeness, dict) else None
     if isinstance(cached_duration, (int, float)) and abs(float(cached_duration) - duration) <= 0.5 and (not cached_completeness.get('undersized', False)):
@@ -795,7 +932,7 @@ def run_extra_sidecar_prune(
                 continue
             stats['prune_ready'] += 1
             for entry in classified:
-                candidate = entry.kind == 'nonmanaged' or (entry.kind == 'special' and _runtime.CLEANUP_PRUNE_SPECIAL_SIDECARS) or (entry.kind == 'unknown' and _runtime.CLEANUP_PRUNE_UNKNOWN_SIDECARS)
+                candidate = entry.kind in ('nonmanaged', 'provider') or (entry.kind == 'special' and _runtime.CLEANUP_PRUNE_SPECIAL_SIDECARS) or (entry.kind == 'unknown' and _runtime.CLEANUP_PRUNE_UNKNOWN_SIDECARS)
                 if entry.kind == 'unknown' and (not _runtime.CLEANUP_PRUNE_UNKNOWN_SIDECARS):
                     stats['prune_retained_unknown'] += 1
                 if not candidate:
@@ -874,7 +1011,7 @@ def run_extra_sidecar_prune(
     return result
 
 def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
-    stats = {'files_checked': 0, 'skipped_unchanged': 0, 'maintenance_workers': _runtime.MAINTENANCE_WORKERS, 'cache_hits': 0, 'tasks_submitted': 0, 'tasks_completed': 0, 'worker_failures': 0, 'excessive_line_cues': 0, 'other_invalid_cues': 0, 'formatted_files': 0, 'repaired_files': 0, 'repair_failures': 0, 'repair_queued': 0, 'repair_deferred': 0, 'quarantined_files': 0, 'deleted_files': 0, 'reported_files': 0, 'dry_run_files': 0, 'without_source': 0, 'source_less_warnings': 0, 'recovered_pending_outputs': 0, 'repeat_quarantines': 0, 'ai_repairs_suppressed': 0, 'action_failures': 0, 'undersized_checked': 0, 'undersized_forced_exempt': 0, 'undersized_duration_unavailable': 0, 'undersized_detected': 0, 'undersized_quarantined': 0, **_runtime._prune_stats()}
+    stats = {'files_checked': 0, 'skipped_unchanged': 0, 'maintenance_workers': _runtime.MAINTENANCE_WORKERS, 'cache_hits': 0, 'tasks_submitted': 0, 'tasks_completed': 0, 'worker_failures': 0, 'excessive_line_cues': 0, 'other_invalid_cues': 0, 'formatted_files': 0, 'repaired_files': 0, 'repair_failures': 0, 'repair_queued': 0, 'repair_deferred': 0, 'quarantined_files': 0, 'deleted_files': 0, 'reported_files': 0, 'dry_run_files': 0, 'without_source': 0, 'source_less_warnings': 0, 'recovered_pending_outputs': 0, 'repeat_quarantines': 0, 'ai_repairs_suppressed': 0, 'action_failures': 0, 'undersized_checked': 0, 'undersized_forced_exempt': 0, 'undersized_duration_unavailable': 0, 'undersized_detected': 0, 'undersized_quarantined': 0, 'embedded_targets_promoted': 0, 'embedded_targets_current': 0, 'embedded_promotion_conflicts': 0, 'embedded_promotion_invalid': 0, 'embedded_promotion_reported': 0, **_runtime._prune_stats()}
     if maintenance_scan_job_id:
         with _runtime._maintenance_scan_contexts_lock:
             context = _runtime._maintenance_scan_contexts.get(maintenance_scan_job_id)
@@ -903,6 +1040,11 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
         state = _runtime._get_validation_state()
         _seed_duration_cache_from_maintenance_cache(inventory, state)
         durations = _probe_inventory_durations(inventory, maintenance_scan_job_id)
+        embedded_changed = _promote_inventory_embedded_targets(
+            inventory, durations, stats,
+        )
+        if embedded_changed:
+            inventory = _build_maintenance_inventory()
         candidates = discover_target_subtitles_from_paths(
             inventory.sidecars, managed_validation_languages
         )
@@ -920,6 +1062,7 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 prune_analyses=prune_analyses,
                 progress_callback=lambda: _runtime._advance_scan_stage(maintenance_scan_job_id),
             )
+            changed = embedded_changed or changed
             _runtime._advance_scan_stage(
                 maintenance_scan_job_id, len(inventory.sidecars), force=True,
             )
@@ -968,6 +1111,7 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
             prune_evidence=prune_evidence,
             progress_callback=lambda: _runtime._advance_scan_stage(maintenance_scan_job_id),
         )
+        changed = embedded_changed or changed
         _runtime._advance_scan_stage(
             maintenance_scan_job_id,
             len(candidates) + len(inventory.sidecars), force=True,
@@ -992,9 +1136,41 @@ def run_existing_cleanup_scan(maintenance_scan_job_id: str | None=None) -> dict:
                 print(f'{_runtime.YELLOW}[SCAN] Unsupported target language for {candidate.path}{_runtime.RESET}')
                 _runtime._publish_scan_progress(maintenance_scan_job_id)
                 continue
+            candidate_video = inventory.video_for_sidecar(candidate.path)
+            embedded_target_hash = _runtime._file_hash_or_none(candidate.path)
+            embedded_record = (
+                state.matching_record(candidate.path, embedded_target_hash)
+                if embedded_target_hash is not None else None
+            )
+            if (
+                embedded_record is not None
+                and embedded_record.get('origin') == 'embedded'
+                and embedded_record.get('validationMode') == 'embedded-reference'
+            ):
+                details = embedded_record.get('details') or {}
+                embedded_evidence = details.get('embeddedReference') or {}
+                reference_path = embedded_evidence.get('referencePath') or embedded_record.get('sourcePath')
+                receipt_path = embedded_evidence.get('receiptPath') or details.get('receiptPath')
+                stats['skipped_unchanged'] += 1
+                cache_entry = _maintenance_cache_update(
+                    target_path=candidate.path,
+                    source_path=_runtime.Path(reference_path) if reference_path else None,
+                    video_path=candidate_video,
+                    receipt_path=_runtime.Path(receipt_path) if receipt_path else None,
+                    action='valid', report=None, source_aligned=False,
+                    prepared=prepared_analysis,
+                    media_duration_seconds=(
+                        durations.get(path_key(candidate_video))
+                        if candidate_video is not None else None
+                    ),
+                    prune_evidence=prune_evidence.get(candidate_key),
+                )
+                if cache_entry is not None:
+                    cache_updates.append(cache_entry)
+                _runtime._publish_scan_progress(maintenance_scan_job_id)
+                continue
             source_path = None
             source_lang = None
-            candidate_video = inventory.video_for_sidecar(candidate.path)
             receipt_path = None
             if candidate_video is not None:
                 from ..subtitles.foundation import normalize_managed_file
@@ -1355,6 +1531,7 @@ EXPORTS = {
         '_build_maintenance_inventory', '_duration_cache_key',
         '_duration_from_map', '_seed_duration_cache_from_maintenance_cache',
         '_probe_inventory_durations',
+        '_promote_inventory_embedded_targets',
         '_managed_sidecar_is_valid', '_apply_prune_action',
         'run_extra_sidecar_prune', 'run_existing_cleanup_scan',
         '_run_existing_cleanup_scan_safely', 'run_retention_housekeeping',

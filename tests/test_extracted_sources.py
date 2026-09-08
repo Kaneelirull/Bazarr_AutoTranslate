@@ -20,9 +20,13 @@ from autotranslate.subtitles.sources import (  # noqa: E402
     deduplicate_rolling_cues,
     discover_extracted_sources,
     extracted_receipt_owned_paths,
+    find_embedded_english_reference,
     lingarr_output_candidates,
     prepare_extracted_source,
+    select_extracted_target,
+    validate_embedded_target,
 )
+from autotranslate.subtitles.foundation import ValidationReport  # noqa: E402
 
 
 ALIASES = {"en": {"en", "eng"}, "et": {"et", "est"}, "sv": {"sv", "swe"}}
@@ -86,6 +90,138 @@ class ExtractedSourceTests(unittest.TestCase):
             self.assertIsNone(error)
             self.assertEqual([candidate.path for candidate in candidates], [plain, hi, swedish])
 
+    def test_target_alias_and_english_reference_are_selected_from_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "Movie.mkv"
+            video.write_bytes(b"video")
+            english = root / "Movie.extracted.eng.srt"
+            swedish = root / "Movie.extracted.swe.srt"
+            estonian = root / "Movie.extracted.est.srt"
+            canonical_english = root / "Movie.en.srt"
+            for path, text in (
+                (english, "English"), (swedish, "Svenska"),
+                (estonian, "Eesti"),
+                (canonical_english, "Fallback"),
+            ):
+                path.write_text(cue(1, "00:00:00,000", "00:00:01,000", text), encoding="utf-8")
+            self._write_receipt(video, [
+                {"path": english.name, "sha256": sha256(english), "language": "eng", "forced": False},
+                {"path": swedish.name, "sha256": sha256(swedish), "language": "swe", "forced": False},
+                {"path": estonian.name, "sha256": sha256(estonian), "language": "est", "forced": False},
+            ])
+            candidates, error = discover_extracted_sources(video, ALIASES, ("en", "et", "sv"))
+
+            target = select_extracted_target(candidates, "sv")
+
+            self.assertIsNone(error)
+            self.assertIsNotNone(target)
+            self.assertEqual(target.path, swedish)
+            self.assertEqual(select_extracted_target(candidates, "et").path, estonian)
+            self.assertEqual(
+                find_embedded_english_reference(
+                    video, target, candidates, ALIASES, (canonical_english,),
+                ),
+                english,
+            )
+
+    def test_embedded_reference_validation_accepts_independent_segmentation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "Movie.extracted.eng.srt"
+            target = root / "Movie.extracted.swe.srt"
+            reference.write_text(
+                "\n\n".join(
+                    cue(index, f"00:00:{index:02d},000", f"00:00:{index:02d},900", f"English {index}").strip()
+                    for index in range(1, 11)
+                ) + "\n",
+                encoding="utf-8",
+            )
+            target.write_text(
+                "\n\n".join(
+                    cue(index, f"00:00:{start:02d},000", f"00:00:{end:02d},900", f"Svenska {index}").strip()
+                    for index, (start, end) in enumerate(((1, 2), (3, 4), (5, 6), (7, 8), (9, 10)), 1)
+                ) + "\n",
+                encoding="utf-8",
+            )
+            with patch(
+                "autotranslate.subtitles.library.validate_subtitle_without_source",
+                return_value=ValidationReport(),
+            ):
+                result = validate_embedded_target(
+                    target, reference, detector=object(), target_language=object(),
+                    target_lang="sv", media_duration_seconds=12,
+                    completeness_kwargs={
+                        "min_media_duration": 0, "min_cues_per_minute": 0,
+                        "min_text_chars_per_minute": 0, "min_bytes_per_minute": 0,
+                        "min_timeline_coverage": 0, "required_signals": 1,
+                    },
+                )
+
+            self.assertTrue(result.report.valid, result.report.summary())
+            self.assertEqual(result.coverage, 1.0)
+
+    def test_embedded_reference_validation_rejects_missing_dialogue_span(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "Movie.extracted.eng.srt"
+            target = root / "Movie.extracted.swe.srt"
+            reference.write_text(
+                "\n\n".join(
+                    cue(index, f"00:00:{index * 5:02d},000", f"00:00:{index * 5:02d},900", f"English {index}").strip()
+                    for index in range(1, 11)
+                ) + "\n",
+                encoding="utf-8",
+            )
+            target.write_text(
+                cue(1, "00:00:05,000", "00:00:10,000", "Svenska"),
+                encoding="utf-8",
+            )
+            with patch(
+                "autotranslate.subtitles.library.validate_subtitle_without_source",
+                return_value=ValidationReport(),
+            ):
+                result = validate_embedded_target(
+                    target, reference, detector=object(), target_language=object(),
+                    target_lang="sv", media_duration_seconds=60,
+                    completeness_kwargs={
+                        "min_media_duration": 0, "min_cues_per_minute": 0,
+                        "min_text_chars_per_minute": 0, "min_bytes_per_minute": 0,
+                        "min_timeline_coverage": 0, "required_signals": 1,
+                    },
+                )
+
+            self.assertFalse(result.report.valid)
+            self.assertIn(
+                "embedded_reference_coverage",
+                {issue.rule for issue in result.report.issues},
+            )
+
+    def test_embedded_reference_validation_fails_closed_without_language_detector(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "Movie.extracted.eng.srt"
+            target = root / "Movie.extracted.swe.srt"
+            reference.write_text(
+                cue(1, "00:00:00,000", "00:00:01,000", "English"),
+                encoding="utf-8",
+            )
+            target.write_text(
+                cue(1, "00:00:00,000", "00:00:01,000", "Svenska"),
+                encoding="utf-8",
+            )
+
+            result = validate_embedded_target(
+                target, reference, detector=None, target_language=None,
+                target_lang="sv", media_duration_seconds=1,
+            )
+
+            self.assertFalse(result.report.valid)
+            self.assertIn(
+                "embedded_language_detector_unavailable",
+                {issue.rule for issue in result.report.issues},
+            )
+
     def test_stale_receipt_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -102,6 +238,47 @@ class ExtractedSourceTests(unittest.TestCase):
 
             self.assertEqual(candidates, [])
             self.assertIn("size", error)
+
+    def test_receipt_allows_only_submicrosecond_smb_timestamp_rounding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "Movie.mkv"
+            video.write_bytes(b"video")
+            english = root / "Movie.extracted.eng.srt"
+            english.write_text(
+                cue(1, "00:00:00,000", "00:00:01,000", "English"),
+                encoding="utf-8",
+            )
+            stat = video.stat()
+            receipt = {
+                "schemaVersion": 1,
+                "video": {
+                    "name": video.name,
+                    "size": stat.st_size,
+                    "mtimeNs": stat.st_mtime_ns + 999,
+                },
+                "tracks": [{
+                    "path": english.name,
+                    "sha256": sha256(english),
+                    "language": "eng",
+                }],
+            }
+            receipt_path = root / "Movie.extracted.json"
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+            accepted, accepted_error = discover_extracted_sources(
+                video, ALIASES, ("en", "et", "sv"),
+            )
+            receipt["video"]["mtimeNs"] = stat.st_mtime_ns + 1_001
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            rejected, rejected_error = discover_extracted_sources(
+                video, ALIASES, ("en", "et", "sv"),
+            )
+
+            self.assertEqual([candidate.path for candidate in accepted], [english])
+            self.assertIsNone(accepted_error)
+            self.assertEqual(rejected, [])
+            self.assertIn("video modification time", rejected_error)
 
     def test_deduplication_merges_full_span_and_is_idempotent(self):
         raw = "\n\n".join(

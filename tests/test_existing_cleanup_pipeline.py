@@ -29,6 +29,7 @@ from autotranslate.production import load_runtime  # noqa: E402
 import autotranslate.subtitles.library as cleanup  # noqa: E402
 import autotranslate.subtitles.foundation as subtitle_foundation  # noqa: E402
 import autotranslate.subtitles.repair as subtitle_repair  # noqa: E402
+import autotranslate.subtitles.sources as subtitle_sources  # noqa: E402
 import autotranslate.subtitles.workflow as subtitle_workflow  # noqa: E402
 import autotranslate.composition as composition  # noqa: E402
 import autotranslate.items_workflow as items_workflow  # noqa: E402
@@ -776,6 +777,56 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(outcome["filesChecked"], 1)
             self.assertEqual(outcome["progress"], 100)
 
+    def test_maintenance_embedded_promotion_rescans_and_keeps_undersized_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            english = root / "movie.extracted.eng.srt"
+            swedish = root / "movie.extracted.swe.srt"
+            video.write_bytes(b"video")
+            english.write_text(make_srt("English"), encoding="utf-8")
+            swedish.write_text(make_srt("Svenska"), encoding="utf-8")
+            stat = video.stat()
+            (root / "movie.extracted.json").write_text(json.dumps({
+                "schemaVersion": 1,
+                "video": {"name": video.name, "size": stat.st_size, "mtimeNs": stat.st_mtime_ns},
+                "tracks": [
+                    {"path": english.name, "sha256": subtitle_foundation.file_sha256(english), "language": "eng"},
+                    {"path": swedish.name, "sha256": subtitle_foundation.file_sha256(swedish), "language": "swe"},
+                ],
+            }), encoding="utf-8")
+            promotion = Mock(return_value={
+                "action": "promoted", "targetPath": str(root / "movie.sv.srt"),
+            })
+            undersized = Mock(return_value=False)
+            sync = Mock(return_value=True)
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "sv"],
+                    CLEANUP_LANGUAGES={"sv"},
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_SCAN_EXISTING=True,
+                    CLEANUP_SCAN_DRY_RUN=False,
+                    CLEANUP_PRUNE_EXTRA_LANGUAGES=False,
+                    _promote_embedded_target=promotion,
+                    _scan_undersized_sidecars=undersized,
+                    _tracked_bazarr_sync=sync,
+                ),
+                patch.object(app, "_get_cleanup_detector", return_value=None),
+                patch.object(app, "_probe_media_duration", return_value=60.0),
+                patch.object(
+                    app, "run_extra_sidecar_prune",
+                    return_value=(app._prune_stats(), False, False),
+                ),
+            ):
+                stats = app.run_existing_cleanup_scan()
+
+            self.assertEqual(stats["embedded_targets_promoted"], 2)
+            self.assertEqual(promotion.call_count, 2)
+            undersized.assert_called_once()
+            sync.assert_called_once_with(True, True, app.SYNC_TIMEOUT)
+
     def test_managed_variants_are_preserved_and_forced_only_does_not_satisfy_readiness(self):
         with tempfile.TemporaryDirectory() as directory:
             root, video = self._prune_fixture(directory, managed=("en", "et"))
@@ -828,6 +879,50 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(retained["prune_candidates"], 0)
             self.assertEqual(removable["prune_candidates"], 3)
 
+    def test_submission_proven_extracted_orphan_is_prunable_when_languages_are_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, video = self._prune_fixture(directory)
+            orphan = root / "movie.extracted.et.srt"
+            orphan.write_text(make_srt("Lingarr orphan"), encoding="utf-8")
+            identity = os.path.normcase(os.path.abspath(video.with_suffix("")))
+            app._validation_state.record_submission(
+                "movies", 7, "et", cooldown_seconds=3600,
+                target_identity=identity,
+                target_path=str(orphan),
+                expected_target_path=str(root / "movie.et.srt"),
+                actual_target_path=str(orphan),
+                video_path=str(video),
+                source_path=str(root / "movie.en.srt"),
+                source_hash=subtitle_foundation.file_sha256(root / "movie.en.srt"),
+                source_language="en",
+                target_hash=subtitle_foundation.file_sha256(orphan),
+                status="completed",
+            )
+            app._validation_state.clear_submissions_for_identity(
+                identity, orphan, "et",
+            )
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et", "sv"],
+                    CLEANUP_ROOTS=[root],
+                    CLEANUP_PRUNE_EXTRA_LANGUAGES=True,
+                    CLEANUP_PRUNE_ACTION="report",
+                    CLEANUP_PRUNE_UNKNOWN_SIDECARS=False,
+                    CLEANUP_SCAN_DRY_RUN=False,
+                ),
+                patch.object(app, "_probe_media_duration", return_value=5400.0),
+                patch.object(
+                    app, "_managed_sidecar_is_valid",
+                    return_value=(True, {"valid": True}),
+                ),
+            ):
+                stats, _, _ = app.run_extra_sidecar_prune([(video, None)])
+
+            self.assertEqual(stats["prune_candidates"], 1)
+            self.assertEqual(stats["prune_reported"], 1)
+            self.assertTrue(orphan.exists())
+
     def test_overlapping_video_names_do_not_share_sidecars(self):
         with tempfile.TemporaryDirectory() as directory:
             root, short_video = self._prune_fixture(directory)
@@ -838,7 +933,7 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertNotIn(long_extra, app._video_sidecars(short_video))
             self.assertIn(long_extra, app._video_sidecars(long_video))
 
-    def test_extracted_sidecar_is_preserved_as_source_not_managed_readiness(self):
+    def test_only_receipt_owned_extracted_sidecar_is_classified_as_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             video = root / "movie.mkv"
@@ -846,9 +941,17 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             video.write_bytes(b"video")
             extracted.write_text(make_srt("English"), encoding="utf-8")
             with patch.object(app, "LANGUAGES", ["en", "et"]):
-                classification = app._classify_sidecar(video, extracted)
-            self.assertEqual(classification.kind, "source")
-            self.assertEqual(classification.language, "en")
+                unowned = app._classify_sidecar(video, extracted)
+                stat = video.stat()
+                (root / "movie.extracted.json").write_text(json.dumps({
+                    "schemaVersion": 1,
+                    "video": {"name": video.name, "size": stat.st_size, "mtimeNs": stat.st_mtime_ns},
+                    "tracks": [{"path": extracted.name, "sha256": subtitle_foundation.file_sha256(extracted), "language": "eng"}],
+                }), encoding="utf-8")
+                owned = app._classify_sidecar(video, extracted)
+            self.assertEqual(unowned.kind, "unknown")
+            self.assertEqual(owned.kind, "source")
+            self.assertEqual(owned.language, "en")
 
     def test_dry_run_prune_reports_without_moving(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1278,6 +1381,308 @@ class ExistingCleanupPipelineTests(unittest.TestCase):
             self.assertEqual(stats["source_duplicate_cues_removed"], 1)
             self.assertEqual(stats["embedded_sources_selected"], 1)
             self.assertEqual(bazarr_source.read_text(encoding="utf-8"), make_srt("Bazarr dialogue"))
+
+    def test_process_item_promotes_receipt_backed_target_without_lingarr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            english = root / "movie.extracted.eng.srt"
+            swedish = root / "movie.extracted.swe.srt"
+            canonical = root / "movie.sv.srt"
+            receipt = root / "movie.extracted.json"
+            video.write_bytes(b"video")
+            english.write_text(make_multi_srt("English one", "English two"), encoding="utf-8")
+            swedish.write_text(make_srt("Svensk dialog"), encoding="utf-8")
+            stat = video.stat()
+            receipt.write_text(json.dumps({
+                "schemaVersion": 1,
+                "generator": "SubExtractorr",
+                "video": {"name": video.name, "size": stat.st_size, "mtimeNs": stat.st_mtime_ns},
+                "tracks": [
+                    {"path": english.name, "sha256": subtitle_foundation.file_sha256(english), "language": "eng", "forced": False},
+                    {"path": swedish.name, "sha256": subtitle_foundation.file_sha256(swedish), "language": "swe", "forced": False},
+                ],
+            }), encoding="utf-8")
+            original_receipt = receipt.read_bytes()
+            original_target = swedish.read_bytes()
+            validation = subtitle_sources.EmbeddedTargetValidation(
+                ValidationReport(),
+                subtitle_foundation.CompletenessResult(True, False, "accepted", 60),
+                subtitle_foundation.file_sha256(swedish),
+                subtitle_foundation.file_sha256(english),
+                2, 2, 1.0,
+            )
+            stats = defaultdict(int)
+            stats["translations"] = []
+            submit = Mock()
+            active_retry = {"id": 91, "sourceHash": "old-source"}
+            settle_retry = Mock(return_value=True)
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "et", "sv"],
+                    CLEANUP_UNDERSIZED_ENABLED=True,
+                    fetch_subtitles=lambda *_args: (str(video), []),
+                    _probe_media_duration=lambda _path: 60.0,
+                    lingarr_submit_file=submit,
+                ),
+                patch.object(subtitle_sources, "validate_embedded_target", return_value=validation),
+                patch.object(
+                    app._validation_state, "active_retry_plan",
+                    return_value=active_retry,
+                ),
+                patch.object(
+                    app, "_resolve_existing_retry_success",
+                    settle_retry,
+                ),
+            ):
+                app.process_item(
+                    {"radarrId": 7, "title": "Movie", "missing_subtitles": [{"code2": "sv"}]},
+                    "movies", "radarrId", stats, threading.Lock(),
+                )
+
+            self.assertEqual(canonical.read_bytes(), original_target)
+            self.assertEqual(swedish.read_bytes(), original_target)
+            self.assertEqual(receipt.read_bytes(), original_receipt)
+            submit.assert_not_called()
+            settle_retry.assert_called_once_with(active_retry, "movies:movie", "Movie")
+            self.assertEqual(stats["completed"], 1)
+            self.assertEqual(stats["embedded_targets_promoted"], 1)
+            record = app._validation_state.matching_record(
+                canonical, subtitle_foundation.file_sha256(canonical),
+            )
+            self.assertEqual(record["origin"], "embedded")
+            self.assertEqual(record["validationMode"], "embedded-reference")
+            self.assertEqual(
+                record["details"]["embeddedReference"]["receiptHash"],
+                subtitle_foundation.file_sha256(receipt),
+            )
+            self.assertTrue(app._validation_state.is_unchanged_valid(
+                canonical,
+                subtitle_foundation.file_sha256(english),
+                subtitle_foundation.file_sha256(canonical),
+            ))
+            self.assertFalse(app._validation_state.is_unchanged_valid(
+                canonical, "changed-reference-hash",
+                subtitle_foundation.file_sha256(canonical),
+            ))
+            classification = app._classify_sidecar(video, canonical)
+            with (
+                patch.object(
+                    subtitle_sources, "validate_embedded_target",
+                    return_value=validation,
+                ),
+                patch.object(app, "LANGUAGES", ["en", "et", "sv"]),
+            ):
+                ready, evidence = app._managed_sidecar_is_valid(
+                    classification, 60.0, detector=object(), video=video,
+                )
+            self.assertTrue(ready)
+            self.assertEqual(evidence["reason"], "embedded_reference_validation")
+            self.assertEqual(
+                evidence["embeddedReference"]["receiptHash"],
+                subtitle_foundation.file_sha256(receipt),
+            )
+
+    def test_invalid_embedded_target_falls_back_to_lingarr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            english = root / "movie.extracted.eng.srt"
+            swedish = root / "movie.extracted.swe.srt"
+            provider_target = root / "movie.extracted.sv.srt"
+            canonical = root / "movie.sv.srt"
+            video.write_bytes(b"video")
+            english.write_text(make_srt("English dialogue"), encoding="utf-8")
+            swedish.write_text(make_srt("Incomplete Swedish"), encoding="utf-8")
+            stat = video.stat()
+            (root / "movie.extracted.json").write_text(json.dumps({
+                "schemaVersion": 1,
+                "video": {"name": video.name, "size": stat.st_size, "mtimeNs": stat.st_mtime_ns},
+                "tracks": [
+                    {"path": english.name, "sha256": subtitle_foundation.file_sha256(english), "language": "eng"},
+                    {"path": swedish.name, "sha256": subtitle_foundation.file_sha256(swedish), "language": "swe"},
+                ],
+            }), encoding="utf-8")
+            invalid_report = ValidationReport([
+                ValidationIssue("embedded_reference_coverage", "target covers 10%"),
+            ])
+            invalid = subtitle_sources.EmbeddedTargetValidation(
+                invalid_report,
+                subtitle_foundation.CompletenessResult(True, True, "undersized", 60),
+                subtitle_foundation.file_sha256(swedish),
+                subtitle_foundation.file_sha256(english),
+                1, 10, 0.1,
+            )
+            submit = Mock(return_value=123)
+            stats = defaultdict(int)
+            stats["translations"] = []
+
+            def completed(*_args, **_kwargs):
+                provider_target.write_text(make_srt("Lingarr Swedish"), encoding="utf-8")
+                return "Completed"
+
+            with (
+                patch.multiple(
+                    app,
+                    LANGUAGES=["en", "sv"],
+                    CLEANUP_UNDERSIZED_ENABLED=False,
+                    fetch_subtitles=lambda *_args: (str(video), []),
+                    _probe_media_duration=lambda _path: 60.0,
+                    _source_is_usable=lambda *_args, **_kwargs: True,
+                    lingarr_resolve_media_id=lambda *_args: 99,
+                    lingarr_get_active_translations=lambda: [],
+                    lingarr_submit_file=submit,
+                    lingarr_poll_job=completed,
+                    _count_dialogue_lines=lambda _path: 1,
+                    _estimate_timeout=lambda _path: 60,
+                    _record_submission=lambda *_args, **_kwargs: 44,
+                    _mark_submission_submitted=lambda *_args, **_kwargs: None,
+                    _mark_submission_failed=lambda *_args, **_kwargs: None,
+                    _update_submission_actual_path=lambda *_args, **_kwargs: None,
+                    _record_pending_lingarr_output=lambda *_args, **_kwargs: True,
+                    _validate_translated_file=lambda *_args, **_kwargs: (
+                        "valid", SimpleNamespace(issues=[]),
+                    ),
+                ),
+                patch.object(
+                    subtitle_sources, "validate_embedded_target",
+                    return_value=invalid,
+                ),
+            ):
+                app.process_item(
+                    {"radarrId": 7, "title": "Movie", "missing_subtitles": [{"code2": "sv"}]},
+                    "movies", "radarrId", stats, threading.Lock(),
+                )
+
+            submit.assert_called_once()
+            self.assertTrue(canonical.exists())
+            self.assertEqual(canonical.read_text(encoding="utf-8"), make_srt("Lingarr Swedish"))
+            self.assertTrue(swedish.exists())
+            self.assertEqual(stats["completed"], 1)
+
+    def test_embedded_promotion_preserves_external_canonical_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            english = root / "movie.extracted.eng.srt"
+            swedish = root / "movie.extracted.swe.srt"
+            canonical = root / "movie.sv.srt"
+            video.write_bytes(b"video")
+            english.write_text(make_srt("English"), encoding="utf-8")
+            swedish.write_text(make_srt("Embedded Swedish"), encoding="utf-8")
+            canonical.write_text(make_srt("User Swedish"), encoding="utf-8")
+            stat = video.stat()
+            (root / "movie.extracted.json").write_text(json.dumps({
+                "schemaVersion": 1,
+                "video": {"name": video.name, "size": stat.st_size, "mtimeNs": stat.st_mtime_ns},
+                "tracks": [
+                    {"path": english.name, "sha256": subtitle_foundation.file_sha256(english), "language": "eng"},
+                    {"path": swedish.name, "sha256": subtitle_foundation.file_sha256(swedish), "language": "swe"},
+                ],
+            }), encoding="utf-8")
+            candidates, _ = subtitle_sources.discover_extracted_sources(
+                video, app._LANGUAGE_ALIASES, ("en", "et", "sv"),
+            )
+            target = subtitle_sources.select_extracted_target(candidates, "sv")
+            validation = subtitle_sources.EmbeddedTargetValidation(
+                ValidationReport(),
+                subtitle_foundation.CompletenessResult(True, False, "accepted", 60),
+                subtitle_foundation.file_sha256(swedish),
+                subtitle_foundation.file_sha256(english),
+                1, 1, 1.0,
+            )
+            with (
+                patch.multiple(app, LANGUAGES=["en", "et", "sv"]),
+                patch.object(subtitle_sources, "validate_embedded_target", return_value=validation),
+            ):
+                result = app._promote_embedded_target(
+                    video, target, english, "sv", 60.0, "Movie",
+                )
+
+            self.assertEqual(result["action"], "conflict")
+            self.assertEqual(canonical.read_text(encoding="utf-8"), make_srt("User Swedish"))
+
+    def test_embedded_promotion_replaces_only_lingarr_owned_canonical_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            english = root / "movie.extracted.eng.srt"
+            swedish = root / "movie.extracted.swe.srt"
+            canonical = root / "movie.sv.srt"
+            video.write_bytes(b"video")
+            english.write_text(make_srt("English"), encoding="utf-8")
+            swedish.write_text(make_srt("Embedded Swedish"), encoding="utf-8")
+            canonical.write_text(make_srt("Lingarr Swedish"), encoding="utf-8")
+            stat = video.stat()
+            (root / "movie.extracted.json").write_text(json.dumps({
+                "schemaVersion": 1,
+                "video": {"name": video.name, "size": stat.st_size, "mtimeNs": stat.st_mtime_ns},
+                "tracks": [
+                    {"path": english.name, "sha256": subtitle_foundation.file_sha256(english), "language": "eng"},
+                    {"path": swedish.name, "sha256": subtitle_foundation.file_sha256(swedish), "language": "swe"},
+                ],
+            }), encoding="utf-8")
+            self._record_lingarr_artifact(english, canonical, "sv")
+            candidates, _ = subtitle_sources.discover_extracted_sources(
+                video, app._LANGUAGE_ALIASES, ("en", "et", "sv"),
+            )
+            target = subtitle_sources.select_extracted_target(candidates, "sv")
+            validation = subtitle_sources.EmbeddedTargetValidation(
+                ValidationReport(),
+                subtitle_foundation.CompletenessResult(True, False, "accepted", 60),
+                subtitle_foundation.file_sha256(swedish),
+                subtitle_foundation.file_sha256(english),
+                1, 1, 1.0,
+            )
+            with (
+                patch.multiple(app, LANGUAGES=["en", "et", "sv"]),
+                patch.object(subtitle_sources, "validate_embedded_target", return_value=validation),
+            ):
+                result = app._promote_embedded_target(
+                    video, target, english, "sv", 60.0, "Movie",
+                )
+                repeated = app._promote_embedded_target(
+                    video, target, english, "sv", 60.0, "Movie",
+                )
+
+            self.assertEqual(result["action"], "promoted")
+            self.assertEqual(repeated["action"], "already-current")
+            self.assertEqual(canonical.read_bytes(), swedish.read_bytes())
+
+    def test_unreceipted_extracted_target_requires_exact_submission_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            source = root / "movie.extracted.eng.srt"
+            orphan = root / "movie.extracted.et.srt"
+            video.write_bytes(b"video")
+            source.write_text(make_srt("English"), encoding="utf-8")
+            orphan.write_text(make_srt("Translated"), encoding="utf-8")
+            identity = os.path.normcase(os.path.abspath(video.with_suffix("")))
+            app._validation_state.record_submission(
+                "movies", 7, "et", cooldown_seconds=3600,
+                target_identity=identity, target_path=str(orphan),
+                expected_target_path=str(root / "movie.et.srt"),
+                actual_target_path=str(orphan), video_path=str(video),
+                source_path=str(source), source_hash=subtitle_foundation.file_sha256(source),
+                source_language="en", target_hash=subtitle_foundation.file_sha256(orphan),
+                status="completed",
+            )
+            with patch.object(app, "LANGUAGES", ["en", "et"]):
+                proven = app._classify_sidecar(video, orphan)
+            app._validation_state.clear_submissions_for_identity(
+                identity, orphan, "et",
+            )
+            with patch.object(app, "LANGUAGES", ["en", "et"]):
+                cleared_but_proven = app._classify_sidecar(video, orphan)
+            orphan.write_text(make_srt("Changed"), encoding="utf-8")
+            with patch.object(app, "LANGUAGES", ["en", "et"]):
+                changed = app._classify_sidecar(video, orphan)
+
+            self.assertEqual(proven.kind, "provider")
+            self.assertEqual(cleared_but_proven.kind, "provider")
+            self.assertEqual(changed.kind, "unknown")
 
     def test_canonical_publication_does_not_overwrite_concurrent_target(self):
         with tempfile.TemporaryDirectory() as directory:

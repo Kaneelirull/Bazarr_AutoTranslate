@@ -253,7 +253,9 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
         from .subtitles.sources import (
             discover_extracted_sources,
             extracted_receipt_owned_paths,
+            find_embedded_english_reference,
             prepare_extracted_source,
+            select_extracted_target,
         )
         extracted, receipt_error = discover_extracted_sources(video_path, _runtime._LANGUAGE_ALIASES, _runtime.LANGUAGES)
         receipt_owned_paths = {
@@ -262,6 +264,66 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
         }
         if receipt_error:
             print(f'{_runtime.YELLOW}[SOURCE] Ignored extracted-subtitle receipt for {title}: {receipt_error}{_runtime.RESET}')
+        if extracted and target_langs and media_duration is None:
+            media_duration = _runtime._probe_media_duration(video_path)
+        for target_lang in list(target_langs):
+            embedded_target = select_extracted_target(extracted, target_lang)
+            if embedded_target is None:
+                continue
+            reference_path = find_embedded_english_reference(
+                video_path, embedded_target, extracted, _runtime._LANGUAGE_ALIASES,
+                sibling_paths=(_runtime.Path(path) for paths in available_by_lang.values() for path in paths),
+            )
+            if reference_path is None:
+                print(f"{_runtime.YELLOW}[EMBEDDED] Rejected {embedded_target.path.name}: no English reference subtitle{_runtime.RESET}")
+                continue
+            promotion = _runtime._promote_embedded_target(
+                video_path, embedded_target, reference_path, target_lang,
+                media_duration, title, item_type=item_type, item_id=item_id,
+            )
+            if promotion['action'] in ('promoted', 'already-current'):
+                target_langs.remove(target_lang)
+                canonical = promotion['targetPath']
+                _runtime._clear_submission(item_id, target_lang, item_type)
+                _runtime._clear_submission_for_path(canonical, target_lang)
+                settled_plan = retry_plan if retry_target == target_lang else None
+                if settled_plan is None:
+                    try:
+                        settled_plan = _runtime._get_validation_state().active_retry_plan(
+                            item_type, item_id, target_lang,
+                        )
+                    except _runtime.StateStoreError as exc:
+                        print(f'{_runtime.YELLOW}[RETRY] Could not inspect embedded promotion retry: {exc}{_runtime.RESET}')
+                _runtime._resolve_existing_retry_success(
+                    settled_plan, series_key, series_title,
+                )
+                _runtime._status_transition(
+                    item_type, item_id, target_lang, 'accepted',
+                    reason='receipt-backed embedded subtitle promoted',
+                    details={
+                        'origin': 'embedded', 'completionPercent': 100,
+                        'embeddedReference': promotion.get('evidence'),
+                    },
+                )
+                with stats_lock:
+                    stats['completed'] += 1
+                    stats['embedded_targets_promoted'] = stats.get('embedded_targets_promoted', 0) + int(promotion['action'] == 'promoted')
+                    stats['translations'].append(f'{title}: embedded {target_lang} (on disk)')
+                    _runtime._mark_activity(stats, item_type)
+                print(f"{_runtime.GREEN}[OK] {title} '{target_lang}' promoted receipt-backed embedded subtitle to {_runtime.os.path.basename(canonical)}{_runtime.RESET}")
+            elif promotion['action'] == 'conflict':
+                target_langs.remove(target_lang)
+                with stats_lock:
+                    stats['deferred'] = stats.get('deferred', 0) + 1
+                _runtime._status_transition(
+                    item_type, item_id, target_lang, 'deferred',
+                    reason=promotion['reason'],
+                )
+                print(f"{_runtime.YELLOW}[EMBEDDED] Preserved canonical target for {title} '{target_lang}': {promotion['reason']}{_runtime.RESET}")
+            else:
+                print(f"{_runtime.YELLOW}[EMBEDDED] Could not promote {embedded_target.path.name}: {promotion['reason']}; translation fallback remains enabled{_runtime.RESET}")
+        if not target_langs:
+            return
         for candidate in extracted:
             if retry_plan is not None and candidate.canonical_language == retry_target:
                 continue
