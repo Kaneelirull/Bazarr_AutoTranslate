@@ -219,6 +219,192 @@ class ServiceReliabilityTests(unittest.TestCase):
         cache.assert_not_called()
         wanted.assert_not_called()
 
+    def test_missing_episode_refreshes_catalog_and_resolves_in_same_cycle(self):
+        work = [({"sonarrEpisodeId": 42}, "episodes", "sonarrEpisodeId")]
+
+        def refresh_catalog(_episodes, _movies, _timeout):
+            with app._media_cache_lock:
+                app._episode_cache[42] = 9001
+            return True
+
+        with patch.object(
+            app, "_tracked_lingarr_media_sync", side_effect=refresh_catalog
+        ) as sync:
+            self.assertTrue(app._refresh_lingarr_cache_for_missing_work(work, 60))
+
+        sync.assert_called_once_with(True, False, 60)
+        self.assertEqual(app.lingarr_resolve_media_id("episodes", 42), 9001)
+
+    def test_cycle_refreshes_missing_episode_before_worker_dispatch(self):
+        item = {"sonarrEpisodeId": 42, "title": "New Episode"}
+        processed = []
+
+        def refresh_catalog(_episodes, _movies, _timeout):
+            with app._media_cache_lock:
+                app._episode_cache[42] = 9001
+            return True
+
+        def process_item(candidate, item_type, id_field, _stats, _lock):
+            self.assertEqual(
+                app.lingarr_resolve_media_id(item_type, candidate[id_field]),
+                9001,
+            )
+            processed.append(candidate[id_field])
+
+        def wanted(item_type):
+            return [item] if item_type == "episodes" else []
+
+        with (
+            patch.multiple(
+                app,
+                _status_tracker=None,
+                _pending_repairs={},
+                shutdown_requested=False,
+                lingarr_build_media_cache=lambda: None,
+                lingarr_get_active_translations=lambda: [],
+                fetch_wanted=wanted,
+                process_item=process_item,
+                _run_end_cycle_repair_retries=lambda _stats: None,
+                _run_quarantine_recoveries=lambda _stats: None,
+                _run_regeneration_retries=lambda _stats: None,
+                _take_pending_prune_videos=lambda: {},
+                _drain_lingarr_queue=lambda: True,
+                _reconcile_retry_claims=lambda _state: None,
+                _reconcile_circuit_trial_leases=lambda _state: None,
+                _status_finish_cycle=lambda _stats: None,
+            ),
+            patch.object(app, "_ensure_media_catalog_ready", return_value=True),
+            patch.object(
+                app,
+                "_tracked_lingarr_media_sync",
+                side_effect=refresh_catalog,
+            ) as sync,
+        ):
+            self.assertTrue(app.run_cycle(5))
+
+        sync.assert_called_once_with(True, False, app.SYNC_TIMEOUT)
+        self.assertEqual(processed, [42])
+
+    def test_multiple_missing_episodes_trigger_one_show_sync(self):
+        work = [
+            ({"sonarrEpisodeId": 42}, "episodes", "sonarrEpisodeId"),
+            ({"sonarrEpisodeId": 43}, "episodes", "sonarrEpisodeId"),
+        ]
+
+        with patch.object(
+            app, "_tracked_lingarr_media_sync", return_value=True
+        ) as sync:
+            self.assertTrue(app._refresh_lingarr_cache_for_missing_work(work, 60))
+
+        sync.assert_called_once_with(True, False, 60)
+
+    def test_missing_media_refresh_batches_types_once(self):
+        work = [
+            ({"sonarrEpisodeId": 42}, "episodes", "sonarrEpisodeId"),
+            ({"sonarrEpisodeId": 43}, "episodes", "sonarrEpisodeId"),
+            ({"radarrId": 7}, "movies", "radarrId"),
+        ]
+
+        with patch.object(
+            app, "_tracked_lingarr_media_sync", return_value=True
+        ) as sync:
+            self.assertTrue(app._refresh_lingarr_cache_for_missing_work(work, 60))
+
+        sync.assert_called_once_with(True, True, 60)
+
+    def test_complete_media_cache_skips_refresh(self):
+        with app._media_cache_lock:
+            app._episode_cache[42] = 9001
+            app._movie_cache[7] = 8001
+        work = [
+            ({"sonarrEpisodeId": 42}, "episodes", "sonarrEpisodeId"),
+            ({"radarrId": 7}, "movies", "radarrId"),
+        ]
+
+        with patch.object(app, "_tracked_lingarr_media_sync") as sync:
+            self.assertTrue(app._refresh_lingarr_cache_for_missing_work(work, 60))
+
+        sync.assert_not_called()
+
+    def test_successful_refresh_does_not_repeat_for_unresolved_media(self):
+        work = [
+            ({"sonarrEpisodeId": 42}, "episodes", "sonarrEpisodeId"),
+            ({"sonarrEpisodeId": 43}, "episodes", "sonarrEpisodeId"),
+        ]
+
+        with patch.object(
+            app, "_tracked_lingarr_media_sync", return_value=True
+        ) as sync:
+            self.assertTrue(app._refresh_lingarr_cache_for_missing_work(work, 60))
+
+        sync.assert_called_once_with(True, False, 60)
+        self.assertEqual(
+            app._missing_lingarr_media_counts(work),
+            {"episodes": 2, "movies": 0},
+        )
+
+    def test_failed_missing_media_refresh_preserves_pending_retry(self):
+        client = Mock()
+        client.run_recurring_jobs.return_value = False
+        work = [({"sonarrEpisodeId": 42}, "episodes", "sonarrEpisodeId")]
+
+        with (
+            patch.object(app, "_lingarr_client", return_value=client),
+            patch.object(app, "_status_create_maintenance", return_value="lingarr-sync"),
+            patch.object(app, "_status_complete_maintenance"),
+        ):
+            self.assertFalse(app._refresh_lingarr_cache_for_missing_work(work, 60))
+
+        client.run_recurring_jobs.assert_called_once_with(("SyncShowJob",), 60)
+        self.assertEqual(app._pending_lingarr_sync, {"SyncShowJob"})
+        self.assertFalse(app._media_catalog_ready)
+
+    def test_failed_refresh_degrades_cycle_while_cached_work_continues(self):
+        cached = {"sonarrEpisodeId": 42, "title": "Cached"}
+        missing = {"sonarrEpisodeId": 43, "title": "Missing"}
+        processed = []
+        finished = []
+
+        def process_item(item, item_type, id_field, stats, _lock):
+            if app.lingarr_resolve_media_id(item_type, item[id_field]) is None:
+                stats["deferred"] += 1
+                return
+            processed.append(item[id_field])
+
+        def wanted(item_type):
+            return [cached, missing] if item_type == "episodes" else []
+
+        with app._media_cache_lock:
+            app._episode_cache[42] = 9001
+        with (
+            patch.multiple(
+                app,
+                _status_tracker=None,
+                _pending_repairs={},
+                shutdown_requested=False,
+                lingarr_build_media_cache=lambda: None,
+                lingarr_get_active_translations=lambda: [],
+                fetch_wanted=wanted,
+                process_item=process_item,
+                _run_end_cycle_repair_retries=lambda _stats: None,
+                _run_quarantine_recoveries=lambda _stats: None,
+                _run_regeneration_retries=lambda _stats: None,
+                _take_pending_prune_videos=lambda: {},
+                _drain_lingarr_queue=lambda: True,
+                _reconcile_retry_claims=lambda _state: None,
+                _reconcile_circuit_trial_leases=lambda _state: None,
+                _status_finish_cycle=lambda stats: finished.append(dict(stats)),
+            ),
+            patch.object(app, "_ensure_media_catalog_ready", return_value=True),
+            patch.object(app, "_tracked_lingarr_media_sync", return_value=False) as sync,
+        ):
+            self.assertFalse(app.run_cycle(4))
+
+        sync.assert_called_once_with(True, False, app.SYNC_TIMEOUT)
+        self.assertEqual(processed, [42])
+        self.assertEqual(finished[0]["deferred"], 1)
+        self.assertTrue(finished[0]["degraded"])
+
     def test_request_json_retries_transient_failures_with_bounded_backoff(self):
         response = FakeResponse({"data": []})
         with (

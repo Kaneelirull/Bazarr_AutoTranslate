@@ -568,6 +568,46 @@ def _run_regeneration_retries(stats: dict, submission_budget: int | None=None, r
     del refill_round
     _runtime.RetryQueueProcessor(batch_size=_runtime.RETRY_BATCH_SIZE_PER_CYCLE, run_batch=_runtime._run_regeneration_retry_batch, shutdown_requested=lambda: _runtime.shutdown_requested, emit=print).process(stats, submission_budget=submission_budget, examined_plan_ids=examined_plan_ids, series_admissions=series_admissions)
 
+def _missing_lingarr_media_counts(work: list[tuple]) -> dict[str, int]:
+    missing = {'episodes': 0, 'movies': 0}
+    for item, item_type, id_field in work:
+        item_id = item.get(id_field)
+        if item_id is None or item_type not in missing:
+            continue
+        if _runtime.lingarr_resolve_media_id(item_type, item_id) is None:
+            missing[item_type] += 1
+    return missing
+
+def _refresh_lingarr_cache_for_missing_work(work: list[tuple], timeout: int) -> bool:
+    missing = _missing_lingarr_media_counts(work)
+    had_episodes = missing['episodes'] > 0
+    had_movies = missing['movies'] > 0
+    if not had_episodes and not had_movies:
+        return True
+    print(
+        '[INFO] Lingarr media cache is missing '
+        f"{missing['episodes']} episode(s) and {missing['movies']} movie(s); "
+        'refreshing the affected catalog before translation'
+    )
+    success = _runtime._tracked_lingarr_media_sync(
+        had_episodes, had_movies, timeout
+    )
+    if not success:
+        print(
+            f'{_runtime.YELLOW}[WARNING] Lingarr catalog refresh for missing '
+            f'media did not complete; cached media will continue and unresolved '
+            f'items will be deferred{_runtime.RESET}'
+        )
+        return False
+    remaining = _missing_lingarr_media_counts(work)
+    if remaining['episodes'] or remaining['movies']:
+        print(
+            f'{_runtime.YELLOW}[WARNING] Lingarr catalog refresh completed but '
+            f"{remaining['episodes']} episode(s) and {remaining['movies']} movie(s) "
+            f'remain unavailable{_runtime.RESET}'
+        )
+    return True
+
 def run_cycle(cycle_num: int) -> bool:
     print(f'\n{_runtime.BOLD}{_runtime.CYAN}===== Cycle #{cycle_num} ====={_runtime.RESET}')
     _runtime._status_set_phase('cycle_work')
@@ -599,6 +639,10 @@ def run_cycle(cycle_num: int) -> bool:
             print(f'{_runtime.YELLOW}[WARNING] Deferring {item_type} queue: {exc}{_runtime.RESET}')
             continue
         work.extend(((item, item_type, id_field) for item in wanted))
+    if work and not _refresh_lingarr_cache_for_missing_work(
+        work, _runtime.SYNC_TIMEOUT
+    ):
+        stats['degraded'] = True
     if _runtime._status_tracker is not None:
         cycle_id = f'{int(_runtime.time.time())}-{cycle_num}'
         jobs = _runtime.build_cycle_jobs(work, _runtime.LANGUAGES, cycle_id, _runtime._item_title)
@@ -744,6 +788,7 @@ EXPORTS = {
         '_drain_lingarr_queue', '_run_end_cycle_repair_retries',
         '_run_quarantine_recoveries', '_run_quarantine_recovery_job',
         '_run_regeneration_retry_batch', '_run_regeneration_retries',
-        'run_cycle',
+        '_missing_lingarr_media_counts',
+        '_refresh_lingarr_cache_for_missing_work', 'run_cycle',
     )
 }
