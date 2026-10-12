@@ -50,6 +50,35 @@ class CircuitsRepositoryMixin:
         now: float | None = None,
     ) -> dict:
         """Atomically close or release the half-open trial linked to a retry."""
+        trial = self.circuit_trial_for_retry_plan(retry_plan_id)
+        if trial is None:
+            return {"settled": False, "reason": "no matching half-open trial"}
+        return self.settle_circuit_trial(
+            series_key=trial["seriesKey"],
+            trial_owner=trial["trialOwner"],
+            trial_job_id=trial["trialJobId"],
+            trial_plan_id=retry_plan_id,
+            lease_generation=lease_generation,
+            outcome=outcome,
+            open_cycles=open_cycles,
+            reason=reason,
+            now=now,
+        )
+
+    def settle_circuit_trial(
+        self,
+        *,
+        series_key: str,
+        trial_owner: str | None,
+        trial_job_id: int | None,
+        lease_generation: int,
+        outcome: str,
+        open_cycles: int,
+        trial_plan_id: int | None = None,
+        reason: str | None = None,
+        now: float | None = None,
+    ) -> dict:
+        """Settle an exactly identified half-open trial, with or without a retry plan."""
         if outcome not in {"success", "failure", "deferred"}:
             raise ValueError(f"unsupported circuit trial outcome: {outcome}")
         timestamp = time.time() if now is None else float(now)
@@ -57,14 +86,20 @@ class CircuitsRepositoryMixin:
             row = db.execute(
                 """
                 SELECT * FROM circuit_breakers
-                WHERE state='half_open' AND trial_plan_id=?
+                WHERE state='half_open' AND series_key=?
                 """,
-                (int(retry_plan_id),),
+                (str(series_key),),
             ).fetchone()
             if row is None:
                 return {"settled": False, "reason": "no matching half-open trial"}
             if int(row["lease_generation"] or 0) != int(lease_generation):
                 return {"settled": False, "reason": "stale circuit trial generation"}
+            if (
+                row["trial_owner"] != trial_owner
+                or row["trial_job_id"] != trial_job_id
+                or row["trial_plan_id"] != trial_plan_id
+            ):
+                return {"settled": False, "reason": "circuit trial identity changed"}
 
             if outcome == "success":
                 state = "closed"
@@ -88,7 +123,8 @@ class CircuitsRepositoryMixin:
                     trial_lease_state=NULL, trial_plan_id=NULL,
                     lease_expires_at=NULL, last_reason=?, updated_at=?
                 WHERE series_key=? AND state='half_open'
-                  AND trial_plan_id=? AND lease_generation=?
+                  AND trial_owner IS ? AND trial_job_id IS ?
+                  AND trial_plan_id IS ? AND lease_generation=?
                 """,
                 (
                     failures,
@@ -98,7 +134,9 @@ class CircuitsRepositoryMixin:
                     None if outcome == "success" else str(reason or outcome)[:500],
                     timestamp,
                     row["series_key"],
-                    int(retry_plan_id),
+                    trial_owner,
+                    trial_job_id,
+                    trial_plan_id,
                     int(lease_generation),
                 ),
             )
@@ -383,8 +421,7 @@ class CircuitsRepositoryMixin:
                     and row["trial_owner"] == str(trial_owner)
                     and trial_job_id is not None
                     and row["trial_job_id"] == int(trial_job_id)
-                    and trial_plan_id is not None
-                    and row["trial_plan_id"] == int(trial_plan_id)
+                    and row["trial_plan_id"] == trial_plan_id
                     and lease_generation is not None
                     and int(row["lease_generation"] or 0) == int(lease_generation)
                 )

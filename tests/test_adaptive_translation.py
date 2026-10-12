@@ -388,8 +388,74 @@ class AdaptiveTranslationTests(unittest.TestCase):
             self.assertEqual(stats["deferred"], 1)
             self.assertEqual(
                 [call.kwargs["claim"] for call in state.circuit_permission.call_args_list],
-                [False, False, False],
+                [False, False, True],
             )
+
+    def test_eligible_normal_queue_item_claims_half_open_trial_and_submits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "movie.mkv"
+            source = root / "movie.en.srt"
+            video.write_bytes(b"video")
+            source.write_text("1\n00:00:01,000 --> 00:00:02,000\nEnglish\n", encoding="utf-8")
+            item = {
+                "sonarrEpisodeId": 7,
+                "sonarrSeriesId": 42,
+                "seriesTitle": "Top Gear",
+                "missing_subtitles": [{"code2": "et"}],
+            }
+            state = Mock()
+            state.publication_for_target.return_value = None
+            state.active_retry_plan.return_value = None
+            state.bind_circuit_trial_job.return_value = True
+            state.circuit_permission.side_effect = [
+                {"allowed": True, "state": "eligible", "failures": 3},
+                {"allowed": True, "state": "eligible", "failures": 3},
+                {"allowed": True, "state": "half_open", "failures": 3,
+                 "trialOwner": "attempt:1", "leaseGeneration": 4},
+            ]
+            submit = Mock(return_value=99)
+            stats = defaultdict(int)
+            stats["translations"] = []
+            timing = {"cueCount": 1, "secondsPerCue": 1.8, "sampleCount": 0,
+                      "scope": "cold_start", "estimatedSeconds": 2,
+                      "timeoutSeconds": 60, "lane": "short"}
+            with patch.multiple(
+                app,
+                LANGUAGES=["en", "et"], CLEANUP_UNDERSIZED_ENABLED=False,
+                fetch_subtitles=lambda *_args: (str(video), [{"code2": "en", "path": str(source), "forced": False}]),
+                lingarr_resolve_media_id=lambda *_args: 99,
+                lingarr_get_active_translations=lambda: [],
+                lingarr_submit_file=submit,
+                lingarr_poll_job=lambda *_args, **_kwargs: "Failed",
+                lingarr_get_job=lambda *_args: {"status": "Failed"},
+                _recover_failed_lingarr_job=lambda *_args, **_kwargs: {"recovered": False},
+                _get_validation_state=lambda: state,
+                _cycle_quarantine_suppression=lambda *_args: None,
+                _check_cooldown=lambda *_args: None,
+                _count_dialogue_lines=lambda _path: 1,
+                _estimate_timeout=lambda *_args: timing,
+                _record_submission=lambda *_args, **_kwargs: 1,
+                _mark_submission_submitted=Mock(),
+                _mark_submission_failed=Mock(),
+                _refresh_status_diagnostics=Mock(),
+                _file_lane_gate=app.FileLaneGate(2),
+                _translation_capacity=app.TranslationCapacityGate(2),
+            ):
+                app.process_item(item, "episodes", "sonarrEpisodeId", stats, threading.Lock())
+
+            submit.assert_called_once()
+            state.bind_circuit_trial_job.assert_called_once_with(
+                "sonarr:42", "attempt:1", 99, trial_plan_id=None, lease_generation=4,
+            )
+            self.assertEqual(
+                [call.kwargs["claim"] for call in state.circuit_permission.call_args_list],
+                [False, False, True],
+            )
+            outcome = state.record_circuit_outcome.call_args.kwargs
+            self.assertIsNone(outcome["trial_plan_id"])
+            self.assertEqual(outcome["lease_generation"], 4)
+
 
     def test_failed_job_recovery_preserves_source_structure_and_repairs_gap(self):
         source = (

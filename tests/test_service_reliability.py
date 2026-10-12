@@ -839,6 +839,117 @@ class ServiceReliabilityTests(unittest.TestCase):
         )
         return state, plan, completed
 
+    def _bound_normal_circuit(self):
+        state = app._validation_state
+        opened = state.record_circuit_outcome(
+            series_key="sonarr:1", series_title="Top Gear", success=False,
+            reason="service failure", threshold=1, open_cycles=1,
+            config_fingerprint=app._CIRCUIT_CONFIG_FINGERPRINT,
+        )
+        completed = state.advance_completed_cycle()
+        trial = state.circuit_permission(
+            series_key="sonarr:1", series_title="Top Gear",
+            config_fingerprint=app._CIRCUIT_CONFIG_FINGERPRINT,
+            trial_owner="attempt:1",
+        )
+        state.bind_circuit_trial_job(
+            "sonarr:1", "attempt:1", 99,
+            lease_generation=trial["leaseGeneration"],
+        )
+        return state, opened, trial, completed
+
+    def test_normal_trial_output_deferral_preserves_failure_count(self):
+        state, opened, trial, _ = self._bound_normal_circuit()
+
+        app._defer_bound_retry_trial(
+            None, True, trial["leaseGeneration"], "managed file ownership failed",
+            series_key="sonarr:1", trial_owner="attempt:1", trial_job_id=99,
+        )
+
+        circuit = state.circuit_breakers()[0]
+        self.assertEqual(circuit["state"], "open")
+        self.assertEqual(circuit["failures"], opened["failures"])
+        self.assertEqual(circuit["completedCyclesRemaining"], app.CIRCUIT_OPEN_CYCLES)
+
+    def test_normal_trial_async_repair_success_closes_circuit(self):
+        state, _opened, trial, _ = self._bound_normal_circuit()
+        future = app.Future()
+        future.set_result(app.RepairJobResult(
+            "repaired", SimpleNamespace(issues=[]), "Top Gear", "et",
+            "episodes", 42, target_path="show.et.srt",
+        ))
+        metadata = {
+            "retry_plan_id": None, "trial_generation": trial["leaseGeneration"],
+            "trial_owner": "attempt:1", "trial_job_id": 99,
+            "trial_plan_id": None, "series_key": "sonarr:1",
+            "series_title": "Top Gear", "status_lock": threading.Lock(),
+        }
+        with (
+            patch.object(app, "_resolve_retry_success", return_value=False),
+            patch.object(app, "_complete_repair_status"),
+            patch.object(app, "_scan_child_finished"),
+            patch.object(app, "_refresh_status_diagnostics"),
+        ):
+            app._publish_repair_status(future, metadata)
+
+        self.assertEqual(state.circuit_breakers(), [])
+
+    def test_restart_reconciliation_bounds_normal_trial_terminal_states(self):
+        state, opened, trial, _ = self._bound_normal_circuit()
+        with patch.object(app, "lingarr_get_job", return_value={"status": "Failed"}):
+            self.assertEqual(app._reconcile_circuit_trial_leases(state), 1)
+        failed = state.circuit_breakers()[0]
+        self.assertEqual(failed["state"], "open")
+        self.assertEqual(failed["failures"], opened["failures"] + 1)
+
+        for _ in range(app.CIRCUIT_OPEN_CYCLES):
+            state.advance_completed_cycle()
+        next_trial = state.circuit_permission(
+            series_key="sonarr:1", series_title="Top Gear",
+            config_fingerprint=app._CIRCUIT_CONFIG_FINGERPRINT,
+            trial_owner="attempt:2",
+        )
+        state.bind_circuit_trial_job(
+            "sonarr:1", "attempt:2", 100,
+            lease_generation=next_trial["leaseGeneration"],
+        )
+        with patch.object(app, "lingarr_get_job", return_value={"status": "Completed"}):
+            self.assertEqual(app._reconcile_circuit_trial_leases(state), 1)
+        pending = state.circuit_breakers()[0]
+        self.assertEqual(pending["state"], "open")
+        self.assertEqual(pending["failures"], failed["failures"])
+        self.assertIsNone(pending["trialJobId"])
+
+    def test_restart_reconciliation_retains_normal_trial_with_durable_repair(self):
+        root = Path(self._state_directory.name)
+        source = root / "show.en.srt"
+        target = root / "show.et.srt"
+        source.write_text("source", encoding="utf-8")
+        target.write_text("target", encoding="utf-8")
+        state, _opened, trial, _ = self._bound_normal_circuit()
+        repair_id = state.enqueue_repair_job(
+            dedupe_key="normal-restart-owned", item_type="episodes", item_id=42,
+            target_language="et", source_path=source, target_path=target,
+            source_hash=app._file_hash_or_none(source),
+            target_hash=app._file_hash_or_none(target),
+            payload={
+                "seriesKey": "sonarr:1", "retryPlanId": None,
+                "trialOwner": "attempt:1", "trialJobId": 99,
+                "trialPlanId": None,
+                "trialGeneration": trial["leaseGeneration"],
+            },
+        )
+        state.transition_repair_job(
+            repair_id, "persisted_for_restart", expected_states=("queued",),
+        )
+
+        with patch.object(app, "lingarr_get_job", return_value={"status": "Completed"}):
+            self.assertEqual(app._reconcile_circuit_trial_leases(state), 1)
+
+        circuit = state.circuit_breakers()[0]
+        self.assertEqual(circuit["state"], "half_open")
+        self.assertEqual(circuit["trialState"], "validation_pending")
+
     def test_reconciliation_closes_accepted_validation_pending_trial(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1184,6 +1295,35 @@ class ServiceReliabilityTests(unittest.TestCase):
             self.assertEqual(retry["state"], "regeneration_waiting")
             self.assertEqual(retry["lastDeferralClass"], "repair_deferred")
             self.assertEqual(state.circuit_breakers()[0]["state"], "open")
+
+    def test_preworker_normal_repair_deferral_releases_trial(self):
+        state, opened, trial, _ = self._bound_normal_circuit()
+        report = SimpleNamespace(repairable_cue_indexes=[0], issues=[])
+        job_kwargs = {
+            "retry_plan_id": None,
+            "trial_generation": trial["leaseGeneration"],
+            "trial_owner": "attempt:1",
+            "trial_job_id": 99,
+            "trial_plan_id": None,
+            "series_key": "sonarr:1",
+            "expected_source_hash": "source",
+            "target_lang": "et",
+        }
+        with (
+            patch.object(app, "_repair_capacity", threading.BoundedSemaphore(0)),
+            patch.object(app, "_status_create_repair_ref", return_value={}),
+            patch.object(app, "_status_ref_complete"),
+            patch.object(app, "_get_validation_state", return_value=state),
+            patch.object(app, "_refresh_status_diagnostics"),
+        ):
+            self.assertEqual(
+                app._queue_repair(("normal-queue-full",), job_kwargs, report, "Top Gear", "et"),
+                "repair-deferred",
+            )
+
+        circuit = state.circuit_breakers()[0]
+        self.assertEqual(circuit["state"], "open")
+        self.assertEqual(circuit["failures"], opened["failures"])
 
     def test_restart_changed_repair_inputs_reschedule_and_release_trial(self):
         with tempfile.TemporaryDirectory() as directory:

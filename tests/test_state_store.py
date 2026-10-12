@@ -1107,6 +1107,80 @@ class StateStoreTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_normal_half_open_trial_settles_without_retry_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(Path(directory))
+            try:
+                opened = store.record_circuit_outcome(
+                    series_key="sonarr:1", series_title="Top Gear",
+                    success=False, reason="service failure", threshold=1,
+                    open_cycles=1, config_fingerprint="config",
+                )
+                store.advance_completed_cycle()
+                trial = store.circuit_permission(
+                    series_key="sonarr:1", series_title="Top Gear",
+                    config_fingerprint="config", trial_owner="attempt:7",
+                )
+                self.assertTrue(store.bind_circuit_trial_job(
+                    "sonarr:1", "attempt:7", 99,
+                    lease_generation=trial["leaseGeneration"],
+                ))
+
+                stale = store.settle_circuit_trial(
+                    series_key="sonarr:1", trial_owner="attempt:other",
+                    trial_job_id=99, trial_plan_id=None,
+                    lease_generation=trial["leaseGeneration"],
+                    outcome="success", open_cycles=1,
+                )
+                self.assertFalse(stale["settled"])
+                self.assertEqual(store.circuit_breakers()[0]["state"], "half_open")
+
+                for wrong_job, wrong_generation in (
+                    (100, trial["leaseGeneration"]),
+                    (99, trial["leaseGeneration"] + 1),
+                ):
+                    stale = store.settle_circuit_trial(
+                        series_key="sonarr:1", trial_owner="attempt:7",
+                        trial_job_id=wrong_job, trial_plan_id=None,
+                        lease_generation=wrong_generation,
+                        outcome="success", open_cycles=1,
+                    )
+                    self.assertFalse(stale["settled"])
+                    self.assertEqual(store.circuit_breakers()[0]["state"], "half_open")
+
+                deferred = store.settle_circuit_trial(
+                    series_key="sonarr:1", trial_owner="attempt:7",
+                    trial_job_id=99, trial_plan_id=None,
+                    lease_generation=trial["leaseGeneration"],
+                    outcome="deferred", open_cycles=2,
+                    reason="validation deferred",
+                )
+                self.assertTrue(deferred["settled"])
+                self.assertEqual(deferred["failures"], opened["failures"])
+                self.assertEqual(deferred["eligibleAfterCycle"], 3)
+
+                store.advance_completed_cycle()
+                store.advance_completed_cycle()
+                retry = store.circuit_permission(
+                    series_key="sonarr:1", series_title="Top Gear",
+                    config_fingerprint="config", trial_owner="attempt:8",
+                )
+                self.assertTrue(store.bind_circuit_trial_job(
+                    "sonarr:1", "attempt:8", 100,
+                    lease_generation=retry["leaseGeneration"],
+                ))
+                accepted = store.record_circuit_outcome(
+                    series_key="sonarr:1", series_title="Top Gear",
+                    success=True, reason=None, threshold=1, open_cycles=1,
+                    config_fingerprint="config", trial_owner="attempt:8",
+                    trial_job_id=100, trial_plan_id=None,
+                    lease_generation=retry["leaseGeneration"],
+                )
+                self.assertEqual(accepted["state"], "closed")
+                self.assertEqual(store.circuit_breakers(), [])
+            finally:
+                store.close()
+
     def test_deferred_retry_trial_reopens_without_counting_another_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(Path(directory))

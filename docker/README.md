@@ -186,7 +186,11 @@ Failed Lingarr jobs are inspected for positioned line results. Valid completed
 lines are retained and unresolved cues are retried individually instead of
 resubmitting the complete episode. Three consecutive failures open a persisted
 per-series circuit. It remains blocked for three healthy completed cycles, then
-allows exactly one half-open trial. Interrupted and degraded cycles do not count.
+allows exactly one half-open trial from either normal wanted work or a durable
+retry. Interrupted and degraded cycles do not count. The trial remains
+single-flight through Lingarr submission and validation or repair; success
+closes the circuit, failure reopens it, and an infrastructure deferral preserves
+the failure count before another bounded wait.
 
 The dashboard shows learned cue speed, estimates, ETA, lanes, and circuit
 state. The **Logs** link opens a searchable, sanitized, read-only view of

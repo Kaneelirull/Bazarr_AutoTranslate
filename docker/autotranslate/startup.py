@@ -26,6 +26,28 @@ def _reconcile_retry_claims(state_store: _runtime.StateStore) -> int:
             print(f"{_runtime.YELLOW}[RETRY] Could not reconcile claim {plan.get('id')}: {exc}{_runtime.RESET}")
     return reconciled
 
+
+def _settle_normal_circuit_trial(
+    state_store: _runtime.StateStore,
+    identity: dict,
+    outcome: str,
+    reason: str | None = None,
+) -> bool:
+    """Settle a persisted half-open trial that is not linked to a retry plan."""
+    if identity.get('trialPlanId') is not None or identity.get('trialGeneration') is None:
+        return False
+    state_store.settle_circuit_trial(
+        series_key=identity.get('seriesKey'),
+        trial_owner=identity.get('trialOwner'),
+        trial_job_id=identity.get('trialJobId'),
+        trial_plan_id=None,
+        lease_generation=identity.get('trialGeneration'),
+        outcome=outcome,
+        open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+        reason=reason,
+    )
+    return True
+
 def _reconcile_circuit_trial_leases(state_store: _runtime.StateStore) -> int:
     reconciled = 0
     for lease in state_store.circuit_trial_leases():
@@ -74,7 +96,11 @@ def _reconcile_circuit_trial_leases(state_store: _runtime.StateStore) -> int:
                         reason=f'recovered terminal trial: {job_status}',
                     )
                 else:
-                    state_store.record_circuit_outcome(series_key=lease['seriesKey'], series_title=lease['seriesTitle'], success=False, reason=f'recovered terminal trial: {job_status}', threshold=_runtime.CIRCUIT_FAILURE_THRESHOLD, open_cycles=_runtime.CIRCUIT_OPEN_CYCLES, config_fingerprint=_runtime._CIRCUIT_CONFIG_FINGERPRINT, trial_owner=lease.get('trialOwner'), trial_job_id=lease.get('trialJobId'), trial_plan_id=lease.get('trialPlanId'), lease_generation=lease.get('leaseGeneration'))
+                    _settle_normal_circuit_trial(state_store, {
+                        'seriesKey': lease.get('seriesKey'), 'trialOwner': lease.get('trialOwner'),
+                        'trialJobId': lease.get('trialJobId'), 'trialPlanId': None,
+                        'trialGeneration': lease.get('leaseGeneration'),
+                    }, 'failure', f'recovered terminal trial: {job_status}')
                 reconciled += 1
             elif job_status == 'Completed':
                 # A completed Lingarr job is not circuit success by itself.  Once
@@ -87,6 +113,17 @@ def _reconcile_circuit_trial_leases(state_store: _runtime.StateStore) -> int:
                         outcome='deferred', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
                         reason='completed retry output awaits a fresh validation trial',
                     )
+                elif plan_id is None and not state_store.has_durable_repair_for_circuit_trial(
+                    series_key=lease['seriesKey'],
+                    trial_owner=lease.get('trialOwner'),
+                    trial_job_id=lease.get('trialJobId'),
+                    lease_generation=lease['leaseGeneration'],
+                ):
+                    _settle_normal_circuit_trial(state_store, {
+                        'seriesKey': lease.get('seriesKey'), 'trialOwner': lease.get('trialOwner'),
+                        'trialJobId': lease.get('trialJobId'), 'trialPlanId': None,
+                        'trialGeneration': lease.get('leaseGeneration'),
+                    }, 'deferred', 'completed trial output awaits fresh validation')
                 else:
                     state_store.mark_circuit_trial_validation_pending(lease['seriesKey'], lease['trialOwner'])
                 reconciled += 1
@@ -100,7 +137,11 @@ def _reconcile_circuit_trial_leases(state_store: _runtime.StateStore) -> int:
                             reason='expired bound trial job could not be resolved',
                         )
                     else:
-                        state_store.release_circuit_trial(lease['seriesKey'], lease['trialOwner'], 'expired bound trial job could not be resolved')
+                        _settle_normal_circuit_trial(state_store, {
+                            'seriesKey': lease.get('seriesKey'), 'trialOwner': lease.get('trialOwner'),
+                            'trialJobId': lease.get('trialJobId'), 'trialPlanId': None,
+                            'trialGeneration': lease.get('leaseGeneration'),
+                        }, 'deferred', 'expired bound trial job could not be resolved')
                     reconciled += 1
         except Exception as exc:
             print(f"{_runtime.YELLOW}[CIRCUIT] Could not reconcile trial {lease.get('seriesKey')}: {exc}{_runtime.RESET}")
@@ -123,11 +164,18 @@ def _requeue_persisted_repairs(state_store: _runtime.StateStore) -> int:
             continue
         retry_plan_id = payload.get('retryPlanId')
         trial_generation = payload.get('trialGeneration')
+        normal_trial = {
+            'seriesKey': payload.get('seriesKey'), 'trialOwner': payload.get('trialOwner'),
+            'trialJobId': payload.get('trialJobId'), 'trialPlanId': payload.get('trialPlanId'),
+            'trialGeneration': trial_generation,
+        }
         if not source_path or not target_path or _runtime._file_hash_or_none(source_path) != job.get('sourceHash') or (_runtime._file_hash_or_none(target_path) != job.get('targetHash')):
             state_store.transition_repair_job(job['id'], 'failed', error_code='repair_inputs_changed', expected_states=('persisted_for_restart',))
             if retry_plan_id is not None and trial_generation is not None:
                 state_store.reschedule_retry_no_progress(retry_plan_id, completed_cycle=_runtime._completed_cycle, deferral_class='repair_inputs_changed', reason='durable repair inputs changed during restart', delay_cycles=1, lease_generation=trial_generation)
                 state_store.settle_circuit_trial_for_retry(retry_plan_id, lease_generation=trial_generation, outcome='deferred', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES, reason='durable repair inputs changed during restart')
+            else:
+                _settle_normal_circuit_trial(state_store, normal_trial, 'deferred', 'durable repair inputs changed during restart')
             continue
         action, _report = _runtime._validate_translated_file(source_path, target_path, payload.get('sourceLanguage') or 'en', job['targetLanguage'], job.get('itemId'), title=payload.get('title') or _runtime.os.path.basename(target_path), defer_repair=True, item_type=job.get('itemType'), origin=payload.get('origin') or 'recovered_repair', provenance_source_hash=job.get('sourceHash'), series_key=payload.get('seriesKey'), series_title=payload.get('seriesTitle'), retry_plan_id=payload.get('retryPlanId'), trial_owner=payload.get('trialOwner'), trial_job_id=payload.get('trialJobId'), trial_plan_id=payload.get('trialPlanId'), trial_generation=payload.get('trialGeneration'))
         if action == 'repair-queued':
@@ -145,15 +193,23 @@ def _requeue_persisted_repairs(state_store: _runtime.StateStore) -> int:
                     )
                 elif action in ('quarantined', 'deleted'):
                     state_store.settle_circuit_trial_for_retry(retry_plan_id, lease_generation=trial_generation, outcome='failure', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES, reason=f'restarted repair finished with {action}')
+            elif action in ('valid', 'valid-warning', 'formatted'):
+                _settle_normal_circuit_trial(state_store, normal_trial, 'success')
+            else:
+                _settle_normal_circuit_trial(state_store, normal_trial, 'failure', f'restarted repair finished with {action}')
         elif action == 'repair-deferred':
             if retry_plan_id is not None and trial_generation is not None:
                 state_store.reschedule_retry_no_progress(retry_plan_id, completed_cycle=_runtime._completed_cycle, deferral_class='repair_deferred', reason='restarted repair deferred', delay_cycles=1, lease_generation=trial_generation)
                 state_store.settle_circuit_trial_for_retry(retry_plan_id, lease_generation=trial_generation, outcome='deferred', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES, reason='restarted repair deferred')
+            else:
+                _settle_normal_circuit_trial(state_store, normal_trial, 'deferred', 'restarted repair deferred')
         else:
             state_store.transition_repair_job(job['id'], 'failed', error_code=str(action), expected_states=('persisted_for_restart',))
             if retry_plan_id is not None and trial_generation is not None:
                 state_store.reschedule_retry_no_progress(retry_plan_id, completed_cycle=_runtime._completed_cycle, deferral_class='repair_deferred', reason=f'restarted repair finished with {action}', delay_cycles=1, lease_generation=trial_generation)
                 state_store.settle_circuit_trial_for_retry(retry_plan_id, lease_generation=trial_generation, outcome='deferred', open_cycles=_runtime.CIRCUIT_OPEN_CYCLES, reason=f'restarted repair finished with {action}')
+            else:
+                _settle_normal_circuit_trial(state_store, normal_trial, 'deferred', f'restarted repair finished with {action}')
     return queued
 
 
