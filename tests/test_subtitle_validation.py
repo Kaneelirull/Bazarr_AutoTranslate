@@ -9,7 +9,7 @@ import threading
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +72,53 @@ def make_timed_srt(cue_count: int, final_second: int, text: str = "Dialogue line
 
 
 class SubtitleValidationTests(unittest.TestCase):
+    def test_formatting_only_source_cues_accept_empty_aligned_targets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "episode.en.srt"
+            target = root / "episode.et.srt"
+            source.write_text(
+                "1\n00:00:01,000 --> 00:00:01,900\n{\\an8}\n\n"
+                "2\n00:00:02,000 --> 00:00:02,900\n<i></i>\n\n"
+                "3\n00:00:03,000 --> 00:00:03,900\n{\\pos(100,200)}\\N\n",
+                encoding="utf-8",
+            )
+            target.write_text(
+                "1\n00:00:01,000 --> 00:00:01,900\n\n"
+                "2\n00:00:02,000 --> 00:00:02,900\n\n"
+                "3\n00:00:03,000 --> 00:00:03,900\n",
+                encoding="utf-8",
+            )
+
+            report = self.validate_pair(source, target)
+
+            self.assertTrue(report.valid, report.summary())
+            self.assertEqual(
+                [observation.classification for observation in report.observations],
+                ["formatting_only", "formatting_only", "formatting_only"],
+            )
+            translator = Mock(side_effect=AssertionError("AI must not be called"))
+            repaired = repair_subtitle_file(
+                source, target, self.detector, self.estonian, translator,
+                target_lang="et", min_chars=1,
+            )
+            self.assertTrue(repaired.success)
+            translator.assert_not_called()
+
+    def test_empty_target_remains_mandatory_for_visible_or_malformed_source(self):
+        cases = (
+            "{\\an8}Visible dialogue", "{minutes}", "{\\unknown123}",
+            '<font onclick="alert">', "♪", "30", "",
+        )
+        for source_text in cases:
+            with self.subTest(source=source_text):
+                issues = cleanup.validate_cue_pair(
+                    SubtitleCue(1, "00:00:01,000 --> 00:00:01,900", [source_text]),
+                    SubtitleCue(1, "00:00:01,000 --> 00:00:01,900", []),
+                    cue_index=0, target_lang="et",
+                )
+                self.assertEqual({issue.rule for issue in issues}, {"empty_target"})
+
     def test_shameless_wrong_language_fixture_reproduces_sw_validation_failure(self):
         fixture_root = REPO_ROOT / "examples" / "LanguageValidationFailure" / "Shameless-S09E12"
         detector = build_detector()

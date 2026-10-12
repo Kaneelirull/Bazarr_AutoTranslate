@@ -165,6 +165,8 @@ CPU-heavy maintenance analysis uses a bounded process pool so Python validation 
 
 Source-anchored format recovery also restores numeric-only source cues that Lingarr omitted when every remaining cue number and timestamp aligns in order. The original numeric text and markup are copied unchanged without an AI call; missing dialogue or ambiguous alignment still fails closed.
 
+Aligned source cues that contain only recognized SRT/HTML formatting or ASS override controls (for example `{\\an8}`) may retain an empty target cue. They are recorded as non-blocking formatting observations rather than missing dialogue; an empty target aligned to any visible source content remains a mandatory validation failure.
+
 ## Translation status dashboard
 
 ### Adaptive timing and long files
