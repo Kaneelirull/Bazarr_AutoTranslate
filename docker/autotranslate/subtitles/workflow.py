@@ -1183,6 +1183,29 @@ def _publish_repair_status(future: _runtime.Future, metadata: dict) -> None:
                 metadata['bookkeeping_published'] = bookkeeping_succeeded
 
 
+def _settle_normal_repair_trial(metadata: dict, outcome: str, reason: str | None = None) -> bool:
+    """Settle a repair-owned half-open trial that has no durable retry plan."""
+    if metadata.get('retry_plan_id') is not None or metadata.get('trial_generation') is None:
+        return False
+    try:
+        settled = _runtime._get_validation_state().settle_circuit_trial(
+            series_key=metadata.get('series_key'),
+            trial_owner=metadata.get('trial_owner'),
+            trial_job_id=metadata.get('trial_job_id'),
+            trial_plan_id=None,
+            lease_generation=metadata.get('trial_generation'),
+            outcome=outcome,
+            open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+            reason=reason,
+        )
+        if not settled.get('settled'):
+            print(f"{_runtime.YELLOW}[CIRCUIT] Normal repair trial was not settled: {settled.get('reason')}{_runtime.RESET}")
+        _runtime._refresh_status_diagnostics()
+    except (_runtime.StateStoreError, TypeError, ValueError) as exc:
+        print(f'{_runtime.YELLOW}[CIRCUIT] Could not settle normal repair trial: {exc}{_runtime.RESET}')
+    return True
+
+
 def _publish_repair_status_once(future: _runtime.Future, metadata: dict) -> None:
     """Perform durable and diagnostic repair completion bookkeeping once."""
     try:
@@ -1214,6 +1237,8 @@ def _publish_repair_status_once(future: _runtime.Future, metadata: dict) -> None
                 _runtime._refresh_status_diagnostics()
             except _runtime.StateStoreError as exc:
                 print(f'{_runtime.YELLOW}[CIRCUIT] Could not release failed repair trial: {exc}{_runtime.RESET}')
+        else:
+            _settle_normal_repair_trial(metadata, 'deferred', 'repair worker failed')
         return
     durable_job_id = metadata.get('durable_job_id')
     if durable_job_id is not None:
@@ -1250,7 +1275,9 @@ def _publish_repair_status_once(future: _runtime.Future, metadata: dict) -> None
             outcome='accepted_after_donor_recovery' if result.donor_source_attempt is not None else 'accepted_after_retry',
             lease_generation=trial_generation,
         )
-        if retry_plan_id is None or trial_generation is None:
+        if retry_plan_id is None and trial_generation is not None:
+            _settle_normal_repair_trial(metadata, 'success')
+        elif retry_plan_id is None or trial_generation is None:
             series_key = metadata.get('series_key')
             series_title = metadata.get('series_title')
             if series_key and series_title:
@@ -1288,6 +1315,8 @@ def _publish_repair_status_once(future: _runtime.Future, metadata: dict) -> None
                         open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
                         reason=None if result.action == 'repaired' else f'invalid subtitle {result.action}',
                     )
+                elif retry_plan_id is None and trial_generation is not None:
+                    _settle_normal_repair_trial(metadata, 'failure', f'invalid subtitle {result.action}')
                 elif retry_plan_id is None and trial_generation is None:
                     _runtime._get_validation_state().record_circuit_outcome(series_key=series_key, series_title=series_title, success=result.action == 'repaired', reason=None if result.action == 'repaired' else f'invalid subtitle {result.action}', threshold=_runtime.CIRCUIT_FAILURE_THRESHOLD, open_cycles=_runtime.CIRCUIT_OPEN_CYCLES, config_fingerprint=_runtime._CIRCUIT_CONFIG_FINGERPRINT)
                 _runtime._refresh_status_diagnostics()
@@ -1310,6 +1339,8 @@ def _publish_repair_status_once(future: _runtime.Future, metadata: dict) -> None
                 _runtime._refresh_status_diagnostics()
             except _runtime.StateStoreError as exc:
                 print(f'{_runtime.YELLOW}[CIRCUIT] Could not release deferred repair trial: {exc}{_runtime.RESET}')
+        else:
+            _settle_normal_repair_trial(metadata, 'deferred', 'repair deferred')
     else:
         retry_plan_id = metadata.get('retry_plan_id')
         trial_generation = metadata.get('trial_generation')
@@ -1330,6 +1361,8 @@ def _publish_repair_status_once(future: _runtime.Future, metadata: dict) -> None
                 _runtime._refresh_status_diagnostics()
             except _runtime.StateStoreError as exc:
                 print(f'{_runtime.YELLOW}[CIRCUIT] Could not release failed repair trial: {exc}{_runtime.RESET}')
+        else:
+            _settle_normal_repair_trial(metadata, 'deferred', f'repair finished with {result.action}')
 
 def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, target_lang: str) -> str:
     with _runtime._pending_repairs_lock:
@@ -1344,7 +1377,7 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
             }
             def persist_adoption(existing: dict) -> bool:
                 durable_job_id = existing.get('durable_job_id')
-                if durable_job_id is None or coordination['retry_plan_id'] is None or coordination['trial_generation'] is None:
+                if durable_job_id is None or coordination['trial_generation'] is None:
                     return True
                 try:
                     return _runtime._get_validation_state().update_repair_job_coordination(
@@ -1406,8 +1439,10 @@ def _queue_repair(repair_key: tuple, job_kwargs: dict, report, label: str, targe
 def _defer_linked_repair_trial(job_kwargs: dict, reason: str) -> bool:
     retry_plan_id = job_kwargs.get('retry_plan_id')
     trial_generation = job_kwargs.get('trial_generation')
-    if retry_plan_id is None or trial_generation is None:
+    if trial_generation is None:
         return False
+    if retry_plan_id is None:
+        return _settle_normal_repair_trial(job_kwargs, 'deferred', reason)
     try:
         state = _runtime._get_validation_state()
         rescheduled = state.reschedule_retry_no_progress(

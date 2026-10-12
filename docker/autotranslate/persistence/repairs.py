@@ -147,8 +147,39 @@ class RepairsRepositoryMixin:
                 return True
         return False
 
+    def has_durable_repair_for_circuit_trial(
+        self,
+        *,
+        series_key: str,
+        trial_owner: str | None,
+        trial_job_id: int | None,
+        lease_generation: int,
+    ) -> bool:
+        """Return whether durable repair work owns an unplanned circuit trial."""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT payload_json FROM repair_jobs
+                WHERE state IN ('queued', 'active', 'persisted_for_restart')
+                """
+            ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if (
+                payload.get("retryPlanId") is None
+                and payload.get("seriesKey") == series_key
+                and payload.get("trialOwner") == trial_owner
+                and payload.get("trialJobId") == trial_job_id
+                and payload.get("trialGeneration") == int(lease_generation)
+            ):
+                return True
+        return False
+
     def update_repair_job_coordination(
-        self, job_id: int, *, retry_plan_id: int, trial_owner: str | None,
+        self, job_id: int, *, retry_plan_id: int | None, trial_owner: str | None,
         trial_job_id: int | None, trial_plan_id: int | None,
         trial_generation: int,
     ) -> bool:
@@ -164,7 +195,7 @@ class RepairsRepositoryMixin:
             except (TypeError, ValueError):
                 payload = {}
             payload.update({
-                "retryPlanId": int(retry_plan_id),
+                "retryPlanId": int(retry_plan_id) if retry_plan_id is not None else None,
                 "trialOwner": trial_owner,
                 "trialJobId": trial_job_id,
                 "trialPlanId": trial_plan_id,

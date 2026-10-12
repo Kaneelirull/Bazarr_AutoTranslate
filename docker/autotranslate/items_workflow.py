@@ -61,11 +61,35 @@ def _resolve_existing_retry_success(
         print(f'{_runtime.YELLOW}[CIRCUIT] Could not settle validated on-disk retry trial: {exc}{_runtime.RESET}')
     return resolved
 
-def _defer_bound_retry_trial(retry_plan: dict | None, trial_claimed: bool, trial_generation: int | None, reason: str) -> None:
-    if retry_plan is None or not trial_claimed or trial_generation is None:
+def _defer_bound_retry_trial(
+    retry_plan: dict | None,
+    trial_claimed: bool,
+    trial_generation: int | None,
+    reason: str,
+    *,
+    series_key: str | None = None,
+    trial_owner: str | None = None,
+    trial_job_id: int | None = None,
+) -> None:
+    if not trial_claimed or trial_generation is None:
         return
     try:
         state = _runtime._get_validation_state()
+        if retry_plan is None:
+            if series_key is None or trial_owner is None or trial_job_id is None:
+                return
+            state.settle_circuit_trial(
+                series_key=series_key,
+                trial_owner=trial_owner,
+                trial_job_id=trial_job_id,
+                trial_plan_id=None,
+                lease_generation=trial_generation,
+                outcome='deferred',
+                open_cycles=_runtime.CIRCUIT_OPEN_CYCLES,
+                reason=reason,
+            )
+            _runtime._refresh_status_diagnostics()
+            return
         rescheduled = state.reschedule_retry_no_progress(
             retry_plan['id'], completed_cycle=_runtime._completed_cycle,
             deferral_class='output_deferred', reason=reason, delay_cycles=1,
@@ -676,12 +700,10 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
         trial_generation: int | None = None
         try:
             try:
-                circuit = _runtime._get_validation_state().circuit_permission(series_key=series_key, series_title=series_title, config_fingerprint=_runtime._CIRCUIT_CONFIG_FINGERPRINT, claim=retry_plan is not None, trial_owner=trial_owner)
+                circuit = _runtime._get_validation_state().circuit_permission(series_key=series_key, series_title=series_title, config_fingerprint=_runtime._CIRCUIT_CONFIG_FINGERPRINT, claim=True, trial_owner=trial_owner)
             except _runtime.StateStoreError as exc:
                 print(f'{_runtime.YELLOW}[CIRCUIT] State unavailable for {title}: {exc}{_runtime.RESET}')
                 circuit = {'allowed': True, 'state': 'unknown', 'failures': 0}
-            if circuit.get('state') == 'eligible' and retry_plan is None:
-                circuit = {**circuit, 'allowed': False}
             if not circuit['allowed']:
                 _runtime._mark_submission_failed(attempt_id)
                 eligible_cycle = circuit.get('eligibleAfterCycle')
@@ -839,14 +861,14 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
                 with stats_lock:
                     stats['deferred'] = stats.get('deferred', 0) + 1
                 _runtime._status_transition(item_type, item_id, target_lang, 'deferred', reason='canonical target appeared concurrently')
-                _defer_bound_retry_trial(retry_plan, trial_claimed, trial_generation, 'canonical target appeared concurrently')
+                _defer_bound_retry_trial(retry_plan, trial_claimed, trial_generation, 'canonical target appeared concurrently', series_key=series_key, trial_owner=trial_owner, trial_job_id=job_id)
                 _runtime._shared_capacity.release(shared_token)
                 continue
         if not _runtime._normalize_managed_output(actual_target_path, title):
             with stats_lock:
                 stats['deferred'] = stats.get('deferred', 0) + 1
             _runtime._status_transition(item_type, item_id, target_lang, 'deferred', reason='managed file ownership failed')
-            _defer_bound_retry_trial(retry_plan, trial_claimed, trial_generation, 'managed file ownership failed')
+            _defer_bound_retry_trial(retry_plan, trial_claimed, trial_generation, 'managed file ownership failed', series_key=series_key, trial_owner=trial_owner, trial_job_id=job_id)
             _runtime._shared_capacity.release(shared_token)
             continue
         actual_suffix = _runtime._target_suffix(actual_target_path, target_lang)
@@ -859,7 +881,7 @@ def process_item(item: dict, item_type: str, id_field: str, stats: dict, stats_l
             with stats_lock:
                 stats['deferred'] = stats.get('deferred', 0) + 1
             _runtime._status_transition(item_type, item_id, target_lang, 'deferred', reason='completed output provenance persistence failed')
-            _defer_bound_retry_trial(retry_plan, trial_claimed, trial_generation, 'completed output provenance persistence failed')
+            _defer_bound_retry_trial(retry_plan, trial_claimed, trial_generation, 'completed output provenance persistence failed', series_key=series_key, trial_owner=trial_owner, trial_job_id=job_id)
             _runtime._shared_capacity.release(shared_token)
             continue
         if retry_plan is not None:

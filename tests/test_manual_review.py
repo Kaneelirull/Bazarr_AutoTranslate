@@ -10,6 +10,7 @@ import urllib.request
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +23,7 @@ from autotranslate.manual_review import (  # noqa: E402
     ManualReviewUnavailable,
     RecheckResult,
 )
+from autotranslate.manual_review import runtime as manual_review_runtime  # noqa: E402
 from autotranslate.persistence.common import SCHEMA_VERSION  # noqa: E402
 from autotranslate.persistence.common import StateStoreError  # noqa: E402
 from autotranslate.persistence.state_store import StateStore  # noqa: E402
@@ -36,6 +38,36 @@ def file_hash(path: Path) -> str:
 
 
 class ManualReviewTests(unittest.TestCase):
+    def test_review_evidence_excludes_formatting_only_empty_cue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "episode.en.srt"
+            target = root / "episode.et.srt"
+            source.write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\n{\\an8}\n\n"
+                "2\n00:00:03,000 --> 00:00:04,000\nVisible dialogue\n",
+                encoding="utf-8",
+            )
+            target.write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\n\n"
+                "2\n00:00:03,000 --> 00:00:04,000\n",
+                encoding="utf-8",
+            )
+            with patch.object(
+                manual_review_runtime._runtime, "_validation_kwargs",
+                return_value={"min_chars": 1}, create=True,
+            ), patch.object(
+                manual_review_runtime._runtime, "_get_cleanup_detector",
+                return_value=Mock(), create=True,
+            ):
+                cues = manual_review_runtime._inspect_review_cues(
+                    {"targetLanguage": "et"}, source, target, [],
+                )
+
+            self.assertEqual([cue["cueNumber"] for cue in cues], [2])
+            self.assertEqual(cues[0]["rules"], ["empty_target"])
+            self.assertFalse(cues[0]["canApproveCue"])
+
     def make_store(self, root: Path) -> StateStore:
         return StateStore(root / "state.sqlite3", validator_version="v", config_fingerprint="c")
 

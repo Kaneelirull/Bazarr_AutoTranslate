@@ -113,6 +113,21 @@ SRT_TIMESTAMP_RE = re.compile(
 )
 SRT_INDEX_RE = re.compile(r"^\s*\d+\s*$")
 TAG_RE = re.compile(r"<[^>]+>")
+SRT_FORMAT_TAG_RE = re.compile(
+    r"</?(?:b|i|u|s)>|</?font>|<font(?:\s+(?:color|face|size)=(?:\"[^\"]*\"|'[^']*'|[^\s<>]+))+\s*>",
+    re.IGNORECASE,
+)
+ASS_OVERRIDE_BLOCK_RE = re.compile(r"\{(?:\\[^{}\\]+)+\}")
+ASS_CONTROL_RE = re.compile(r"\\[Nnh]")
+ASS_OVERRIDE_COMMAND_RE = re.compile(r"^(?:[1-4][ac]|[a-z]+)", re.IGNORECASE)
+ASS_OVERRIDE_COMMANDS = frozenset({
+    "a", "alpha", "an", "b", "be", "blur", "bord", "c", "clip",
+    "fad", "fade", "fe", "fn", "fr", "frx", "fry", "frz", "fs",
+    "fscx", "fscy", "fsp", "i", "iclip", "k", "kf", "ko", "kt",
+    "move", "org", "p", "pbo", "pos", "q", "r", "s", "shad", "t",
+    "u", "xbord", "xshad", "ybord", "yshad", "1a", "2a", "3a", "4a",
+    "1c", "2c", "3c", "4c",
+})
 BRACKET_RE = re.compile(r"[\[\]\(\)\{\}]")
 
 # Script profiles per target language (code2)
@@ -186,7 +201,7 @@ def classify_validation_failure(report: "ValidationReport") -> str:
         return "source_problem"
     return "whole_file"
 
-VALIDATOR_VERSION = "source-aware-v8-numeric-cue-recovery"
+VALIDATOR_VERSION = "source-aware-v9-formatting-only-cues"
 
 
 @dataclass
@@ -212,6 +227,29 @@ def cue_text_hashes(cue: SubtitleCue) -> frozenset[str]:
         cue_text_hash(cue),
         hashlib.sha256(legacy_text.encode("utf-8")).hexdigest(),
     ))
+
+
+def is_formatting_only_cue(cue: SubtitleCue) -> bool:
+    """Return whether a cue contains recognized formatting controls and no visible text."""
+    raw = "\n".join(cue.lines).strip()
+    if not raw:
+        return False
+    remaining, html_count = SRT_FORMAT_TAG_RE.subn("", raw)
+    override_count = 0
+
+    def strip_override(match: re.Match) -> str:
+        nonlocal override_count
+        commands = match.group(0)[1:-1].split("\\")[1:]
+        for command in commands:
+            command_match = ASS_OVERRIDE_COMMAND_RE.match(command.strip())
+            if command_match is None or command_match.group(0).lower() not in ASS_OVERRIDE_COMMANDS:
+                return match.group(0)
+        override_count += 1
+        return ""
+
+    remaining = ASS_OVERRIDE_BLOCK_RE.sub(strip_override, remaining)
+    remaining, control_count = ASS_CONTROL_RE.subn("", remaining)
+    return bool(html_count or override_count or control_count) and not remaining.strip()
 
 
 @dataclass(frozen=True)
@@ -1018,6 +1056,15 @@ def _validate_cue_pair_assessed(
         issues.append(ValidationIssue(rule, detail, cue_index, target.number))
 
     if not target_text:
+        if is_formatting_only_cue(source):
+            observation = ValidationObservation(
+                "formatting_only",
+                "Source cue contains formatting controls but no translatable dialogue.",
+                {"emptyTargetAccepted": True},
+                cue_index,
+                target.number,
+            )
+            return issues, observation
         add("empty_target", "translation is empty")
         return issues, observation
 

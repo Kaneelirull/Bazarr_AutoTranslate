@@ -165,6 +165,8 @@ CPU-heavy maintenance analysis uses a bounded process pool so Python validation 
 
 Source-anchored format recovery also restores numeric-only source cues that Lingarr omitted when every remaining cue number and timestamp aligns in order. The original numeric text and markup are copied unchanged without an AI call; missing dialogue or ambiguous alignment still fails closed.
 
+Aligned source cues that contain only recognized SRT/HTML formatting or ASS override controls (for example `{\\an8}`) may retain an empty target cue. They are recorded as non-blocking formatting observations rather than missing dialogue; an empty target aligned to any visible source content remains a mandatory validation failure.
+
 ## Translation status dashboard
 
 ### Adaptive timing and long files
@@ -186,7 +188,11 @@ Failed Lingarr jobs are inspected for positioned line results. Valid completed
 lines are retained and unresolved cues are retried individually instead of
 resubmitting the complete episode. Three consecutive failures open a persisted
 per-series circuit. It remains blocked for three healthy completed cycles, then
-allows exactly one half-open trial. Interrupted and degraded cycles do not count.
+allows exactly one half-open trial from either normal wanted work or a durable
+retry. Interrupted and degraded cycles do not count. The trial remains
+single-flight through Lingarr submission and validation or repair; success
+closes the circuit, failure reopens it, and an infrastructure deferral preserves
+the failure count before another bounded wait.
 
 The dashboard shows learned cue speed, estimates, ETA, lanes, and circuit
 state. The **Logs** link opens a searchable, sanitized, read-only view of
