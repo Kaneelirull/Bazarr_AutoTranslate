@@ -75,6 +75,102 @@ class CueDecisionsRepositoryMixin:
         ]
         return {"revision": int(revision[0]) if revision else 0, "decisions": decisions, "approved": approved}
 
+    def ai_triage_snapshot(
+        self, plan_id: int, source_hash: str | None, candidate_hash: str | None
+    ) -> dict[int, dict]:
+        if not source_hash or not candidate_hash:
+            return {}
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT cue_number,verdict,confidence,reason,model,generated_at
+                   FROM manual_review_ai_suggestions
+                   WHERE retry_plan_id=? AND source_hash=? AND candidate_hash=?""",
+                (int(plan_id), source_hash, candidate_hash),
+            ).fetchall()
+        return {
+            int(row["cue_number"]): {
+                "verdict": row["verdict"],
+                "confidence": float(row["confidence"]),
+                "reason": row["reason"],
+                "model": row["model"],
+                "generated_at": float(row["generated_at"]),
+            }
+            for row in rows
+        }
+
+    def ai_name_confidence_snapshot(self) -> dict[str, dict]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM ai_name_confidences ORDER BY name"
+            ).fetchall()
+        return {str(row["name"]): dict(row) for row in rows}
+
+    def save_ai_triage(
+        self,
+        plan_id: int,
+        expected_updated_at: float,
+        source_hash: str,
+        candidate_hash: str,
+        suggestions: list[dict],
+        names: list[dict],
+        *,
+        request_id: str | None = None,
+        request_fingerprint: str | None = None,
+    ) -> dict:
+        now = time.time()
+        with self._transaction() as db:
+            replay = self._action_replay(
+                db, plan_id, "ai_triage", request_id, request_fingerprint
+            )
+            if replay is not None:
+                return self._retry_plan_dict(replay)
+            row = self._manual_row_for_update(db, plan_id, expected_updated_at)
+            if row["source_hash"] != source_hash or row["failed_output_hash"] != candidate_hash:
+                raise RuntimeError("review files changed")
+            for suggestion in suggestions:
+                db.execute(
+                    """INSERT INTO manual_review_ai_suggestions(
+                           retry_plan_id,cue_number,source_hash,candidate_hash,verdict,
+                           confidence,reason,model,generated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(retry_plan_id,cue_number,source_hash,candidate_hash)
+                       DO UPDATE SET verdict=excluded.verdict,
+                           confidence=excluded.confidence,reason=excluded.reason,
+                           model=excluded.model,generated_at=excluded.generated_at""",
+                    (
+                        plan_id, int(suggestion["cueNumber"]), source_hash,
+                        candidate_hash, suggestion["verdict"],
+                        float(suggestion["confidence"]), suggestion["reason"],
+                        suggestion["model"], now,
+                    ),
+                )
+            for name in names:
+                normalized = normalize_name_phrase(name["name"])
+                if not normalized:
+                    continue
+                db.execute(
+                    """INSERT INTO ai_name_confidences(
+                           name,confidence,reason,model,times_seen,first_seen_at,last_seen_at)
+                       VALUES(?,?,?,?,1,?,?)
+                       ON CONFLICT(name) DO UPDATE SET
+                           confidence=excluded.confidence,
+                           reason=excluded.reason,
+                           model=excluded.model,
+                           times_seen=ai_name_confidences.times_seen+1,
+                           last_seen_at=excluded.last_seen_at""",
+                    (
+                        normalized, float(name["confidence"]), name["reason"],
+                        name["model"], now, now,
+                    ),
+                )
+            self._record_action_request(
+                db, plan_id, "ai_triage", request_id, request_fingerprint, now
+            )
+            updated = db.execute(
+                "SELECT * FROM retry_plans WHERE id=?", (plan_id,)
+            ).fetchone()
+        return self._retry_plan_dict(updated)
+
     def save_cue_decision(self, plan_id: int, expected_updated_at: float, expected_revision: int, *,
                           cue: dict, decision: str, remember_phrase: bool = False,
                           request_id: str | None = None, request_fingerprint: str | None = None) -> dict:
@@ -91,19 +187,29 @@ class CueDecisionsRepositoryMixin:
             current = db.execute("SELECT revision FROM manual_review_decision_scopes WHERE retry_plan_id=?", (plan_id,)).fetchone()
             if (int(current[0]) if current else 0) != int(expected_revision):
                 raise RuntimeError("review decisions changed")
+            ai = db.execute(
+                """SELECT verdict,confidence,model FROM manual_review_ai_suggestions
+                   WHERE retry_plan_id=? AND cue_number=? AND source_hash=? AND candidate_hash=?""",
+                (plan_id, cue["cueNumber"], row["source_hash"], row["failed_output_hash"]),
+            ).fetchone()
             db.execute("""INSERT INTO manual_review_cue_decisions(
                 retry_plan_id,cue_number,timestamp,source_hash,candidate_hash,source_cue_hash,target_cue_hash,
-                findings_json,decision,remember_phrase,source_text,target_text,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                findings_json,decision,remember_phrase,source_text,target_text,created_at,updated_at,
+                ai_verdict,ai_confidence,ai_model)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(retry_plan_id,cue_number) DO UPDATE SET timestamp=excluded.timestamp,
                 source_hash=excluded.source_hash,candidate_hash=excluded.candidate_hash,
                 source_cue_hash=excluded.source_cue_hash,target_cue_hash=excluded.target_cue_hash,
                 findings_json=excluded.findings_json,decision=excluded.decision,
                 remember_phrase=excluded.remember_phrase,source_text=excluded.source_text,
-                target_text=excluded.target_text,updated_at=excluded.updated_at""",
+                target_text=excluded.target_text,updated_at=excluded.updated_at,
+                ai_verdict=excluded.ai_verdict,ai_confidence=excluded.ai_confidence,
+                ai_model=excluded.ai_model""",
                 (plan_id, cue["cueNumber"], cue["timestamp"], row["source_hash"], row["failed_output_hash"],
                  cue["sourceCueHash"], cue["targetCueHash"], json.dumps(cue["rules"], sort_keys=True), decision,
-                 int(bool(remember_phrase)), cue["sourceText"], cue["targetText"], now, now))
+                 int(bool(remember_phrase)), cue["sourceText"], cue["targetText"], now, now,
+                 ai["verdict"] if ai else None, ai["confidence"] if ai else None,
+                 ai["model"] if ai else None))
             db.execute("INSERT INTO manual_review_decision_scopes(retry_plan_id,revision) VALUES(?,1) ON CONFLICT(retry_plan_id) DO UPDATE SET revision=revision+1", (plan_id,))
             db.execute("UPDATE retry_plans SET updated_at=? WHERE id=?", (now, plan_id))
             self._insert_manual_action(db, plan_id, f"{decision}_cue", "pending", "operator_decision",

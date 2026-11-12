@@ -38,10 +38,12 @@ class CueReviewMixin:
         page = min(max(1, int(page)), last_page)
         saved = {int(value['cue_number']): value for value in decision_snapshot['decisions']
                  if value['source_hash'] == source_hash and value['candidate_hash'] == candidate_hash}
+        ai_suggestions = self.repository.ai_triage_snapshot(plan_id, source_hash, candidate_hash)
         for cue in cues:
             decision = saved.get(int(cue['cueNumber']))
             cue['decision'] = decision['decision'] if decision else None
             cue['rememberPhrase'] = bool(decision and decision['rememberPhrase'])
+            cue['ai_triage'] = ai_suggestions.get(int(cue['cueNumber']))
         return {'planId': plan_id, 'expectedUpdatedAt': plan['updatedAt'],
                 'sourceHash': source_hash, 'candidateHash': candidate_hash,
                 'approvalRevision': snapshot['revision'], 'scope': snapshot['scope'],
@@ -68,7 +70,7 @@ class CueReviewMixin:
         if plan is None:
             raise ManualReviewNotFound('review not found')
         action = payload['action']
-        if action not in {'approve_cue', 'retry_cue', 'clear_cue_decision', 'finish_review', 'reopen'}:
+        if action not in {'approve_cue', 'retry_cue', 'clear_cue_decision', 'finish_review', 'reopen', 'ai_triage'}:
             raise ValueError('unsupported cue action')
         request_id = payload.get('requestId')
         request_fingerprint = hashlib.sha256(json.dumps(
@@ -80,7 +82,7 @@ class CueReviewMixin:
             raise self._translate_repository_error(exc) from exc
         if replay is not None:
             outcome = {'approve_cue': 'saved', 'retry_cue': 'saved', 'clear_cue_decision': 'cleared',
-                       'finish_review': 'queued', 'reopen': 'reopened'}[action]
+                       'finish_review': 'queued', 'reopen': 'reopened', 'ai_triage': 'suggested'}[action]
             return (202 if action == 'finish_review' else 200), {'outcome': outcome, 'item': self._public_item(replay)}
         if action == 'reopen':
             try:
@@ -105,6 +107,31 @@ class CueReviewMixin:
             raise ManualReviewConflict('review files are unavailable')
         if self.hash_file(source) != detail['sourceHash'] or self.hash_file(candidate) != detail['candidateHash']:
             raise ManualReviewConflict('review files changed')
+        if action == 'ai_triage':
+            if self.ai_triage_engine is None:
+                from .service import ManualReviewUnavailable
+                raise ManualReviewUnavailable('AI triage unavailable')
+            suggestions, names = self.ai_triage_engine.triage(
+                all_cues, self.repository.name_approval_snapshot(plan)['approvals']
+            )
+            refreshed = self.review_cues(plan_id, 1, 100)
+            for key in ('sourceHash', 'candidateHash', 'decisionRevision', 'expectedUpdatedAt'):
+                if refreshed.get(key) != detail.get(key):
+                    raise ManualReviewConflict('review changed')
+            if self.hash_file(source) != detail['sourceHash'] or self.hash_file(candidate) != detail['candidateHash']:
+                raise ManualReviewConflict('review files changed')
+            try:
+                current = self.repository.save_ai_triage(
+                    plan_id, detail['expectedUpdatedAt'], detail['sourceHash'], detail['candidateHash'],
+                    suggestions, names, request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                )
+            except (LookupError, RuntimeError) as exc:
+                raise self._translate_repository_error(exc) from exc
+            return 200, {
+                'outcome': 'suggested', 'suggestionCount': len(suggestions),
+                'item': self._public_item(current),
+            }
         try:
             if action == 'finish_review':
                 current = self.repository.finish_cue_review(
