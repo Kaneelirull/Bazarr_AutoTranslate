@@ -28,7 +28,7 @@ export function CueReview({ item, disabled, onMutation }: { item: ReviewItem; di
       const body = action === "revoke_name" ? { action, expectedUpdatedAt: data.expectedUpdatedAt, approvalRevision: data.approvalRevision, approvalId }
         : { action, requestId, ...decisionEvidence, ...cueEvidence, ...(action === "approve_cue" ? { rememberPhrase: remember } : {}) };
       const result = await requestJson<{ outcome?: string }>(`/api/manual-reviews/${item.id}/actions`, { method: "POST", headers: { "Content-Type": "application/json", "X-Bazarr-Autotranslate-Action": "manual-review" }, body: JSON.stringify(body) });
-      const message = action === "finish_review" ? "Review finished. Selected cue recovery is queued." : action === "revoke_name" ? "Remembered phrase removed." : action === "clear_cue_decision" ? "Decision cleared." : "Decision saved.";
+      const message = action === "finish_review" ? "Review finished. Selected cue recovery is queued." : action === "ai_triage" ? "AI suggestions are ready for every review cue." : action === "revoke_name" ? "Remembered phrase removed." : action === "clear_cue_decision" ? "Decision cleared." : "Decision saved.";
       onMutation(false, message); setRevision((value) => value + 1); if (result.outcome === "queued") setStale(true);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Decision could not be saved.");
@@ -43,12 +43,13 @@ export function CueReview({ item, disabled, onMutation }: { item: ReviewItem; di
   const copied = cue?.rules?.some((rule) => rule === "copied_source" || rule === "ambiguous_copied_source");
   return <section className="cue-review" aria-label="Cue review workspace" aria-busy={loading || pending}>
     <div className="cue-review-heading"><div><p className="eyebrow">Review cues</p><h3>{item.media?.episodeCode || "Media item"} · {data?.sourceLanguage || "—"} → {data?.targetLanguage || item.targetLanguage || "—"}</h3></div>{Boolean(data?.pagination.total) && <span className="badge badge-warning">Issue {currentPage} of {data?.pagination.total}</span>}</div>
-    <p ref={status} tabIndex={-1} role={error ? "alert" : "status"}>{error || (loading ? "Loading comparison…" : pending ? "Saving decision…" : "Approve the cue, try it again, or leave it undecided.")}</p>
-    <button className="btn btn-sm btn-secondary" type="button" disabled={loading || pending} onClick={() => setRevision((value) => value + 1)}>Refresh evidence</button>
+    <p ref={status} tabIndex={-1} role={error ? "alert" : "status"}>{error || (loading ? "Loading comparison…" : pending ? "Working…" : "Approve the cue, try it again, or leave it undecided.")}</p>
+    <div className="cue-decision-actions"><button className="btn btn-sm btn-secondary" type="button" disabled={loading || pending} onClick={() => setRevision((value) => value + 1)}>Refresh evidence</button><button className="btn btn-sm btn-secondary" type="button" disabled={mutationBlocked || !data?.pagination.total} onClick={() => void act("ai_triage")}>Ask AI for suggestions</button></div>
     {data?.unavailableReason && <p className="review-notice">{data.unavailableReason} Use the file-level recovery actions above.</p>}
     {data?.fileFindings?.map((finding) => <p className="review-notice" key={finding.code}><strong>File needs recovery:</strong> {finding.reason}</p>)}
     {cue && <article className="cue-comparison"><header><h4>Cue {cue.cueNumber}</h4><time>{cue.timestamp}</time></header>
       <ul className="cue-findings">{cue.rules.map((rule) => <li key={rule}><code>{rule}</code></li>)}</ul><p>{cue.reason}</p>
+      {cue.ai_triage && <p className="review-notice"><strong>AI suggests {cue.ai_triage.verdict === "approve" ? "OK to approve" : "try again"}</strong> — {cue.ai_triage.reason} (confidence {cue.ai_triage.confidence.toFixed(2)}, {cue.ai_triage.model})</p>}
       <div className="cue-text-grid"><div><h5>Original ({data.sourceLanguage})</h5><p className="cue-text">{cue.sourceText}</p></div><div><h5>Translation ({data.targetLanguage})</h5><p className="cue-text">{cue.targetText}</p></div></div>
       <details><summary>Adjacent dialogue</summary>{cue.context.map((context) => <div className="cue-text-grid" key={context.cueNumber}><div><strong>Original · cue {context.cueNumber}</strong><p className="cue-text">{context.sourceText}</p></div><div><strong>Translation · cue {context.cueNumber}</strong><p className="cue-text">{context.targetText}</p></div></div>)}</details>
       {copied && <label className="remember-choice"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} disabled={mutationBlocked || cue.decision === "retry"} /> Remember this exact phrase for {data.scope.startsWith("sonarr:") ? "this series" : "this item"} ({data.scope}), {data.sourceLanguage} → {data.targetLanguage}</label>}

@@ -57,8 +57,8 @@ _UNIX_PATH_RE = re.compile(r"(?<!\w)/(?:media|config)/[^\s,;]+")
 _SECRET_RE = re.compile(r"(?i)(api[-_ ]?key|authorization)(\s*[:=]\s*)\S+")
 _SAFE_CODE_RE = re.compile(r"[a-z][a-z0-9_:-]{0,79}")
 _SAFE_ACTIONS = {"recheck", "queue_retry", "dismiss", "bazarr_scan", "approve_name", "revoke_name",
-                 "approve_cue", "retry_cue", "clear_cue_decision", "finish_review", "reopen"}
-_SAFE_OUTCOMES = {"invalid", "resolved", "queued", "dismissed", "pending", "failed", "dispatched", "saved", "cleared", "reopened"}
+                 "approve_cue", "retry_cue", "clear_cue_decision", "finish_review", "reopen", "ai_triage"}
+_SAFE_OUTCOMES = {"invalid", "resolved", "queued", "dismissed", "pending", "failed", "dispatched", "saved", "cleared", "reopened", "suggested"}
 _SAFE_DETAIL_KEYS = {
     "validationResult", "validationMode", "issueRules", "observationCount",
     "sourceAvailable", "targetAvailable", "artifactAvailable", "mediaAvailable",
@@ -161,6 +161,7 @@ class ManualReviewService(CueReviewMixin):
         hash_file: Callable[[Path], str | None] = _hash_file,
         emit: Callable[[str], None] = lambda _message: None,
         inspect_cues=None,
+        ai_triage_engine=None,
     ) -> None:
         self.repository = repository
         roots = [Path(root).resolve(strict=False) for root in managed_roots]
@@ -180,6 +181,7 @@ class ManualReviewService(CueReviewMixin):
         self.hash_file = hash_file
         self.emit = emit
         self.inspect_cues = inspect_cues
+        self.ai_triage_engine = ai_triage_engine
 
     def _default_validation_record(
         self, plan: dict, result: RecheckResult,

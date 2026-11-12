@@ -634,7 +634,7 @@ class ArchitectureUpgradeTests(unittest.TestCase):
                 }
                 self.assertTrue({9, 10, 11, 12, 13, 14, 15, 16, 17}.issubset(versions))
                 self.assertEqual(LATEST_SCHEMA_VERSION, max(versions))
-                self.assertEqual(store._connection.execute("PRAGMA user_version").fetchone()[0], 19)
+                self.assertEqual(store._connection.execute("PRAGMA user_version").fetchone()[0], 20)
                 tables = {
                     row[0] for row in store._connection.execute(
                         "SELECT name FROM sqlite_master WHERE type='table'"

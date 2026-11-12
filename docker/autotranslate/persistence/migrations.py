@@ -671,6 +671,49 @@ class MigrationsRepositoryMixin:
                     ON manual_review_action_requests(retry_plan_id, created_at);
             """)
             self._migration_checkpoint("name_approvals_and_publications")
+            self._execute_migration_script(db, """
+                CREATE TABLE IF NOT EXISTS ai_name_confidences (
+                    name TEXT PRIMARY KEY,
+                    confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+                    reason TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    times_seen INTEGER NOT NULL DEFAULT 1,
+                    first_seen_at REAL NOT NULL,
+                    last_seen_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS manual_review_ai_suggestions (
+                    retry_plan_id INTEGER NOT NULL REFERENCES retry_plans(id) ON DELETE CASCADE,
+                    cue_number INTEGER NOT NULL,
+                    source_hash TEXT NOT NULL,
+                    candidate_hash TEXT NOT NULL,
+                    verdict TEXT NOT NULL CHECK(verdict IN ('approve','retry')),
+                    confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+                    reason TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    generated_at REAL NOT NULL,
+                    PRIMARY KEY(retry_plan_id, cue_number, source_hash, candidate_hash)
+                );
+                CREATE INDEX IF NOT EXISTS idx_manual_review_ai_suggestions_plan
+                    ON manual_review_ai_suggestions(retry_plan_id, generated_at);
+            """)
+            cue_decision_columns = {
+                row[1] for row in self._connection.execute(
+                    "PRAGMA table_info(manual_review_cue_decisions)"
+                ).fetchall()
+            }
+            if "ai_verdict" not in cue_decision_columns:
+                self._connection.execute(
+                    "ALTER TABLE manual_review_cue_decisions ADD COLUMN ai_verdict TEXT"
+                )
+            if "ai_confidence" not in cue_decision_columns:
+                self._connection.execute(
+                    "ALTER TABLE manual_review_cue_decisions ADD COLUMN ai_confidence REAL"
+                )
+            if "ai_model" not in cue_decision_columns:
+                self._connection.execute(
+                    "ALTER TABLE manual_review_cue_decisions ADD COLUMN ai_model TEXT"
+                )
+            self._migration_checkpoint("ai_triage_suggestions")
             migration_names = {
                 9: "maintenance history and migration ledger",
                 10: "durable repairs and cue recovery",
@@ -683,6 +726,7 @@ class MigrationsRepositoryMixin:
                 17: "incremental parallel maintenance validation cache",
                 18: "durable publication and scoped name approvals",
                 19: "durable manual review cue decisions",
+                20: "AI-assisted manual review suggestions",
             }
             timestamp = time.time()
             for version, name in migration_names.items():

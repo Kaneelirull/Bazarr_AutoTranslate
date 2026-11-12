@@ -147,7 +147,7 @@ class NameApprovalApiTests(unittest.TestCase):
         self.store.close()
         self.store = StateStore(self.root/'state.sqlite3', validator_version='v', config_fingerprint='c')
         self.addCleanup(self.store.close)
-        self.assertEqual(self.store._fetchone('PRAGMA user_version')[0], 19)
+        self.assertEqual(self.store._fetchone('PRAGMA user_version')[0], 20)
         self.assertEqual(self.store.retry_plan(self.plan['id'])['lastDeferralClass'], 'manual_review')
         self.assertEqual(self.store._connection.execute('PRAGMA foreign_key_check').fetchall(), [])
         self.assertEqual(self.store.name_approval_snapshot(self.plan)['revision'], 0)

@@ -293,6 +293,7 @@ def start_status_server(
                 'retry_cue': {'action','requestId','expectedUpdatedAt','decisionRevision','sourceHash','candidateHash','cueNumber','targetCueHash'},
                 'clear_cue_decision': {'action','requestId','expectedUpdatedAt','decisionRevision','sourceHash','candidateHash','cueNumber','targetCueHash'},
                 'finish_review': {'action','requestId','expectedUpdatedAt','decisionRevision','sourceHash','candidateHash'},
+                'ai_triage': {'action','requestId','expectedUpdatedAt','decisionRevision','sourceHash','candidateHash'},
                 'reopen': {'action','requestId','expectedUpdatedAt'},
             }
             if not isinstance(payload, dict) or set(payload) != action_fields.get(str(payload.get('action')), {"action", "expectedUpdatedAt"}):
@@ -303,7 +304,7 @@ def start_status_server(
                 expected = float(payload["expectedUpdatedAt"])
                 if not math.isfinite(expected):
                     raise ValueError("expectedUpdatedAt must be finite")
-                cue_actions = {"approve_cue", "retry_cue", "clear_cue_decision", "finish_review", "reopen"}
+                cue_actions = {"approve_cue", "retry_cue", "clear_cue_decision", "finish_review", "reopen", "ai_triage"}
                 if action not in {"recheck", "queue_retry", "dismiss", "approve_name", "revoke_name", *cue_actions}:
                     raise ValueError("unsupported action")
                 if action in cue_actions:

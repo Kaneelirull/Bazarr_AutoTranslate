@@ -153,6 +153,16 @@ def _resolve_manual_media(_plan: dict, target_path):
 
 
 def build_manual_review_service(state_store) -> ManualReviewService:
+    from .ai_approval import AISettings, AITriageEngine
+
+    ai_engine = AITriageEngine(state_store, AISettings(
+        url=_runtime.OLLAMA_URL,
+        model=_runtime.OLLAMA_MODEL,
+        num_ctx=_runtime.OLLAMA_NUM_CTX,
+        think=_runtime.OLLAMA_THINK,
+        format_retries=_runtime.AI_FORMAT_RETRIES,
+        job_retries=_runtime.AI_JOB_RETRIES,
+    ))
     return ManualReviewService(
         state_store,
         managed_roots=[*_runtime.CLEANUP_ROOTS, state_store.path.parent / 'recovery'],
@@ -169,10 +179,12 @@ def build_manual_review_service(state_store) -> ManualReviewService:
         actions_enabled=_runtime.STATUS_MANUAL_ACTIONS_ENABLED,
         emit=print,
         inspect_cues=_inspect_review_cues,
+        ai_triage_engine=ai_engine,
     )
 
 
 def _inspect_review_cues(plan, source, candidate, pairs):
+    from .policy import APPROVABLE_CUE_RULES
     from ..subtitles.foundation import (
         cue_text_hash, parse_srt_cues, read_text_best_effort,
         target_language_for_code, validate_subtitle_pair,
@@ -197,8 +209,7 @@ def _inspect_review_cues(plan, source, candidate, pairs):
             'sourceCueHash': cue_text_hash(original),
             'targetCueHash': cue_text_hash(translated),
             'rules': sorted({i.rule for i in issues}), 'reason': '; '.join(i.detail for i in issues),
-            'canApproveCue': all(i.rule in {'copied_source','ambiguous_copied_source','unexpected_script',
-                'excessive_lines','cue_too_long','abnormal_expansion','garbage','prompt_marker'} for i in issues),
+            'canApproveCue': all(i.rule in APPROVABLE_CUE_RULES for i in issues),
             'canApproveName': original.number == translated.number and original.timestamp == translated.timestamp
                 and any(i.rule == 'ambiguous_copied_source' for i in issues),
             'context': [{'cueNumber': source_cues[j].number, 'sourceText': '\n'.join(source_cues[j].lines),

@@ -40,6 +40,14 @@ services:
       - LINGARR_URL=${LINGARR_URL:-http://lingarr:8080}
       - LINGARR_API_KEY=${LINGARR_API_KEY:-}
 
+      # Manually triggered, suggestion-only AI triage
+      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+      - OLLAMA_NUM_CTX=${OLLAMA_NUM_CTX:-65536}
+      - OLLAMA_THINK=${OLLAMA_THINK:-true}
+      - AI_FORMAT_RETRIES=${AI_FORMAT_RETRIES:-3}
+      - AI_JOB_RETRIES=${AI_JOB_RETRIES:-3}
+
       # Timing
       - PARALLEL_TRANSLATES=${PARALLEL_TRANSLATES:-1}
       - MAINTENANCE_WORKERS=${MAINTENANCE_WORKERS:-4}
@@ -131,6 +139,9 @@ services:
 
     ports:
       - "${STATUS_PORT:-8765}:${STATUS_PORT:-8765}"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     logging:
       driver: local

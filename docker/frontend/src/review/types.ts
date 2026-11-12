@@ -4,6 +4,7 @@ export type ReviewCue = {
   cueNumber: number; timestamp: string; sourceText: string; targetText: string;
   sourceCueHash: string; targetCueHash: string; reason: string; rules: string[]; canApproveName: boolean; canApproveCue: boolean;
   decision?: "approve" | "retry" | null; rememberPhrase?: boolean;
+  ai_triage?: { verdict: "approve" | "retry"; confidence: number; reason: string; model: string; generated_at: number } | null;
   context: Array<{ cueNumber: number; sourceText: string; targetText: string }>;
 };
 export type CueReviewPayload = {

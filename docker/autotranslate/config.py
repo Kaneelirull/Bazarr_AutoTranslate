@@ -142,6 +142,12 @@ class Config:
     status_recent_limit: int
     display_timezone: str
     debug: bool
+    ollama_url: str
+    ollama_model: str
+    ollama_num_ctx: int
+    ollama_think: bool
+    ai_format_retries: int
+    ai_job_retries: int
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Config":
@@ -257,4 +263,10 @@ class Config:
             status_recent_limit=_integer(env, "STATUS_RECENT_LIMIT", 20, 1),
             display_timezone=env.get("TZ", "UTC").strip() or "UTC",
             debug=_boolean(env, "DEBUG", False),
+            ollama_url=_url(env.get("OLLAMA_URL", "http://localhost:11434")),
+            ollama_model=env.get("OLLAMA_MODEL", "qwen2.5:7b-instruct").strip() or "qwen2.5:7b-instruct",
+            ollama_num_ctx=_integer(env, "OLLAMA_NUM_CTX", 65536, 1024),
+            ollama_think=_boolean(env, "OLLAMA_THINK", True),
+            ai_format_retries=_integer(env, "AI_FORMAT_RETRIES", 3, 0),
+            ai_job_retries=_integer(env, "AI_JOB_RETRIES", 3, 0),
         )
